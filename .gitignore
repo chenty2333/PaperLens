@@ -1,0 +1,64 @@
+# Logs and diagnostics
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Local secrets and machine-specific config
+.env
+.env.*
+!.env.example
+*.local
+*.pem
+*.key
+*.p8
+*.p12
+*.mobileprovision
+
+# JavaScript / frontend
+node_modules/
+dist/
+dist-ssr/
+
+# Python
+.venv/
+.python_deps/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.pyright/
+.coverage
+htmlcov/
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Build artifacts and packaged sidecars
+build/
+tmp/
+src-tauri/target/
+src-tauri/binaries/
+*.spec
+
+# PaperLens generated libraries and reports
+/.paperlens/
+/papers/
+/PaperLens.md
+/PaperLens.json
+/PaperLens_Library.md
+/PaperLens_Library.json
+
+# OS and editor files
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

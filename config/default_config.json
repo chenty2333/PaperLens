@@ -1,0 +1,46 @@
+{
+  "provider": {
+    "kind": "none",
+    "api_key_env": "PAPERLENS_API_KEY",
+    "timeout_seconds": 120,
+    "max_retries": 5
+  },
+  "budget": {
+    "max_usd": 10.0,
+    "warn_at_ratio": 0.8,
+    "input_token_usd_per_million": 0.75,
+    "cached_input_token_usd_per_million": 0.075,
+    "output_token_usd_per_million": 4.5
+  },
+  "concurrency": 1,
+  "render_zoom": 1.5,
+  "visual_detail": "high",
+  "visual_verification_mode": "parse_issues",
+  "visual_verification_max_pages": 6,
+  "visual_pages_per_call": 1,
+  "offline_debug": false,
+  "output_language": "zh",
+  "topic": null,
+  "idea": null,
+  "trace_include_sensitive_data": false,
+  "keyword_pool": [
+    "novel",
+    "state-of-the-art",
+    "benchmark",
+    "ablation",
+    "dataset",
+    "architecture",
+    "algorithm",
+    "evaluation",
+    "limitation",
+    "reproducible",
+    "open source",
+    "theory",
+    "scaling",
+    "efficiency",
+    "robustness",
+    "safety",
+    "survey",
+    "system"
+  ]
+}
