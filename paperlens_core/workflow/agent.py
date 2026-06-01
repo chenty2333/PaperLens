@@ -5120,6 +5120,8 @@ def write_final_report_bundle(
         skim = skim_by_id.get(paper.paper_id)
         decision = decision_by_id.get(paper.paper_id)
         card = card_by_id.get(paper.paper_id)
+        report_name = paper_report_filename(paper)
+        report_path = output_dir / "papers" / report_name
         layout = load_layout_index(data_dir, paper.paper_id)
         paper_memory_v3 = memory_store.initialize(
             paper=paper,
@@ -5130,6 +5132,23 @@ def write_final_report_bundle(
             source="export_prepare",
             prefer_existing=True,
         )
+        if should_reuse_existing_report(report_path):
+            existing_markdown = report_path.read_text(encoding="utf-8")
+            written.append(report_path)
+            paper_report_rows.append(
+                {
+                    "paper": paper,
+                    "skim": skim,
+                    "decision": decision,
+                    "card": card,
+                    "report_name": report_name,
+                    "report_title": markdown_title(existing_markdown) or paper.canonical_title,
+                    "paper_memory_v3": paper_memory_v3,
+                    "model_report": None,
+                    "report_audit": None,
+                }
+            )
+            continue
         paper_memory_for_prompt = memory_v3_prompt_view(paper_memory_v3)
         model_report = None
         report_audit = None
@@ -5205,8 +5224,6 @@ def write_final_report_bundle(
                 source="export_report_audit",
             )
         written.append(write_paper_memory_v3_file(data_dir, paper_memory_v3))
-        report_name = paper_report_filename(paper)
-        report_path = output_dir / "papers" / report_name
         report_markdown = render_paper_report(
             paper=paper,
             skim=skim,
@@ -5266,6 +5283,12 @@ def report_generation_must_succeed() -> bool:
     if explicit is not None:
         return explicit == "1"
     return os.getenv("PAPERLENS_ALLOW_LLM_FALLBACK", "0") != "1"
+
+
+def should_reuse_existing_report(report_path: Path) -> bool:
+    if os.getenv("PAPERLENS_OVERWRITE_REPORTS", "0") == "1":
+        return False
+    return report_path.exists() and report_path.stat().st_size > 0
 
 
 def final_report_audit_acceptable(report_audit: dict[str, Any] | None) -> bool:

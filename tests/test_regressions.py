@@ -2395,6 +2395,62 @@ def test_report_composer_repairs_only_the_failed_section(tmp_path):
     assert not any("final_paper_report_repair" in str(run) for run in agent_runs)
 
 
+def test_export_reuses_existing_paper_report_on_resume(tmp_path):
+    output_dir = tmp_path / "out"
+    data_dir = output_dir / ".paperlens" / "data"
+    for relative in [
+        "papers",
+        ".paperlens/data",
+    ]:
+        (output_dir / relative).mkdir(parents=True, exist_ok=True)
+    existing_report = output_dir / "papers" / "p_test_test_paper.md"
+    existing_report.write_text("# Test Paper\n\n已经完成的报告。", encoding="utf-8")
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+    )
+    decision = ClassificationDecision(
+        paper_id="p_test",
+        class_label="A",
+        confidence=0.9,
+        false_negative_risk=0.1,
+    )
+
+    class FakeClient:
+        config = SimpleNamespace(kind="openai-compatible", model="fake-model")
+
+        def invoke_json(self, **_kwargs):
+            raise AssertionError("existing reports must not be regenerated during resume")
+
+    agent_runs: list[dict[str, object]] = []
+    written = write_final_report_bundle(
+        output_dir=output_dir,
+        data_dir=data_dir,
+        evidence_dir=output_dir / ".paperlens",
+        client=FakeClient(),
+        record_usage=lambda _stage, _usage: None,
+        record_agent_run=agent_runs.append,
+        stage="stage_15_export",
+        papers=[paper],
+        skim_cards=[],
+        decisions=[decision],
+        paper_cards=[],
+        review_items=[],
+        budget={},
+        config={"offline_debug": False},
+        topic=None,
+        idea=None,
+        cache_dir=output_dir / ".paperlens" / "cache",
+    )
+
+    assert existing_report in written
+    assert (output_dir / "PaperLens.md").exists()
+    assert existing_report.read_text(encoding="utf-8") == "# Test Paper\n\n已经完成的报告。"
+    assert agent_runs == []
+
+
 def test_paper_question_answer_uses_cache(tmp_path, monkeypatch):
     output_dir = tmp_path / "out"
     (output_dir / "papers").mkdir(parents=True)
