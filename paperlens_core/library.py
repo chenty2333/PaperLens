@@ -14,7 +14,8 @@ from paperlens_core.memory_v3 import read_paper_memory_v3
 
 APP_NAME = "PaperLens"
 INTERNAL_DIRNAME = ".paperlens"
-MEMORY_SCHEMA_VERSION = "paper_memory.v2"
+LIBRARY_RECORD_SCHEMA_VERSION = "paperlens.library_record.v1"
+LIBRARY_RECORD_FILENAME = "library_records.jsonl"
 SEARCH_INDEX_SCHEMA_VERSION = "paperlens_search_index.v1"
 LIBRARY_ASK_PROMPT_VERSION = "library-ask-v3"
 
@@ -46,7 +47,7 @@ SEARCH_QUERY_EXPANSIONS: dict[str, tuple[str, ...]] = {
 
 LIBRARY_ASK_SYSTEM_PROMPT = """
 You answer questions over the user's local PaperLens paper memory library.
-Use the supplied paper_memory records first, especially PaperMemoryV3 claim/evidence provenance when present.
+Use the supplied library records first, especially PaperMemoryV3 claim/evidence provenance when present.
 Distinguish paper facts from cross-paper synthesis,
 PaperLens inferences, and background knowledge in source_attribution. If the local library does not
 contain enough evidence, say so plainly and record the limitation.
@@ -103,48 +104,53 @@ def write_paperlens_library(
     topic: str | None,
     idea: str | None,
 ) -> list[Path]:
-    records = [build_paper_memory_record(row) for row in rows]
+    records = [build_library_record(row) for row in rows]
     return write_library_records(output_dir=output_dir, records=records, topic=topic, idea=idea)
 
 
 def rebuild_library_from_output(output_dir: Path) -> list[Path]:
     data_dir = paperlens_data_dir(output_dir)
-    payload = read_json(data_dir / "papers.json")
-    papers = list_payload(payload.get("papers"))
-    skim_by_id = by_paper_id(payload.get("skim_cards"))
-    decision_by_id = by_paper_id(payload.get("classifications"))
-    card_by_id = by_paper_id(payload.get("paper_cards"))
-    report_by_id = by_paper_id(payload.get("paper_reports"))
     rows: list[dict[str, Any]] = []
-    for paper in papers:
-        paper_id = string_or_empty(paper.get("paper_id"))
+    for memory_path in sorted((data_dir / "memory" / "v3").glob("*.paper_memory.v3.json")):
+        paper_id = memory_path.name.split(".", 1)[0]
+        memory = read_paper_memory_v3(output_dir, paper_id)
         if not paper_id:
             continue
-        report_info = report_by_id.get(paper_id, {})
-        report_path = string_or_empty(report_info.get("path"))
+        metadata = dict_value(memory.get("metadata"))
+        reading_context = dict_value(memory.get("reading_context"))
+        report_path = first_existing_report(output_dir, paper_id)
         report_text = ""
         if report_path:
             path = output_dir / report_path
             if path.exists():
                 report_text = path.read_text(encoding="utf-8")
+        paper = {
+            "paper_id": paper_id,
+            "canonical_title": metadata.get("title") or paper_id,
+            "file_hash": metadata.get("pdf_sha256"),
+            "file_path": metadata.get("original_path"),
+            "page_count": metadata.get("pages"),
+            "venue": metadata.get("venue"),
+            "year": metadata.get("year"),
+            "doi": metadata.get("doi"),
+            "arxiv_id": metadata.get("arxiv_id"),
+        }
         rows.append(
             {
                 "paper": paper,
-                "skim": skim_by_id.get(paper_id),
-                "decision": decision_by_id.get(paper_id),
-                "card": card_by_id.get(paper_id),
-                "paper_memory_v3": read_paper_memory_v3(output_dir, paper_id),
+                "decision": {"paper_id": paper_id, "class_label": reading_context.get("grade")},
+                "paper_memory_v3": memory,
                 "report_name": Path(report_path).name if report_path else f"{paper_id}.md",
                 "report_title": markdown_title(report_text) or paper.get("canonical_title") or paper_id,
                 "model_report": {},
-                "report_audit": report_info.get("report_audit") or {},
+                "report_audit": dict_value(dict_value(memory.get("audit_trail")).get("report_audit")),
             }
         )
     return write_paperlens_library(
         output_dir=output_dir,
         rows=rows,
-        topic=string_or_none(payload.get("topic")),
-        idea=string_or_none(payload.get("idea")),
+        topic=None,
+        idea=None,
     )
 
 
@@ -160,15 +166,15 @@ def write_library_records(
     root.mkdir(parents=True, exist_ok=True)
     index_root.mkdir(parents=True, exist_ok=True)
 
-    memory_path = root / "paper_memory.jsonl"
-    memory_text = "".join(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n" for record in records)
-    memory_path.write_text(memory_text, encoding="utf-8")
+    records_path = root / LIBRARY_RECORD_FILENAME
+    records_text = "".join(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n" for record in records)
+    records_path.write_text(records_text, encoding="utf-8")
 
     search_index = build_search_index(records)
     index_path = index_root / "search_index.json"
     index_path.write_text(json.dumps(search_index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    return [memory_path, index_path]
+    return [records_path, index_path]
 
 
 def rebuild_library_index(output_dir: Path) -> Path:
@@ -179,10 +185,10 @@ def rebuild_library_index(output_dir: Path) -> Path:
 
 
 def doctor_library(output_dir: Path) -> dict[str, Any]:
-    memory_path = library_dir(output_dir) / "paper_memory.jsonl"
+    records_path = library_dir(output_dir) / LIBRARY_RECORD_FILENAME
     index_path = library_dir(output_dir) / "index" / "search_index.json"
     records = read_library_records(output_dir)
-    raw_lines = memory_path.read_text(encoding="utf-8").splitlines() if memory_path.exists() else []
+    raw_lines = records_path.read_text(encoding="utf-8").splitlines() if records_path.exists() else []
     unsupported_versions = []
     duplicate_ids = []
     record_issues: dict[str, list[str]] = {}
@@ -197,7 +203,7 @@ def doctor_library(output_dir: Path) -> dict[str, Any]:
             unsupported_versions.append("non-object")
             continue
         version = value.get("schema_version")
-        if version != MEMORY_SCHEMA_VERSION:
+        if version != LIBRARY_RECORD_SCHEMA_VERSION:
             unsupported_versions.append(str(version or "missing"))
         paper_id = value.get("paper_id")
         if paper_id in seen_ids:
@@ -209,21 +215,21 @@ def doctor_library(output_dir: Path) -> dict[str, Any]:
             record_issues[str(paper_id or "unknown")] = issues
     return {
         "status": "PASS"
-        if memory_path.exists() and not unsupported_versions and not duplicate_ids and not record_issues
+        if records_path.exists() and not unsupported_versions and not duplicate_ids and not record_issues
         else "WARN",
-        "memory_path": str(memory_path),
+        "records_path": str(records_path),
         "index_path": str(index_path),
         "record_count": len(records),
-        "schema_version": MEMORY_SCHEMA_VERSION,
+        "schema_version": LIBRARY_RECORD_SCHEMA_VERSION,
         "unsupported_versions": sorted(set(unsupported_versions)),
         "duplicate_paper_ids": sorted(set(duplicate_ids)),
         "record_issues": record_issues,
         "index_exists": index_path.exists(),
-        "can_rebuild_index": memory_path.exists(),
+        "can_rebuild_index": records_path.exists(),
     }
 
 
-def build_paper_memory_record(row: dict[str, Any]) -> dict[str, Any]:
+def build_library_record(row: dict[str, Any]) -> dict[str, Any]:
     paper = dump_model(row.get("paper"))
     skim = dump_model(row.get("skim"))
     decision = dump_model(row.get("decision"))
@@ -319,7 +325,7 @@ def build_paper_memory_record(row: dict[str, Any]) -> dict[str, Any]:
         "has_core_abstraction": bool(memory["core_idea"]),
     }
     record = {
-        "schema_version": MEMORY_SCHEMA_VERSION,
+        "schema_version": LIBRARY_RECORD_SCHEMA_VERSION,
         "paper_id": paper_id,
         "title": title,
         "grade": grade,
@@ -336,7 +342,7 @@ def build_paper_memory_record(row: dict[str, Any]) -> dict[str, Any]:
         },
         "model_trace": {
             "created_at": now_iso(),
-            "memory_schema": MEMORY_SCHEMA_VERSION,
+            "library_record_schema": LIBRARY_RECORD_SCHEMA_VERSION,
             "paper_memory_v3_schema": v3_memory.get("schema_version"),
             "report_audit_verdict": string_or_none(report_audit.get("verdict")),
         },
@@ -371,7 +377,7 @@ def build_paper_memory_record(row: dict[str, Any]) -> dict[str, Any]:
 def build_search_index(records: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "schema_version": SEARCH_INDEX_SCHEMA_VERSION,
-        "derived_from": MEMORY_SCHEMA_VERSION,
+        "derived_from": LIBRARY_RECORD_SCHEMA_VERSION,
         "generated_at": now_iso(),
         "records": [
             {
@@ -512,7 +518,7 @@ def build_library_ask_prompt(*, question: str, matches: list[dict[str, Any]]) ->
         [
             "question:",
             question,
-            "retrieved_paper_memory_records:",
+            "retrieved_library_records:",
             json.dumps(compact_records, ensure_ascii=False),
             (
                 "Task: answer using the local PaperLens library. Explain which claims come from "
@@ -567,14 +573,14 @@ def search_library_records(
 
 
 def ensure_library_records(output_dir: Path) -> list[dict[str, Any]]:
-    memory_path = library_dir(output_dir) / "paper_memory.jsonl"
-    if not memory_path.exists():
+    records_path = library_dir(output_dir) / LIBRARY_RECORD_FILENAME
+    if not records_path.exists():
         rebuild_library_from_output(output_dir)
     return read_library_records(output_dir)
 
 
 def read_library_records(output_dir: Path) -> list[dict[str, Any]]:
-    path = library_dir(output_dir) / "paper_memory.jsonl"
+    path = library_dir(output_dir) / LIBRARY_RECORD_FILENAME
     if not path.exists():
         return []
     records = []
@@ -585,14 +591,14 @@ def read_library_records(output_dir: Path) -> list[dict[str, Any]]:
             value = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(value, dict) and value.get("schema_version") == MEMORY_SCHEMA_VERSION:
+        if isinstance(value, dict) and value.get("schema_version") == LIBRARY_RECORD_SCHEMA_VERSION:
             records.append(value)
     return records
 
 
 def validate_memory_record(record: dict[str, Any]) -> list[str]:
     issues = []
-    if record.get("schema_version") != MEMORY_SCHEMA_VERSION:
+    if record.get("schema_version") != LIBRARY_RECORD_SCHEMA_VERSION:
         issues.append("unsupported_schema_version")
     for key in ["paper_id", "title", "grade", "memory", "provenance", "outputs", "quality"]:
         if key not in record:
@@ -720,6 +726,17 @@ def paperlens_data_dir(output_dir: Path) -> Path:
     return output_dir / INTERNAL_DIRNAME / "data"
 
 
+def first_existing_report(output_dir: Path, paper_id: str) -> str:
+    papers_dir = output_dir / "papers"
+    if not papers_dir.exists():
+        return ""
+    exact = papers_dir / f"{paper_id}.md"
+    if exact.exists():
+        return f"papers/{exact.name}"
+    matches = sorted(papers_dir.glob(f"{paper_id}_*.md"))
+    return f"papers/{matches[0].name}" if matches else ""
+
+
 def dump_model(value: Any) -> dict[str, Any]:
     if value is None:
         return {}
@@ -737,15 +754,6 @@ def dict_value(value: Any) -> dict[str, Any]:
 
 def list_payload(value: Any) -> list[dict[str, Any]]:
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
-
-
-def by_paper_id(value: Any) -> dict[str, dict[str, Any]]:
-    result = {}
-    for item in list_payload(value):
-        paper_id = string_or_empty(item.get("paper_id"))
-        if paper_id:
-            result[paper_id] = item
-    return result
 
 
 def normalize_concepts(value: Any) -> list[dict[str, str]]:
@@ -1012,7 +1020,7 @@ def compact_compare_text(value: str) -> str:
 
 
 def read_recommendation(grade: str) -> str:
-    return {"A": "精读", "B": "选读", "C": "跳过", "HOLD": "人工确认"}.get(grade, "人工确认")
+    return {"A": "重点关注", "B": "标准读", "C": "低优先级", "HOLD": "需确认"}.get(grade, "需确认")
 
 
 def markdown_title(text: str) -> str | None:

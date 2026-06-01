@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import html
 import hashlib
 import json
@@ -26,8 +25,7 @@ from paperlens_core.memory_v3 import (
     list_payload,
     memory_v3_prompt_view,
     safe_int,
-    write_memory_v3_indexes,
-    write_paper_memory_v3_bundle,
+    write_paper_memory_v3_file,
 )
 from paperlens_core.memory_store import (
     MEMORY_PATCH_SET_SCHEMA,
@@ -35,7 +33,7 @@ from paperlens_core.memory_store import (
     normalize_memory_patch_set,
 )
 from paperlens_core.pdf.ingest import scan_pdfs
-from paperlens_core.pdf.layout_index import build_layout_index, write_layout_summary_csv
+from paperlens_core.pdf.layout_index import build_layout_index
 from paperlens_core.pdf.pymupdf_parser import parse_pdf
 from paperlens_core.pdf.qa import parse_quality
 from paperlens_core.runtime import PaperLensRuntime, context_pack_prompt
@@ -49,58 +47,14 @@ from paperlens_core.schemas import (
     SkimCard,
 )
 from paperlens_core.state import transition_state
+from paperlens_core.workflow.stages import (
+    WORKFLOW_STAGE_ORDER,
+    normalize_workflow_stage,
+    resolve_workflow_stages,
+)
 
 
-PIPELINE_STAGE_ORDER = [
-    "stage_00_ingest",
-    "stage_01_parse",
-    "stage_02_parse_verify",
-    "stage_03_skim",
-    "stage_04_classify",
-    "stage_05_classification_audit",
-    "stage_06_queue",
-    "stage_07_normal_read",
-    "stage_08_evidence_verify",
-    "stage_15_export",
-    "stage_17_manifest",
-]
-
-PIPELINE_STAGE_ALIASES = {
-    "stage_03_global_skim": "stage_03_skim",
-    "stage_08_evidence_audit": "stage_08_evidence_verify",
-    "stage_15_export_reports": "stage_15_export",
-    "stage_17_export_manifest": "stage_17_manifest",
-}
-
-
-def normalize_pipeline_stage(stage: str | None) -> str | None:
-    if stage is None:
-        return None
-    normalized = PIPELINE_STAGE_ALIASES.get(stage, stage)
-    if normalized not in PIPELINE_STAGE_ORDER:
-        raise ValueError(
-            f"Unknown pipeline stage '{stage}'. Available stages: {', '.join(PIPELINE_STAGE_ORDER)}"
-        )
-    return normalized
-
-
-def resolve_pipeline_stages(
-    *,
-    from_stage: str | None = None,
-    only_stage: str | None = None,
-) -> list[str]:
-    from_stage = normalize_pipeline_stage(from_stage)
-    only_stage = normalize_pipeline_stage(only_stage)
-    if from_stage and only_stage:
-        raise ValueError("--from-stage and --only-stage cannot be used together")
-    if only_stage:
-        return [only_stage]
-    if from_stage:
-        return PIPELINE_STAGE_ORDER[PIPELINE_STAGE_ORDER.index(from_stage) :]
-    return list(PIPELINE_STAGE_ORDER)
-
-
-class SimplePipeline:
+class PaperLensWorkflow:
     def __init__(
         self,
         *,
@@ -119,7 +73,6 @@ class SimplePipeline:
         self.data_dir = self.internal_dir / "data"
         self.cache_dir = Path(os.getenv("PAPERLENS_CACHE_DIR", str(self.internal_dir / "cache")))
         self.evidence_dir = self.internal_dir
-        self.paper_reports_dir = output_dir / "papers"
         self.db = ArtifactDb(self.internal_dir / "state.sqlite")
         self.papers: list[PaperRecord] = []
         self.skim_cards: list[SkimCard] = []
@@ -136,7 +89,7 @@ class SimplePipeline:
         only_stage: str | None = None,
     ) -> dict[str, Any]:
         self.prepare_output()
-        selected_stages = resolve_pipeline_stages(from_stage=from_stage, only_stage=only_stage)
+        selected_stages = resolve_workflow_stages(from_stage=from_stage, only_stage=only_stage)
         provider = describe_provider(self.config.provider)
         self.events.emit(
             "run_started",
@@ -156,14 +109,11 @@ class SimplePipeline:
                 "stage_00_ingest": self.stage_00_ingest,
                 "stage_01_parse": self.stage_01_parse,
                 "stage_02_parse_verify": self.stage_02_parse_verify,
-                "stage_03_skim": self.stage_03_global_skim,
-                "stage_04_classify": self.stage_04_classify,
-                "stage_05_classification_audit": self.stage_05_classification_audit,
-                "stage_06_queue": self.stage_06_reading_queue,
+                "stage_03_skim": self.stage_03_skim,
                 "stage_07_normal_read": self.stage_07_normal_read,
-                "stage_08_evidence_verify": self.stage_08_evidence_audit,
-                "stage_15_export": self.stage_15_export_reports,
-                "stage_17_manifest": self.stage_17_export_manifest,
+                "stage_08_evidence_verify": self.stage_08_evidence_verify,
+                "stage_15_export": self.stage_15_export,
+                "stage_17_manifest": self.stage_17_manifest,
             }
             manifest: dict[str, Any] | None = None
             for stage in selected_stages:
@@ -201,15 +151,15 @@ class SimplePipeline:
             self.db.close()
 
     def load_completed_state_for_stage(self, stage: str) -> None:
-        stage = normalize_pipeline_stage(stage) or stage
-        index = PIPELINE_STAGE_ORDER.index(stage)
-        if index >= PIPELINE_STAGE_ORDER.index("stage_01_parse"):
+        stage = normalize_workflow_stage(stage) or stage
+        index = WORKFLOW_STAGE_ORDER.index(stage)
+        if index >= WORKFLOW_STAGE_ORDER.index("stage_01_parse"):
             self.papers = self.db.list_papers()
-        if index >= PIPELINE_STAGE_ORDER.index("stage_03_skim"):
+        if index >= WORKFLOW_STAGE_ORDER.index("stage_03_skim"):
             self.skim_cards = self.db.list_skim_cards()
-        if index >= PIPELINE_STAGE_ORDER.index("stage_03_skim"):
+        if index >= WORKFLOW_STAGE_ORDER.index("stage_03_skim"):
             self.classifications = self.db.list_classifications()
-        if index >= PIPELINE_STAGE_ORDER.index("stage_07_normal_read"):
+        if index >= WORKFLOW_STAGE_ORDER.index("stage_07_normal_read"):
             self.paper_cards = self.db.list_paper_cards()
         self.validate_loaded_state_for_stage(stage)
         self.events.emit(
@@ -225,16 +175,16 @@ class SimplePipeline:
         )
 
     def validate_loaded_state_for_stage(self, stage: str) -> None:
-        index = PIPELINE_STAGE_ORDER.index(stage)
+        index = WORKFLOW_STAGE_ORDER.index(stage)
         requirements = [
             ("stage_01_parse", self.papers, "paper records"),
-            ("stage_04_classify", self.skim_cards, "skim cards"),
-            ("stage_04_classify", self.classifications, "classifications"),
+            ("stage_07_normal_read", self.skim_cards, "paper maps"),
+            ("stage_07_normal_read", self.classifications, "reading metadata"),
         ]
         missing = [
             name
             for required_stage, values, name in requirements
-            if index >= PIPELINE_STAGE_ORDER.index(required_stage) and not values
+            if index >= WORKFLOW_STAGE_ORDER.index(required_stage) and not values
         ]
         if missing:
             raise RuntimeError(
@@ -247,14 +197,7 @@ class SimplePipeline:
             ".paperlens/pages",
             ".paperlens/figures",
             ".paperlens/data",
-            ".paperlens/data/papers",
             ".paperlens/data/artifacts/layout",
-            ".paperlens/data/cards/skim",
-            ".paperlens/data/cards/paper",
-            ".paperlens/data/cards/claims",
-            ".paperlens/data/matrix",
-            ".paperlens/data/reports",
-            ".paperlens/data/reviews",
             ".paperlens/library",
             ".paperlens/library/index",
             ".paperlens/cache",
@@ -270,7 +213,6 @@ class SimplePipeline:
             self.data_dir / "run.json",
             {"status": "running", "config": self.config.public_dict()},
         )
-        (self.data_dir / "agent_runs.jsonl").touch(exist_ok=True)
 
     def write_failed_run_json(self, *, error: str, stages: list[str]) -> None:
         write_json(
@@ -336,8 +278,6 @@ class SimplePipeline:
             paper.status = "INGESTED"
             self.db.upsert_paper(paper)
             self.mark_paper_state(paper.paper_id, stage)
-        self.write_paper_id_map()
-        self.write_duplicate_report()
         self.events.stage_completed(stage, f"Found {len(self.papers)} PDF files")
 
     def stage_01_parse(self) -> None:
@@ -359,7 +299,6 @@ class SimplePipeline:
 
         completed = 0
         parsed_by_id: dict[str, PaperRecord] = {}
-        layout_summary_rows: list[dict[str, Any]] = []
         max_workers = min(max(1, self.config.concurrency), len(self.papers))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {}
@@ -396,19 +335,6 @@ class SimplePipeline:
                             "layout_index": layout_index,
                             "pages": [artifact.model_dump() for artifact in artifacts],
                         },
-                    )
-                    layout_summary_rows.append(
-                        {
-                            "paper_id": parsed_paper.paper_id,
-                            "sections": len(layout_index["sections"]),
-                            "figures": len(layout_index["figures"]),
-                            "tables": len(layout_index["tables"]),
-                            "captions": len(layout_index["captions"]),
-                            "visual_required_pages": ";".join(
-                                str(page_no) for page_no in layout_index["visual_required_pages"]
-                            ),
-                            "evidence_candidates": len(layout_index["evidence_candidates"]),
-                        }
                     )
                     self.register_file_artifact(
                         layout_path,
@@ -479,12 +405,6 @@ class SimplePipeline:
                         {"paper_id": paper.paper_id},
                     )
         self.papers = [parsed_by_id.get(paper.paper_id, paper) for paper in self.papers]
-        layout_summary_path = self.data_dir / "artifacts" / "layout" / "layout_summary.csv"
-        write_layout_summary_csv(layout_summary_path, layout_summary_rows)
-        self.register_file_artifact(
-            layout_summary_path, paper_id=None, artifact_type="layout_summary"
-        )
-        self.write_paper_id_map()
         self.events.stage_completed(stage, "Parse stage completed")
 
     def stage_02_parse_verify(self) -> None:
@@ -581,11 +501,7 @@ class SimplePipeline:
             if paper.parse_quality in {"OCR_REQUIRED", "VLM_PAGE_MODE"}:
                 side.append("NEED_VISUAL_RECHECK")
             self.mark_paper_state(paper.paper_id, stage, side_statuses=side)
-        if visual_rows:
-            visual_path = self.data_dir / "artifacts" / "layout" / "vlm_page_notes.json"
-            write_json(visual_path, visual_rows)
-            self.register_file_artifact(visual_path, paper_id=None, artifact_type="vlm_page_notes")
-        self.write_paper_id_map()
+        _ = visual_rows
         self.events.stage_completed(stage, "Parse verification completed")
 
     def visual_pages_for_parse_verification(
@@ -698,14 +614,11 @@ class SimplePipeline:
             "risk_notes": raw.data.get("risk_notes"),
         }
 
-    def stage_03_global_skim(self) -> None:
+    def stage_03_skim(self) -> None:
         stage = "stage_03_skim"
         self.checkpoint(stage)
-        llm_enabled = self.llm_enabled()
-        self.events.stage_started(
-            stage,
-            "Generating model skim cards" if llm_enabled else "Generating deterministic skim cards",
-        )
+        llm_enabled = False
+        self.events.stage_started(stage, "Building deterministic paper maps")
         existing_skim_by_id = {
             card.paper_id: card for card in (self.skim_cards or self.db.list_skim_cards())
         }
@@ -832,7 +745,7 @@ class SimplePipeline:
         self.order_skim_classification_state()
         self.events.stage_completed(
             stage,
-            "Global skim completed",
+            "Paper maps completed",
             {
                 "skim_cards": len(self.skim_cards),
                 "classifications": len(self.classifications),
@@ -968,7 +881,6 @@ class SimplePipeline:
         self.db.upsert_skim(card)
         self.db.upsert_classification(decision)
         self.mark_paper_state(paper.paper_id, stage)
-        write_json(self.data_dir / "cards" / "skim" / f"{paper.paper_id}.json", card.model_dump())
 
     def order_skim_classification_state(self) -> None:
         skim_by_id = {card.paper_id: card for card in self.skim_cards}
@@ -981,20 +893,6 @@ class SimplePipeline:
             for paper in self.papers
             if paper.paper_id in decision_by_id
         ]
-
-    def stage_04_classify(self) -> None:
-        stage = "stage_04_classify"
-        self.checkpoint(stage)
-        self.events.stage_started(stage, "Persisting ABC/HOLD classifications")
-        self.apply_review_actions()
-        for decision in self.classifications:
-            self.db.upsert_classification(decision)
-            side = ["HELD"] if decision.class_label == "HOLD" else []
-            if decision.class_label == "C":
-                side.append("SKIPPED_WITH_AUDIT")
-            self.mark_paper_state(decision.paper_id, stage, side_statuses=side)
-        self.write_classification_report()
-        self.events.stage_completed(stage, "Classification completed")
 
     def llm_enabled(self) -> bool:
         if self.config.offline_debug:
@@ -1012,51 +910,8 @@ class SimplePipeline:
             return False
         return not self.config.offline_debug and self.config.provider.kind != "none"
 
-    def apply_review_actions(self) -> None:
-        actions_path = self.data_dir / "reviews" / "review_actions.jsonl"
-        if not actions_path.exists():
-            return
-        latest: dict[str, str] = {}
-        for line in actions_path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                action = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            paper_id = str(action.get("paper_id") or "")
-            command = str(action.get("action") or "").lower()
-            if paper_id and command:
-                latest[paper_id] = command
-        for decision in self.classifications:
-            command = latest.get(decision.paper_id)
-            if not command:
-                continue
-            if command == "hold":
-                decision.class_label = "HOLD"
-                decision.audit_status = "USER_HELD"
-                decision.reason_codes.append("user_hold")
-            elif command == "skip":
-                decision.class_label = "C"
-                decision.audit_status = "USER_SKIPPED_WITH_AUDIT"
-                decision.reason_codes.append("user_skip")
-            elif command == "upgrade":
-                decision.class_label = "A" if decision.false_negative_risk >= 0.5 else "B"
-                decision.audit_status = "USER_UPGRADED"
-                decision.reason_codes.append("user_upgrade")
-            elif command == "downgrade":
-                decision.class_label = "B" if decision.class_label == "A" else "C"
-                decision.audit_status = "USER_DOWNGRADED"
-                decision.reason_codes.append("user_downgrade")
-            elif command == "retry":
-                decision.audit_status = "USER_RETRY_REQUESTED"
-                decision.reason_codes.append("user_retry")
-
     def write_agent_run(self, payload: dict[str, Any]) -> None:
-        path = self.data_dir / "agent_runs.jsonl"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+        _ = payload
 
     def record_llm_usage(self, stage: str, usage: dict[str, Any]) -> None:
         try:
@@ -1105,185 +960,6 @@ class SimplePipeline:
     def write_cache_payload(self, path: Path, payload: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         write_json(path, payload)
-
-    def stage_05_classification_audit(self) -> None:
-        stage = "stage_05_classification_audit"
-        self.checkpoint(stage)
-        llm_enabled = self.llm_enabled()
-        client = JsonLlmClient(self.config.provider) if llm_enabled else None
-        self.events.stage_started(
-            stage,
-            "Validating classifications with an independent model pass"
-            if client
-            else "Auditing classifications for false negatives",
-        )
-        upgraded = 0
-        changed = 0
-        conflicts = 0
-        rows: list[dict[str, Any]] = []
-        revised: list[ClassificationDecision] = []
-        for paper, decision, card in zip(
-            self.papers, self.classifications, self.skim_cards, strict=False
-        ):
-            original = decision.model_copy(deep=True)
-            validator_decision: ClassificationDecision | None = None
-            validation_notes: list[str] = []
-            validation_status = "HEURISTIC"
-            if client:
-                artifacts = self.db.get_page_artifacts(paper.paper_id)
-                agent_run_id = f"classify_verify_{paper.paper_id}_{uuid.uuid4().hex[:8]}"
-                try:
-                    raw = client.invoke_json(
-                        system_prompt=CLASSIFICATION_VALIDATOR_SYSTEM_PROMPT,
-                        user_prompt=build_classification_validation_prompt(
-                            paper=paper,
-                            artifacts=artifacts,
-                            skim=card,
-                            decision=decision,
-                            keyword_pool=self.config.keyword_pool,
-                            topic=self.config.topic,
-                            idea=self.config.idea,
-                        ),
-                        schema_name="paperlens_classification_validation",
-                        schema=CLASSIFICATION_VALIDATION_SCHEMA,
-                        max_tokens=1000,
-                    )
-                    validator_decision, validation_notes = (
-                        llm_classification_validation_to_decision(
-                            paper=paper,
-                            raw=raw.data,
-                            fallback=decision,
-                        )
-                    )
-                    decision = reconcile_classification_decisions(
-                        paper=paper,
-                        skim=card,
-                        preliminary=decision,
-                        validator=validator_decision,
-                        validation_notes=validation_notes,
-                    )
-                    validation_status = decision.validation_status or "VALIDATED"
-                    self.write_agent_run(
-                        {
-                            "agent_run_id": agent_run_id,
-                            "paper_id": paper.paper_id,
-                            "stage": stage,
-                            "provider_kind": self.config.provider.kind,
-                            "model": self.config.provider.model,
-                            "endpoint": raw.endpoint,
-                            "request_id": raw.request_id,
-                            "usage": raw.usage,
-                            "status": "PASS",
-                        }
-                    )
-                    self.record_llm_usage(stage, raw.usage)
-                except BudgetExceeded:
-                    raise
-                except Exception as exc:
-                    failed_run = {
-                        "agent_run_id": f"classify_verify_{paper.paper_id}_failed",
-                        "paper_id": paper.paper_id,
-                        "stage": stage,
-                        "provider_kind": self.config.provider.kind,
-                        "model": self.config.provider.model,
-                        "status": "FAIL" if self.require_llm_success() else "FALLBACK",
-                        "error": str(exc),
-                    }
-                    self.write_agent_run(failed_run)
-                    if self.require_llm_success():
-                        raise
-                    self.events.emit(
-                        "agent_run_fallback",
-                        stage=stage,
-                        level="warning",
-                        message=f"Classification validation failed for {paper.paper_id}; using heuristic audit",
-                        data={"paper_id": paper.paper_id, "error": str(exc)},
-                    )
-                    decision = heuristic_classification_audit(decision, card)
-                    validation_notes = [f"model_validation_failed: {exc}"]
-                    validation_status = "HEURISTIC_FALLBACK"
-            else:
-                decision = heuristic_classification_audit(decision, card)
-                validation_notes = decision.validation_notes
-
-            if original.class_label != decision.class_label:
-                changed += 1
-                if read_effort_rank(decision.class_label) > read_effort_rank(original.class_label):
-                    upgraded += 1
-            if validator_decision and validator_decision.class_label != original.class_label:
-                conflicts += 1
-            revised.append(decision)
-            self.db.upsert_classification(decision)
-            side = ["HELD"] if decision.class_label == "HOLD" else []
-            if decision.class_label == "C":
-                side.append("SKIPPED_WITH_VALIDATION")
-            if "classification_conflict" in decision.reason_codes:
-                side.append("CLASSIFICATION_CONFLICT")
-                self.db.upsert_review_item(
-                    ReviewItem(
-                        item_id=f"classification:{decision.paper_id}",
-                        paper_id=decision.paper_id,
-                        item_type="classification_validation",
-                        priority=1,
-                        reason="Classification passes disagreed; final decision was reconciled conservatively.",
-                        payload={
-                            "preliminary": original.model_dump(),
-                            "validator": validator_decision.model_dump()
-                            if validator_decision
-                            else None,
-                            "final": decision.model_dump(),
-                            "notes": validation_notes,
-                        },
-                    )
-                )
-            self.mark_paper_state(decision.paper_id, stage, side_statuses=side)
-            rows.append(
-                {
-                    "paper_id": decision.paper_id,
-                    "preliminary": original.class_label,
-                    "validator": validator_decision.class_label if validator_decision else "",
-                    "final": decision.class_label,
-                    "status": validation_status,
-                    "notes": "; ".join(validation_notes + decision.validation_notes),
-                }
-            )
-        self.classifications = revised
-        self.write_classification_report()
-        write_classification_validation_report(
-            self.data_dir / "reports" / "classification_validation.md",
-            rows,
-        )
-        self.events.stage_completed(
-            stage,
-            f"Classification validation completed; changed {changed}, upgraded {upgraded}, conflicts {conflicts}",
-        )
-
-    def stage_06_reading_queue(self) -> None:
-        stage = "stage_06_queue"
-        self.checkpoint(stage)
-        self.events.stage_started(stage, "Constructing reading queue")
-        rows = []
-        for paper, decision in zip(self.papers, self.classifications, strict=False):
-            queue = {
-                "A": "Q1",
-                "B": "Q3" if decision.confidence < 0.65 else "Q2",
-                "C": "Q4",
-                "HOLD": "Q5",
-            }[decision.class_label]
-            rows.append(
-                {
-                    "paper_id": paper.paper_id,
-                    "title": paper.canonical_title,
-                    "class_label": decision.class_label,
-                    "queue": queue,
-                    "risk": decision.false_negative_risk,
-                    "reason_codes": ", ".join(decision.reason_codes),
-                }
-            )
-        write_queue_report(self.data_dir / "reports" / "reading_queue.md", rows)
-        for row in rows:
-            self.mark_paper_state(row["paper_id"], stage)
-        self.events.stage_completed(stage, "Reading queue ready", {"rows": len(rows)})
 
     def stage_07_normal_read(self) -> None:
         stage = "stage_07_normal_read"
@@ -1386,12 +1062,9 @@ class SimplePipeline:
             self.paper_cards = [
                 paper_card if card.paper_id == paper_card.paper_id else card
                 for card in self.paper_cards
-            ]
+        ]
         self.db.upsert_paper_card(paper_card)
         self.mark_paper_state(paper.paper_id, stage)
-        write_json(
-            self.data_dir / "cards" / "paper" / f"{paper.paper_id}.json", paper_card.model_dump()
-        )
 
     def run_rolling_paper_read(
         self,
@@ -2128,7 +1801,7 @@ class SimplePipeline:
             raise last_error
         raise RuntimeError(f"{agent_prefix} failed for {paper_id}")
 
-    def stage_08_evidence_audit(self) -> None:
+    def stage_08_evidence_verify(self) -> None:
         stage = "stage_08_evidence_verify"
         self.checkpoint(stage)
         self.events.stage_started(stage, "Checking derived PaperCard evidence bindings")
@@ -2163,19 +1836,10 @@ class SimplePipeline:
                     )
                 )
             self.mark_paper_state(card.paper_id, stage, side_statuses=side)
-            write_json(
-                self.data_dir / "cards" / "paper" / f"{card.paper_id}.json", card.model_dump()
-            )
             rows.append({"paper_id": card.paper_id, "status": status, "notes": notes})
-        write_evidence_audit_report(self.data_dir / "reports" / "evidence_audit.md", rows)
-        self.register_file_artifact(
-            self.data_dir / "reports" / "evidence_audit.md",
-            paper_id=None,
-            artifact_type="report",
-        )
         self.events.stage_completed(stage, "Evidence audit completed", {"paper_cards": len(rows)})
 
-    def stage_15_export_reports(self) -> list[Path]:
+    def stage_15_export(self) -> list[Path]:
         stage = "stage_15_export"
         self.checkpoint(stage)
         self.events.stage_started(stage, "Writing final reading reports")
@@ -2207,7 +1871,7 @@ class SimplePipeline:
         )
         return report_paths
 
-    def stage_17_export_manifest(self) -> dict[str, Any]:
+    def stage_17_manifest(self) -> dict[str, Any]:
         stage = "stage_17_manifest"
         self.checkpoint(stage)
         self.events.stage_started(stage, "Writing manifest")
@@ -2228,10 +1892,8 @@ class SimplePipeline:
                 "internal_state": ".paperlens/state.sqlite",
                 "page_images": ".paperlens/pages/",
                 "figure_crops": ".paperlens/figures/",
-                "paper_memory": ".paperlens/library/paper_memory.jsonl",
+                "library_records": ".paperlens/library/library_records.jsonl",
                 "paper_memory_v3": ".paperlens/data/memory/v3/",
-                "paper_memory_v3_claim_index": ".paperlens/data/memory/v3/claim_index.jsonl",
-                "paper_memory_v3_evidence_index": ".paperlens/data/memory/v3/evidence_index.jsonl",
                 "library_index": ".paperlens/library/index/search_index.json",
                 "data": ".paperlens/data/",
                 "output_validation": output_validation,
@@ -2248,95 +1910,6 @@ class SimplePipeline:
         )
         self.events.stage_completed(stage, "Manifest written", manifest)
         return manifest
-
-    def write_paper_id_map(self) -> None:
-        path = self.data_dir / "papers" / "paper_id_map.csv"
-        with path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(
-                handle,
-                fieldnames=[
-                    "paper_id",
-                    "file_path",
-                    "file_hash",
-                    "title",
-                    "authors",
-                    "year",
-                    "venue",
-                    "doi",
-                    "arxiv_id",
-                    "bibtex_key",
-                ],
-            )
-            writer.writeheader()
-            for paper in self.papers:
-                writer.writerow(
-                    {
-                        "paper_id": paper.paper_id,
-                        "file_path": paper.file_path,
-                        "file_hash": paper.file_hash,
-                        "title": paper.canonical_title,
-                        "authors": ";".join(paper.authors),
-                        "year": paper.year,
-                        "venue": paper.venue,
-                        "doi": paper.doi,
-                        "arxiv_id": paper.arxiv_id,
-                        "bibtex_key": paper.bibtex_key,
-                    }
-                )
-
-    def write_duplicate_report(self) -> None:
-        path = self.data_dir / "papers" / "duplicate_report.csv"
-        with path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(
-                handle, fieldnames=["duplicate_group", "paper_id", "file_path", "file_hash"]
-            )
-            writer.writeheader()
-            for paper in self.papers:
-                if paper.duplicate_group:
-                    writer.writerow(
-                        {
-                            "duplicate_group": paper.duplicate_group,
-                            "paper_id": paper.paper_id,
-                            "file_path": paper.file_path,
-                            "file_hash": paper.file_hash,
-                        }
-                    )
-
-    def write_classification_report(self) -> None:
-        path = self.data_dir / "papers" / "classification_report.csv"
-        with path.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(
-                handle,
-                fieldnames=[
-                    "paper_id",
-                    "class_label",
-                    "confidence",
-                    "false_negative_risk",
-                    "audit_status",
-                    "preliminary_label",
-                    "validator_label",
-                    "validation_status",
-                    "validation_notes",
-                    "reason_codes",
-                ],
-            )
-            writer.writeheader()
-            for decision in self.classifications:
-                writer.writerow(
-                    {
-                        "paper_id": decision.paper_id,
-                        "class_label": decision.class_label,
-                        "confidence": decision.confidence,
-                        "false_negative_risk": decision.false_negative_risk,
-                        "audit_status": decision.audit_status,
-                        "preliminary_label": decision.preliminary_label,
-                        "validator_label": decision.validator_label,
-                        "validation_status": decision.validation_status,
-                        "validation_notes": ";".join(decision.validation_notes),
-                        "reason_codes": ";".join(decision.reason_codes),
-                    }
-                )
-
 
 SKIM_CLASSIFIER_PROMPT_VERSION = "skim-classifier-v2"
 
@@ -2410,46 +1983,6 @@ SKIM_CLASSIFICATION_SCHEMA: dict[str, Any] = {
                 },
             },
         },
-    },
-}
-
-
-CLASSIFICATION_VALIDATOR_SYSTEM_PROMPT = """
-You are the PaperLens ClassificationValidator.
-Independently verify a preliminary reading-value grade. Your job is to catch false negatives,
-especially papers incorrectly marked C or under-read as B.
-
-Rules:
-- Use only supplied excerpts, visual notes, and the preliminary skim card.
-- Actively look for reasons to upgrade, HOLD, or request human review.
-- C is allowed only when the paper is clearly low value for the goal and the parse evidence is adequate.
-- If evidence is thin, conflicting, or visually important but not readable from excerpts, choose HOLD.
-- Return only JSON matching the requested schema.
-""".strip()
-
-
-CLASSIFICATION_VALIDATION_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": [
-        "validated_class_label",
-        "confidence",
-        "false_negative_risk",
-        "agrees_with_preliminary",
-        "upgrade_or_hold_reasons",
-        "missed_value_signals",
-        "safe_to_skip",
-        "notes",
-    ],
-    "properties": {
-        "validated_class_label": {"type": "string", "enum": ["A", "B", "C", "HOLD"]},
-        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-        "false_negative_risk": {"type": "number", "minimum": 0, "maximum": 1},
-        "agrees_with_preliminary": {"type": "boolean"},
-        "upgrade_or_hold_reasons": {"type": "array", "maxItems": 4, "items": {"type": "string"}},
-        "missed_value_signals": {"type": "array", "maxItems": 4, "items": {"type": "string"}},
-        "safe_to_skip": {"type": "boolean"},
-        "notes": {"type": "array", "maxItems": 4, "items": {"type": "string"}},
     },
 }
 
@@ -2661,63 +2194,11 @@ def build_skim_prompt(
             (
                 "Classify reading value for an automated paper-reading workflow. "
                 "A papers should be kept prominent for follow-up QA or opt-in close reading; B papers "
-                "belong in the standard library; C papers should be skipped only after strong "
-                "evidence; HOLD papers need review."
+                "belong in the standard library; C papers are lower-priority but still receive the "
+                "standard read loop; HOLD papers need review."
             ),
             "Parsed excerpts:",
             "\n\n---\n\n".join(excerpts) if excerpts else "No usable text excerpts.",
-        ]
-    )
-
-
-def build_classification_validation_prompt(
-    *,
-    paper: PaperRecord,
-    artifacts: list[Any],
-    skim: SkimCard,
-    decision: ClassificationDecision,
-    keyword_pool: list[str],
-    topic: str | None,
-    idea: str | None,
-) -> str:
-    excerpts = []
-    used_chars = 0
-    max_chars = 18000
-    for page in artifacts[:10]:
-        text = normalize_excerpt(page.text, limit=2200)
-        visual_notes = page.visual_notes[:4] if getattr(page, "visual_notes", None) else []
-        captions = "; ".join(str(caption.get("text") or "") for caption in page.captions[:4])
-        block = {
-            "page_no": page.page_no,
-            "flags": page.low_confidence_flags,
-            "captions": captions,
-            "visual_notes": visual_notes,
-            "text": text,
-        }
-        block_text = json.dumps(block, ensure_ascii=False)
-        if used_chars + len(block_text) > max_chars:
-            break
-        excerpts.append(block)
-        used_chars += len(block_text)
-    return "\n\n".join(
-        [
-            f"paper_id: {paper.paper_id}",
-            f"title: {paper.canonical_title or 'unknown'}",
-            f"parse_quality: {paper.parse_quality or 'unknown'}",
-            "user topic: " + (topic or "not provided"),
-            "user idea or claim draft: " + (idea or "not provided"),
-            "value-signal keywords: " + ", ".join(keyword_pool),
-            "preliminary_skim_card:",
-            json.dumps(skim.model_dump(), ensure_ascii=False),
-            "preliminary_classification:",
-            json.dumps(decision.model_dump(), ensure_ascii=False),
-            (
-                "Task: independently validate the classification. Do not rubber-stamp it. "
-                "If the preliminary label is C, decide whether there is enough evidence to skip. "
-                "If not, choose B or HOLD."
-            ),
-            "validation_excerpts:",
-            json.dumps(excerpts, ensure_ascii=False) if excerpts else "No usable excerpts.",
         ]
     )
 
@@ -2987,175 +2468,6 @@ def llm_skim_classify_to_models(
     return card, decision
 
 
-def llm_classification_validation_to_decision(
-    *,
-    paper: PaperRecord,
-    raw: dict[str, Any],
-    fallback: ClassificationDecision,
-) -> tuple[ClassificationDecision, list[str]]:
-    label = raw.get("validated_class_label")
-    if label not in {"A", "B", "C", "HOLD"}:
-        label = fallback.class_label
-    notes = normalized_string_list(raw.get("notes"))
-    notes.extend(normalized_string_list(raw.get("upgrade_or_hold_reasons")))
-    notes.extend(normalized_string_list(raw.get("missed_value_signals")))
-    reason_codes = normalized_string_list(raw.get("upgrade_or_hold_reasons"))
-    if not bool(raw.get("agrees_with_preliminary", False)):
-        reason_codes.append("validator_disagreed")
-    if not bool(raw.get("safe_to_skip", False)) and label == "C":
-        label = "HOLD"
-        reason_codes.append("validator_not_safe_to_skip")
-    return (
-        ClassificationDecision(
-            paper_id=paper.paper_id,
-            class_label=label,
-            confidence=clamp_float(raw.get("confidence"), fallback.confidence),
-            false_negative_risk=clamp_float(
-                raw.get("false_negative_risk"),
-                fallback.false_negative_risk,
-            ),
-            reason_codes=reason_codes or ["validator_reviewed"],
-            audit_status="VALIDATOR_PASS",
-        ),
-        notes,
-    )
-
-
-def reconcile_classification_decisions(
-    *,
-    paper: PaperRecord,
-    skim: SkimCard,
-    preliminary: ClassificationDecision,
-    validator: ClassificationDecision,
-    validation_notes: list[str],
-) -> ClassificationDecision:
-    final = preliminary.model_copy(deep=True)
-    final.preliminary_label = preliminary.class_label
-    final.validator_label = validator.class_label
-    final.validation_notes = list(dict.fromkeys(validation_notes))
-    labels_disagree = preliminary.class_label != validator.class_label
-
-    if labels_disagree:
-        final.reason_codes.append("classification_conflict")
-    final.reason_codes.extend(
-        code for code in validator.reason_codes if code not in final.reason_codes
-    )
-
-    if preliminary.class_label == validator.class_label:
-        final.class_label = preliminary.class_label
-        final.confidence = min(preliminary.confidence, validator.confidence)
-        final.false_negative_risk = max(
-            preliminary.false_negative_risk,
-            validator.false_negative_risk,
-        )
-        final.audit_status = "VALIDATED_PASS"
-        final.validation_status = "AGREED"
-    elif "C" in {preliminary.class_label, validator.class_label}:
-        non_c = validator.class_label if preliminary.class_label == "C" else preliminary.class_label
-        final.class_label = "HOLD" if non_c == "HOLD" else non_c
-        final.confidence = min(preliminary.confidence, validator.confidence, 0.64)
-        final.false_negative_risk = max(
-            preliminary.false_negative_risk,
-            validator.false_negative_risk,
-            0.65,
-        )
-        final.audit_status = "VALIDATED_REVISED"
-        final.validation_status = "REVISED_TO_PREVENT_FALSE_NEGATIVE"
-        final.reason_codes.append("skip_blocked_by_validation")
-    elif "HOLD" in {preliminary.class_label, validator.class_label}:
-        other = (
-            validator.class_label if preliminary.class_label == "HOLD" else preliminary.class_label
-        )
-        final.class_label = other if other in {"A", "B"} and skim.evidence_refs else "HOLD"
-        final.confidence = min(preliminary.confidence, validator.confidence, 0.68)
-        final.false_negative_risk = max(
-            preliminary.false_negative_risk, validator.false_negative_risk
-        )
-        final.audit_status = "VALIDATED_REVISED"
-        final.validation_status = "REQUIRES_CAUTION"
-        final.reason_codes.append("hold_conflict_guardrail")
-    else:
-        final.class_label = higher_read_effort_label(preliminary.class_label, validator.class_label)
-        final.confidence = min(preliminary.confidence, validator.confidence, 0.72)
-        final.false_negative_risk = max(
-            preliminary.false_negative_risk, validator.false_negative_risk
-        )
-        final.audit_status = "VALIDATED_REVISED"
-        final.validation_status = "UPGRADED_BY_VALIDATION"
-
-    if (
-        paper.parse_quality in {"OCR_REQUIRED", "VLM_PAGE_MODE", "PASS_WITH_WEAKNESSES"}
-        and final.class_label == "C"
-    ):
-        final.class_label = "HOLD"
-        final.false_negative_risk = max(final.false_negative_risk, 0.7)
-        final.reason_codes.append("weak_parse_skip_guardrail")
-        final.audit_status = "VALIDATED_REVISED"
-        final.validation_status = "HELD_FOR_PARSE_QUALITY"
-
-    if final.class_label == "C":
-        both_c = preliminary.class_label == "C" and validator.class_label == "C"
-        safe_to_skip = (
-            both_c
-            and preliminary.confidence >= 0.55
-            and validator.confidence >= 0.6
-            and final.false_negative_risk <= 0.45
-        )
-        if not safe_to_skip:
-            final.class_label = "HOLD"
-            final.false_negative_risk = max(final.false_negative_risk, 0.6)
-            final.reason_codes.append("c_requires_two_pass_agreement")
-            final.audit_status = "VALIDATED_REVISED"
-            final.validation_status = "HELD_UNSAFE_SKIP"
-
-    final.reason_codes = list(dict.fromkeys(final.reason_codes))
-    final.validation_notes = list(dict.fromkeys(final.validation_notes))
-    return final
-
-
-def heuristic_classification_audit(
-    decision: ClassificationDecision,
-    card: SkimCard,
-) -> ClassificationDecision:
-    decision = decision.model_copy(deep=True)
-    decision.preliminary_label = decision.preliminary_label or decision.class_label
-    decision.validator_label = None
-    if decision.class_label == "C" and card.danger_signals:
-        decision.class_label = "B"
-        decision.audit_status = "UPGRADED_BY_KEYWORD_AUDIT"
-        decision.validation_status = "HEURISTIC_REVISED"
-        decision.reason_codes.append("keyword_anti_leak")
-        decision.false_negative_risk = max(decision.false_negative_risk, 0.65)
-        decision.validation_notes.append("C label was blocked because skim found value signals.")
-    elif decision.class_label == "B" and len(card.danger_signals) >= 3:
-        if card.evidence_refs:
-            decision.class_label = "A"
-            decision.audit_status = "UPGRADED_BY_SIGNAL_DENSITY"
-            decision.validation_status = "HEURISTIC_REVISED"
-            decision.reason_codes.append("value_signal_density")
-            decision.validation_notes.append(
-                "B label was upgraded because several value signals were present."
-            )
-        else:
-            decision.class_label = "HOLD"
-            decision.audit_status = "HELD_MISSING_EVIDENCE_FOR_UPGRADE"
-            decision.validation_status = "HEURISTIC_HELD"
-            decision.reason_codes.append("missing_evidence_for_upgrade")
-            decision.validation_notes.append("Potential upgrade lacked evidence references.")
-    elif decision.class_label == "C":
-        decision.audit_status = "HEURISTIC_C_PENDING_MODEL_VALIDATION"
-        decision.validation_status = "HEURISTIC_ONLY"
-        decision.false_negative_risk = max(decision.false_negative_risk, 0.45)
-        decision.reason_codes.append("no_model_second_pass")
-        decision.validation_notes.append("C was not independently model-validated in this run.")
-    else:
-        decision.audit_status = "HEURISTIC_PASS"
-        decision.validation_status = "HEURISTIC_ONLY"
-    decision.reason_codes = list(dict.fromkeys(decision.reason_codes))
-    decision.validation_notes = list(dict.fromkeys(decision.validation_notes))
-    return decision
-
-
 def select_rolling_read_pages(
     artifacts: list[Any],
     skim: SkimCard,
@@ -3167,13 +2479,14 @@ def select_rolling_read_pages(
     if not pages:
         return []
     max_pages_env = os.getenv("PAPERLENS_ROLLING_MAX_PAGES")
+    if max_pages_env is None:
+        return pages
     default_max_pages = "14"
     try:
-        max_pages = int(max_pages_env or default_max_pages)
+        max_pages = int(max_pages_env)
     except ValueError:
         max_pages = int(default_max_pages)
-    minimum_pages = 1 if max_pages_env is not None else 3
-    max_pages = max(minimum_pages, min(max_pages, 24))
+    max_pages = max(1, min(max_pages, 24))
     by_no = {page.page_no: page for page in pages}
     selected: list[int] = []
 
@@ -3573,11 +2886,8 @@ def deterministic_paper_card(
 
 
 def should_run_normal_read(decision: ClassificationDecision) -> bool:
-    if decision.class_label in {"A", "HOLD"}:
-        return True
-    if decision.class_label != "B":
-        return False
-    return not (decision.confidence < 0.45 and decision.false_negative_risk < 0.5)
+    _ = decision
+    return True
 
 
 def paper_card_from_memory_v3(
@@ -3741,22 +3051,6 @@ def combine_verification_status(left: str, right: str) -> str:
     return left if rank.get(left, 2) >= rank.get(right, 2) else right
 
 
-def write_evidence_audit_report(path: Path, rows: list[dict[str, Any]]) -> None:
-    lines = [
-        "# Evidence Audit",
-        "",
-        "| Paper | Status | Notes |",
-        "|---|---|---|",
-    ]
-    for row in rows:
-        notes = clean_audit_notes(row["notes"])
-        notes = ", ".join(notes) if notes else "internal weak evidence only"
-        lines.append(f"| {row['paper_id']} | {row['status']} | {notes} |")
-    if not rows:
-        lines.append("| none | PASS | no A/B paper cards |")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
 def clean_audit_notes(notes: list[str]) -> list[str]:
     hidden = {"skim_level_or_keyword_evidence", "visual_required_pages"}
     cleaned = []
@@ -3766,27 +3060,6 @@ def clean_audit_notes(notes: list[str]) -> list[str]:
         if visible:
             cleaned.append("; ".join(visible))
     return cleaned
-
-
-def write_review_items_csv(path: Path, rows: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(
-            handle,
-            fieldnames=["item_id", "paper_id", "item_type", "status", "priority", "reason"],
-        )
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(
-                {
-                    "item_id": row.get("item_id"),
-                    "paper_id": row.get("paper_id"),
-                    "item_type": row.get("item_type"),
-                    "status": row.get("status"),
-                    "priority": row.get("priority"),
-                    "reason": row.get("reason"),
-                }
-            )
 
 
 def evidence_refs_from_llm(
@@ -4045,38 +3318,6 @@ def classify_paper(paper: PaperRecord, card: SkimCard) -> ClassificationDecision
     )
 
 
-def write_queue_report(path: Path, rows: list[dict[str, Any]]) -> None:
-    lines = [
-        "# Reading Queue",
-        "",
-        "| Queue | Class | Paper | Risk | Reasons |",
-        "|---|---|---|---:|---|",
-    ]
-    for row in rows:
-        lines.append(
-            f"| {row['queue']} | {row['class_label']} | {row['paper_id']} - {row['title']} | "
-            f"{row['risk']:.2f} | {row['reason_codes']} |"
-        )
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def write_classification_validation_report(path: Path, rows: list[dict[str, Any]]) -> None:
-    lines = [
-        "# Classification Validation",
-        "",
-        "| Paper | Preliminary | Validator | Final | Status | Notes |",
-        "|---|---|---|---|---|---|",
-    ]
-    for row in rows:
-        lines.append(
-            f"| {row['paper_id']} | {row['preliminary']} | {row['validator'] or 'n/a'} | "
-            f"{row['final']} | {row['status']} | {escape_table(row['notes'])} |"
-        )
-    if len(lines) == 3:
-        lines.append("| none | n/a | n/a | n/a | n/a | No classifications were validated. |")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
 REPORT_PLAN_SYSTEM_PROMPT = """
 You are the PaperLens ReportPlanner skill.
 Create a writing plan for one research-paper knowledge capsule from PaperMemoryV3 and local paper-tool observations.
@@ -4114,7 +3355,7 @@ REPORT_PLAN_SCHEMA: dict[str, Any] = {
     "properties": {
         "paper_id": {"type": "string"},
         "grade": {"type": "string", "enum": ["A", "B", "C", "HOLD"]},
-        "read_recommendation": {"type": "string", "enum": ["精读", "选读", "跳过", "人工确认"]},
+        "read_recommendation": {"type": "string", "enum": ["重点关注", "标准读", "低优先级", "需确认"]},
         "one_line_reason": {"type": "string", "maxLength": 220},
         "core_takeaway": {"type": "string", "maxLength": 520},
         "sections": {
@@ -4435,12 +3676,6 @@ def compose_agentic_paper_report(
         output_language=output_language,
     )
     report_audit = aggregate_section_audits(section_audits)
-    (data_dir / "reports" / "paper_reports").mkdir(parents=True, exist_ok=True)
-    write_json(data_dir / "reports" / "paper_reports" / f"{paper.paper_id}.json", report)
-    write_json(
-        data_dir / "reports" / "paper_report_audits" / f"{paper.paper_id}.json",
-        report_audit,
-    )
     return report, report_audit
 
 
@@ -4488,9 +3723,7 @@ def generate_report_plan(
     cached = read_llm_cache(cache_path)
     if cached and isinstance(cached.get("data"), dict):
         record_agent_run(cache_agent_run(client, paper.paper_id, stage, "report_plan", cache_path))
-        plan = normalize_report_plan(cached["data"], paper=paper, decision=decision)
-        write_json(data_dir / "reports" / "report_plans" / f"{paper.paper_id}.json", plan)
-        return plan
+        return normalize_report_plan(cached["data"], paper=paper, decision=decision)
     raw = client.invoke_json(
         system_prompt=REPORT_PLAN_SYSTEM_PROMPT,
         user_prompt=user_prompt,
@@ -4511,9 +3744,7 @@ def generate_report_plan(
         cache_path,
         {"key": key_payload, "data": raw.data, "usage": raw.usage, "request_id": raw.request_id, "endpoint": raw.endpoint},
     )
-    plan = normalize_report_plan(raw.data, paper=paper, decision=decision)
-    write_json(data_dir / "reports" / "report_plans" / f"{paper.paper_id}.json", plan)
-    return plan
+    return normalize_report_plan(raw.data, paper=paper, decision=decision)
 
 
 def generate_report_section(
@@ -4567,12 +3798,7 @@ def generate_report_section(
         record_agent_run(
             cache_agent_run(client, paper.paper_id, stage, f"report_section_{section_id}", cache_path)
         )
-        section = normalize_report_section(cached["data"], section_plan=section_plan)
-        write_json(
-            data_dir / "reports" / "report_sections" / f"{paper.paper_id}.{section_id}.json",
-            section,
-        )
-        return section
+        return normalize_report_section(cached["data"], section_plan=section_plan)
     raw = client.invoke_json(
         system_prompt=REPORT_SECTION_SYSTEM_PROMPT,
         user_prompt=user_prompt,
@@ -4588,12 +3814,7 @@ def generate_report_section(
         cache_path,
         {"key": key_payload, "data": raw.data, "usage": raw.usage, "request_id": raw.request_id, "endpoint": raw.endpoint},
     )
-    section = normalize_report_section(raw.data, section_plan=section_plan)
-    write_json(
-        data_dir / "reports" / "report_sections" / f"{paper.paper_id}.{section_id}.json",
-        section,
-    )
-    return section
+    return normalize_report_section(raw.data, section_plan=section_plan)
 
 
 def audit_report_section(
@@ -4644,12 +3865,7 @@ def audit_report_section(
         record_agent_run(
             cache_agent_run(client, paper.paper_id, stage, f"report_section_audit_{section_id}", cache_path)
         )
-        audit = normalize_report_section_audit(cached["data"])
-        write_json(
-            data_dir / "reports" / "report_section_audits" / f"{paper.paper_id}.{section_id}.json",
-            audit,
-        )
-        return audit
+        return normalize_report_section_audit(cached["data"])
     raw = client.invoke_json(
         system_prompt=REPORT_SECTION_AUDITOR_SYSTEM_PROMPT,
         user_prompt=user_prompt,
@@ -4672,12 +3888,7 @@ def audit_report_section(
         cache_path,
         {"key": key_payload, "data": raw.data, "usage": raw.usage, "request_id": raw.request_id, "endpoint": raw.endpoint},
     )
-    audit = normalize_report_section_audit(raw.data)
-    write_json(
-        data_dir / "reports" / "report_section_audits" / f"{paper.paper_id}.{section_id}.json",
-        audit,
-    )
-    return audit
+    return normalize_report_section_audit(raw.data)
 
 
 def build_report_plan_prompt(
@@ -4874,7 +4085,7 @@ def normalize_report_plan(
     if grade not in {"A", "B", "C", "HOLD"}:
         grade = "HOLD"
     recommendation = str(data.get("read_recommendation") or "").strip()
-    if recommendation not in {"精读", "选读", "跳过", "人工确认"}:
+    if recommendation not in {"重点关注", "标准读", "低优先级", "需确认"}:
         recommendation = recommendation_for_grade(grade)
     sections = [
         normalize_report_section_plan(item)
@@ -5322,7 +4533,7 @@ def normalize_key_visual_pages(value: Any) -> list[dict[str, Any]]:
 
 
 def recommendation_for_grade(grade: str) -> str:
-    return {"A": "精读", "B": "选读", "C": "跳过", "HOLD": "人工确认"}.get(grade, "人工确认")
+    return {"A": "重点关注", "B": "标准读", "C": "低优先级", "HOLD": "需确认"}.get(grade, "需确认")
 
 
 def compact_reason(text: str, *, max_chars: int = 160) -> str:
@@ -5902,10 +5113,7 @@ def write_final_report_bundle(
     skim_by_id = {card.paper_id: card for card in skim_cards}
     decision_by_id = {decision.paper_id: decision for decision in decisions}
     paper_report_rows: list[dict[str, Any]] = []
-    report_audits: dict[str, dict[str, Any]] = {}
-    paper_memories_v3: list[dict[str, Any]] = []
     written: list[Path] = []
-    export_filter = parse_env_id_filter("PAPERLENS_EXPORT_PAPER_IDS")
     memory_store = PaperMemoryStore(data_dir)
 
     for paper in papers:
@@ -5925,11 +5133,7 @@ def write_final_report_bundle(
         paper_memory_for_prompt = memory_v3_prompt_view(paper_memory_v3)
         model_report = None
         report_audit = None
-        reuse_existing_report = bool(export_filter and paper.paper_id not in export_filter)
-        if reuse_existing_report:
-            model_report = load_existing_model_report(data_dir, paper.paper_id)
-            report_audit = load_existing_report_audit(data_dir, paper.paper_id)
-        elif formal_run:
+        if formal_run:
             if client is None:
                 raise RuntimeError("Formal report generation requires a model client")
             try:
@@ -5992,7 +5196,6 @@ def write_final_report_bundle(
                     f"{(report_audit or {}).get('verdict')}"
                 )
         if report_audit is not None:
-            report_audits[paper.paper_id] = report_audit
             paper_memory_v3 = memory_store.apply_patch_set(
                 paper.paper_id,
                 {
@@ -6001,8 +5204,7 @@ def write_final_report_bundle(
                 },
                 source="export_report_audit",
             )
-        paper_memories_v3.append(paper_memory_v3)
-        written.extend(write_paper_memory_v3_bundle(data_dir, paper_memory_v3))
+        written.append(write_paper_memory_v3_file(data_dir, paper_memory_v3))
         report_name = paper_report_filename(paper)
         report_path = output_dir / "papers" / report_name
         report_markdown = render_paper_report(
@@ -6056,62 +5258,7 @@ def write_final_report_bundle(
             idea=idea,
         )
     )
-    written.extend(write_memory_v3_indexes(data_dir, paper_memories_v3))
-
-    write_json(
-        data_dir / "papers.json",
-        {
-            "papers": [paper.model_dump() for paper in papers],
-            "skim_cards": [card.model_dump() for card in skim_cards],
-            "classifications": [decision.model_dump() for decision in decisions],
-            "paper_cards": [card.model_dump() for card in paper_cards],
-            "review_items": [item.model_dump() for item in review_items],
-            "budget": final_budget,
-            "topic": topic,
-            "idea": idea,
-            "output_language": output_language,
-            "paper_reports": [
-                {
-                    "paper_id": row["paper"].paper_id,
-                    "path": f"papers/{row['report_name']}",
-                    "report_audit": report_audits.get(row["paper"].paper_id),
-                }
-                for row in paper_report_rows
-            ],
-            "paper_memory_v3": [
-                {
-                    "paper_id": memory.get("paper_id"),
-                    "path": f".paperlens/data/memory/v3/{memory.get('paper_id')}.paper_memory.v3.json",
-                    "validation_issues": memory.get("audit_trail", {}).get("validation_issues", []),
-                }
-                for memory in paper_memories_v3
-            ],
-        },
-    )
     return written
-
-
-def parse_env_id_filter(name: str) -> set[str]:
-    raw = os.getenv(name, "")
-    return {item.strip() for item in raw.split(",") if item.strip()}
-
-
-def load_existing_model_report(data_dir: Path, paper_id: str) -> dict[str, Any] | None:
-    return load_existing_json(data_dir / "reports" / "paper_reports" / f"{paper_id}.json")
-
-
-def load_existing_report_audit(data_dir: Path, paper_id: str) -> dict[str, Any] | None:
-    return load_existing_json(data_dir / "reports" / "paper_report_audits" / f"{paper_id}.json")
-
-
-def load_existing_json(path: Path) -> dict[str, Any] | None:
-    if not path.exists():
-        return None
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return value if isinstance(value, dict) else None
 
 
 def report_generation_must_succeed() -> bool:
@@ -6145,8 +5292,8 @@ def render_paperlens_report(
             "# PaperLens",
             "",
             (
-                f"Read {len(rows)} papers: {counts['A']} recommended for follow-up, {counts['B']} selective, "
-                f"{counts['C']} skipped, {counts['HOLD']} need confirmation."
+                f"Read {len(rows)} papers with the same standard loop: {counts['A']} high priority, "
+                f"{counts['B']} standard, {counts['C']} lower priority, {counts['HOLD']} need confirmation."
             ),
         ]
         if not formal_run:
@@ -6156,8 +5303,8 @@ def render_paperlens_report(
             "# PaperLens",
             "",
             (
-                f"本次阅读 {len(rows)} 篇：建议精读 {counts['A']} 篇，选读 {counts['B']} 篇，"
-                f"跳过 {counts['C']} 篇，待确认 {counts['HOLD']} 篇。"
+                f"本次按同一标准流程阅读 {len(rows)} 篇：高优先级 {counts['A']} 篇，标准 {counts['B']} 篇，"
+                f"低优先级 {counts['C']} 篇，待确认 {counts['HOLD']} 篇。"
             ),
         ]
         if not formal_run:
@@ -6178,33 +5325,25 @@ def render_paperlens_report(
     else:
         lines.extend(["", "## 目录", ""])
 
-    first = [row for row in ranked if row_decision(row).class_label in {"A", "B", "HOLD"}]
-    skipped = [row for row in ranked if row_decision(row).class_label == "C"]
-    for row in first:
+    for row in ranked:
         decision = row_decision(row)
         reason = one_line_row_reason(row)
         lines.append(
             f"- [{decision.class_label}] [{display_row_title(row)}](./papers/{row['report_name']}) - {reason}"
         )
-    if skipped:
-        lines.extend(["", "## Skipped" if output_language == "en" else "## 跳过", ""])
-        for row in skipped:
-            lines.append(
-                f"- [C] [{display_row_title(row)}](./papers/{row['report_name']}) - {one_line_row_reason(row)}"
-            )
     if visible_reviews:
         if output_language == "en":
             lines.extend(
                 [
                     "",
-                    f"Needs confirmation: {len(visible_reviews)} items; see `.paperlens/data/reports/evidence_audit.md`.",
+                    f"Needs confirmation: {len(visible_reviews)} items.",
                 ]
             )
         else:
             lines.extend(
                 [
                     "",
-                    f"需要确认：{len(visible_reviews)} 项，详见 `.paperlens/data/reports/evidence_audit.md`。",
+                    f"需要确认：{len(visible_reviews)} 项。",
                 ]
             )
     estimated_usd = float(budget.get("estimated_usd") or 0)
@@ -6217,10 +5356,8 @@ def render_paperlens_report(
 
 def validate_paperlens_output(output_dir: Path) -> dict[str, Any]:
     main_report = output_dir / "PaperLens.md"
-    memory_path = output_dir / ".paperlens" / "library" / "paper_memory.jsonl"
+    library_records_path = output_dir / ".paperlens" / "library" / "library_records.jsonl"
     memory_v3_dir = output_dir / ".paperlens" / "data" / "memory" / "v3"
-    memory_v3_claim_index = memory_v3_dir / "claim_index.jsonl"
-    memory_v3_evidence_index = memory_v3_dir / "evidence_index.jsonl"
     search_index_path = output_dir / ".paperlens" / "library" / "index" / "search_index.json"
     issues = []
     checked_links = 0
@@ -6262,16 +5399,12 @@ def validate_paperlens_output(output_dir: Path) -> dict[str, Any]:
                 issues.append(f"Missing link target: {target}")
             elif target_path.is_file() and not target_path.read_text(encoding="utf-8").strip():
                 issues.append(f"Empty link target: {target}")
-    if not memory_path.exists():
-        issues.append(".paperlens/library/paper_memory.jsonl is missing")
-    elif not memory_path.read_text(encoding="utf-8").strip():
-        issues.append(".paperlens/library/paper_memory.jsonl is empty")
+    if not library_records_path.exists():
+        issues.append(".paperlens/library/library_records.jsonl is missing")
+    elif not library_records_path.read_text(encoding="utf-8").strip():
+        issues.append(".paperlens/library/library_records.jsonl is empty")
     if not search_index_path.exists():
         issues.append(".paperlens/library/index/search_index.json is missing")
-    if not memory_v3_claim_index.exists():
-        issues.append(".paperlens/data/memory/v3/claim_index.jsonl is missing")
-    if not memory_v3_evidence_index.exists():
-        issues.append(".paperlens/data/memory/v3/evidence_index.jsonl is missing")
     papers_dir = output_dir / "papers"
     all_paper_report_files = sorted(papers_dir.glob("*.md")) if papers_dir.exists() else []
     paper_reports = list(all_paper_report_files)
@@ -6312,17 +5445,10 @@ def validate_paperlens_output(output_dir: Path) -> dict[str, Any]:
         "checked_links": checked_links,
         "paper_reports": len(paper_reports),
         "paper_report_files": len(all_paper_report_files),
-        "paper_memory": memory_path.exists(),
+        "library_records": library_records_path.exists(),
         "paper_memory_v3": len(memory_v3_files),
         "issues": issues,
     }
-    validation_dir = output_dir / ".paperlens" / "data" / "reports"
-    validation_dir.mkdir(parents=True, exist_ok=True)
-    write_json(validation_dir / "output_validation.json", result)
-    (validation_dir / "output_validation.md").write_text(
-        render_output_validation_report(result),
-        encoding="utf-8",
-    )
     if issues:
         raise RuntimeError("Output validation failed: " + "; ".join(issues[:5]))
     return result
@@ -6352,26 +5478,6 @@ def resolve_markdown_target(base_dir: Path, target: str) -> Path | None:
     if not path.is_absolute():
         path = base_dir / path
     return path
-
-
-def render_output_validation_report(result: dict[str, Any]) -> str:
-    lines = [
-        "# Output Validation",
-        "",
-        f"Status: {result['status']}",
-        f"Checked links: {result['checked_links']}",
-        f"Paper reports: {result['paper_reports']}",
-        f"PaperMemoryV3 files: {result.get('paper_memory_v3', 0)}",
-        "",
-        "## Issues",
-        "",
-    ]
-    issues = result.get("issues") or []
-    if issues:
-        lines.extend(f"- {issue}" for issue in issues)
-    else:
-        lines.append("- none")
-    return "\n".join(lines) + "\n"
 
 
 def one_line_row_reason(row: dict[str, Any]) -> str:
@@ -6731,10 +5837,10 @@ def localized_recommendation(recommendation: str, *, output_language: str) -> st
     if output_language != "en":
         return recommendation
     return {
-        "精读": "close read",
-        "选读": "selective read",
-        "跳过": "skip",
-        "人工确认": "human check",
+        "重点关注": "high priority",
+        "标准读": "standard read",
+        "低优先级": "lower priority",
+        "需确认": "needs confirmation",
     }.get(recommendation, recommendation)
 
 
@@ -7404,44 +6510,6 @@ def render_debug_main_report(
     return "\n".join(lines) + "\n"
 
 
-def render_evidence_index(
-    *,
-    evidence_dir: Path,
-    papers: list[PaperRecord],
-    skim_cards: list[SkimCard],
-    paper_cards: list[PaperCard],
-) -> str:
-    title_by_id = {paper.paper_id: paper.canonical_title or paper.paper_id for paper in papers}
-    refs = []
-    for card in skim_cards:
-        for ref in card.evidence_refs:
-            refs.append(("skim", ref))
-    for card in paper_cards:
-        for ref in card.evidence_refs:
-            refs.append(("paper", ref))
-    lines = [
-        "# Evidence Index",
-        "",
-        "| Evidence | Paper | Page | Source | Status | Page image | BBox |",
-        "|---|---|---:|---|---|---|---|",
-    ]
-    seen = set()
-    for source, ref in refs:
-        key = evidence_key(ref, source)
-        if key in seen:
-            continue
-        seen.add(key)
-        page_image = evidence_page_relpath(ref)
-        lines.append(
-            f"| `{key}` | {ref.paper_id} - {title_by_id.get(ref.paper_id, ref.paper_id)} | {ref.page_no} | "
-            f"{source} | {ref.verification_status} | [{page_image}]({relative_markdown_link(evidence_dir, evidence_dir / page_image)}) | "
-            f"{json.dumps(ref.bbox, ensure_ascii=False) if ref.bbox else ''} |"
-        )
-    if len(lines) == 3:
-        lines.append("| none | none | 0 | none | none | none | none |")
-    return "\n".join(lines) + "\n"
-
-
 def render_debug_paper_diagnostic(
     *,
     paper: PaperRecord,
@@ -7658,26 +6726,6 @@ def dedupe_evidence_refs(refs: list[EvidenceRef]) -> list[EvidenceRef]:
         seen.add(key)
         result.append(ref)
     return result
-
-
-def evidence_key(ref: EvidenceRef, source: str) -> str:
-    raw = f"{source}:{ref.paper_id}:{ref.page_no}:{ref.text_span_id}:{ref.quote_hash}:{ref.bbox}"
-    return "EV-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
-
-
-def evidence_page_relpath(ref: EvidenceRef) -> str:
-    return f"pages/{ref.paper_id}/page_{ref.page_no:04d}.png"
-
-
-def relative_markdown_link(base_dir: Path, target: Path) -> str:
-    try:
-        return target.resolve().relative_to(base_dir.resolve()).as_posix()
-    except ValueError:
-        return target.as_posix()
-
-
-def escape_table(value: str) -> str:
-    return value.replace("|", "\\|").replace("\n", " ")
 
 
 def classification_counts(decisions: list[ClassificationDecision]) -> dict[str, int]:

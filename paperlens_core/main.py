@@ -9,7 +9,6 @@ from typing import Any
 from paperlens_core.engine import PaperLensEngine
 from paperlens_core.events import emit_fatal
 from paperlens_core.protocol import (
-    InspectMemoryRequest,
     LibraryBuildRequest,
     LibraryDoctorRequest,
     LibraryQuestionRequest,
@@ -117,15 +116,6 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--token")
     serve_parser.add_argument("--config")
 
-    inspect = subparsers.add_parser("inspect", help="Inspect PaperMemoryV3 developer artifacts")
-    inspect.add_argument("--output-dir", required=True)
-    inspect.add_argument("--paper-id")
-    inspect.add_argument("--claims", action="store_true")
-    inspect.add_argument("--evidence", action="store_true")
-    inspect.add_argument("--concepts", action="store_true")
-    inspect.add_argument("--audit", action="store_true")
-    inspect.add_argument("--patches", action="store_true")
-    inspect.add_argument("--claim")
     return parser
 
 
@@ -242,30 +232,6 @@ def main(argv: list[str] | None = None) -> int:
         print("paperlens-core 0.1.0")
         return 0
     try:
-        if args.command == "inspect":
-            section = "summary"
-            if args.claims:
-                section = "claims"
-            if args.evidence:
-                section = "evidence"
-            if args.concepts:
-                section = "concepts"
-            if args.audit:
-                section = "audit"
-            print(
-                PaperLensEngine().inspect_memory(
-                    InspectMemoryRequest(
-                        output_dir=Path(args.output_dir),
-                        paper_id=args.paper_id,
-                        section=section,
-                        claim_id=args.claim,
-                        patches=args.patches,
-                    )
-                ),
-                end="",
-                flush=True,
-            )
-            return 0
         if args.command == "library":
             return library_command(args)
         if args.command == "serve":

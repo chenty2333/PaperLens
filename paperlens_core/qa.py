@@ -78,8 +78,6 @@ def answer_question(
     layout = load_layout(output_dir, resolved_paper_id)
     paper_memory_v3 = read_paper_memory_v3(output_dir, resolved_paper_id)
     library_record = load_library_record(output_dir, resolved_paper_id)
-    paper_card = load_debug_json(output_dir, "cards", "paper", f"{resolved_paper_id}.json")
-    report_audit = load_debug_json(output_dir, "reports", "paper_report_audits", f"{resolved_paper_id}.json")
     pages = select_relevant_pages(layout, question, paper_memory_v3=paper_memory_v3)
     question_type = classify_question(question)
     layout_pages = [page for page in layout.get("pages", []) if isinstance(page, dict)]
@@ -150,8 +148,6 @@ def answer_question(
         question=question,
         paper_memory_v3=paper_memory_v3,
         library_record=library_record,
-        paper_card=paper_card,
-        report_audit=report_audit,
         pages=pages,
         question_type=question_type,
         agent_context=agent_context,
@@ -384,24 +380,9 @@ def load_library_record(output_dir: Path, paper_id: str) -> dict[str, Any]:
     return {}
 
 
-def load_debug_json(output_dir: Path, *parts: str) -> dict[str, Any]:
-    path = paperlens_data_dir(output_dir)
-    for part in parts:
-        path = path / part
-    if not path.exists():
-        return {}
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {}
-    return value if isinstance(value, dict) else {}
-
-
 def paperlens_data_dir(output_dir: Path) -> Path:
     data_dir = output_dir / ".paperlens" / "data"
-    if data_dir.exists():
-        return data_dir
-    return output_dir / ".paperlens" / "debug"
+    return data_dir
 
 
 def select_relevant_pages(
@@ -491,8 +472,6 @@ def build_ask_prompt(
     paper_id: str,
     question: str,
     paper_memory_v3: dict[str, Any] | None = None,
-    paper_card: dict[str, Any],
-    report_audit: dict[str, Any],
     pages: list[dict[str, Any]],
     question_type: str = "orientation",
     library_record: dict[str, Any] | None = None,
@@ -521,10 +500,6 @@ def build_ask_prompt(
             context_pack_prompt(agent_context),
             "paperlens_library_record:",
             json.dumps(library_record or {}, ensure_ascii=False),
-            "paper_card:",
-            json.dumps(paper_card, ensure_ascii=False),
-            "final_report_audit:",
-            json.dumps(report_audit, ensure_ascii=False),
             "If page images are attached, they follow the same order as the first relevant_page_excerpts that have images.",
             "relevant_page_excerpts:",
             json.dumps(page_blocks, ensure_ascii=False),

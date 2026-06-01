@@ -5,7 +5,7 @@ from pathlib import Path
 from paperlens_core.config import CoreConfig
 from paperlens_core.control import ControlState
 from paperlens_core.events import EventWriter
-from paperlens_core.pipeline.simple import SimplePipeline
+from paperlens_core.workflow import PaperLensWorkflow
 
 
 def run_pipeline(
@@ -18,7 +18,7 @@ def run_pipeline(
     from_stage: str | None = None,
     only_stage: str | None = None,
 ) -> dict:
-    return SimplePipeline(
+    return PaperLensWorkflow(
         input_dir=input_dir,
         output_dir=output_dir,
         config=config,

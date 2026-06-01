@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import json
 import secrets
 import threading
@@ -54,16 +53,6 @@ def read_jsonl(path: Path, *, limit: int | None = None) -> list[dict[str, Any]]:
     except OSError:
         return []
     return rows[-limit:] if limit else rows
-
-
-def read_csv_rows(path: Path) -> list[dict[str, str]]:
-    if not path.exists():
-        return []
-    try:
-        with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            return list(csv.DictReader(handle))
-    except OSError:
-        return []
 
 
 def write_json_response(handler: BaseHTTPRequestHandler, status: int, payload: Any) -> None:
@@ -250,28 +239,6 @@ def load_public_workspace(output_dir: Path) -> dict[str, Any]:
         records = []
     qa_map = latest_qa_by_paper(output_dir)
     papers = [public_paper_record(output_dir, record, qa_map) for record in records]
-    if not papers:
-        paper_rows = read_csv_rows(output_dir / INTERNAL_DIR / "data" / "papers" / "paper_id_map.csv")
-        for row in paper_rows:
-            paper_id = row.get("paper_id") or ""
-            papers.append(
-                {
-                    "paper_id": paper_id,
-                    "title": row.get("title") or paper_id,
-                    "grade": "",
-                    "recommendation": "",
-                    "brief": "",
-                    "core_idea": "",
-                    "concepts": [],
-                    "tags": [],
-                    "report_path": "",
-                    "report_file": "",
-                    "source": {"original_path": row.get("file_path")},
-                    "quality": {},
-                    "memory": {"claim_count": 0, "evidence_count": 0, "memory_v3_path": None},
-                    "qa": qa_map.get(paper_id, {"count": 0, "last_question": "", "last_time": ""}),
-                }
-            )
     return {
         "output_dir": str(output_dir),
         "status": (run.get("status") if isinstance(run, dict) else None) or "unknown",
@@ -305,12 +272,10 @@ def load_evidence(output_dir: Path, paper_id: str) -> dict[str, Any]:
     memory = read_json_file(memory_dir / f"{paper_id}.paper_memory.v3.json", {}) or {}
     evidence = memory.get("evidence") if isinstance(memory.get("evidence"), list) else []
     claims = memory.get("claims") if isinstance(memory.get("claims"), list) else []
-    inspector = memory_dir / f"{paper_id}.inspector.md"
     return {
         "paper_id": paper_id,
         "claims": claims,
         "evidence": evidence,
-        "inspector_markdown": inspector.read_text(encoding="utf-8") if inspector.exists() else "",
     }
 
 

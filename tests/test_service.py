@@ -13,17 +13,18 @@ from paperlens_core.service import (
     PaperLensServiceState,
     load_public_workspace,
 )
+from paperlens_core.library import LIBRARY_RECORD_FILENAME, LIBRARY_RECORD_SCHEMA_VERSION
 
 
 def write_sample_library(output_dir: Path) -> None:
     library_dir = output_dir / ".paperlens" / "library"
     library_dir.mkdir(parents=True)
     record = {
-        "schema_version": "paper_memory.v2",
+        "schema_version": LIBRARY_RECORD_SCHEMA_VERSION,
         "paper_id": "p_test",
         "title": "A Useful Paper",
         "grade": "A",
-        "recommendation": "精读",
+        "recommendation": "重点关注",
         "tags": ["systems", "memory"],
         "memory": {
             "brief": "这篇论文把复杂系统问题讲清楚。",
@@ -37,7 +38,7 @@ def write_sample_library(output_dir: Path) -> None:
         "quality": {"report_audit_verdict": "PASS"},
         "search_text": "internal search text should not be returned to the UI",
     }
-    (library_dir / "paper_memory.jsonl").write_text(
+    (library_dir / LIBRARY_RECORD_FILENAME).write_text(
         json.dumps(record, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
@@ -63,7 +64,7 @@ def test_public_workspace_hides_internal_library_record_fields(tmp_path: Path) -
         "memory_v3_path": None,
     }
     assert "search_text" not in paper
-    assert "paper_memory.jsonl" not in json.dumps(workspace, ensure_ascii=False)
+    assert LIBRARY_RECORD_FILENAME not in json.dumps(workspace, ensure_ascii=False)
 
 
 def test_service_requires_auth_for_workspace_routes(tmp_path: Path) -> None:

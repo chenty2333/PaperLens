@@ -38,7 +38,7 @@ output/
   .paperlens/
     state.sqlite
     library/
-      paper_memory.jsonl
+      library_records.jsonl
       index/
         search_index.json
     pages/
@@ -50,8 +50,6 @@ output/
         v3/
           <paper_id>.paper_memory.v3.json
           <paper_id>.memory_patches.jsonl
-          claim_index.jsonl
-          evidence_index.jsonl
 ```
 
 如果直接看输出文件，先打开 `PaperLens.md`。桌面 App 读取同一个输出目录，并展示 library、capsule、evidence 和 chat。

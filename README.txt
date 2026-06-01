@@ -16,7 +16,7 @@ Internal memory:
   output/
     .paperlens/
       library/
-        paper_memory.jsonl
+        library_records.jsonl
         index/
           search_index.json
       data/

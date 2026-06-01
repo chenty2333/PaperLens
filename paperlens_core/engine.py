@@ -14,14 +14,11 @@ from paperlens_core.library import (
     rebuild_library_index,
     search_library,
 )
-from paperlens_core.memory_store import PaperMemoryStore
-from paperlens_core.memory_v3 import inspect_paper_memory_v3
 from paperlens_core.orchestrator import run_pipeline
 from paperlens_core.protocol import (
-    InspectMemoryRequest,
-    LibraryQuestionRequest,
     LibraryBuildRequest,
     LibraryDoctorRequest,
+    LibraryQuestionRequest,
     LibraryRebuildIndexRequest,
     LibrarySearchRequest,
     PaperQuestionRequest,
@@ -132,24 +129,5 @@ class PaperLensEngine:
             config=config,
             question=request.question,
             limit=request.limit,
-        )
-
-    def inspect_memory(self, request: InspectMemoryRequest) -> str:
-        output_dir = request.output_dir.expanduser().resolve()
-        if request.patches:
-            data_dir = output_dir / ".paperlens" / "data"
-            store = PaperMemoryStore(data_dir)
-            paper_id = request.paper_id
-            if not paper_id:
-                candidates = sorted((data_dir / "memory" / "v3").glob("*.memory_patches.jsonl"))
-                if not candidates:
-                    raise FileNotFoundError("No PaperMemory patch logs found")
-                paper_id = candidates[0].name.split(".", 1)[0]
-            return store.patch_log_path(paper_id).read_text(encoding="utf-8")
-        return inspect_paper_memory_v3(
-            output_dir=output_dir,
-            paper_id=request.paper_id,
-            section=request.section,
-            claim_id=request.claim_id,
         )
 

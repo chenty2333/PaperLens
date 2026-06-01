@@ -76,38 +76,13 @@ def validate_paper_memory_v3(memory: dict[str, Any]) -> list[str]:
     return issues
 
 
-def write_paper_memory_v3_bundle(data_dir: Path, memory: dict[str, Any]) -> list[Path]:
+def write_paper_memory_v3_file(data_dir: Path, memory: dict[str, Any]) -> Path:
     issues = validate_paper_memory_v3(memory)
     memory.setdefault("audit_trail", {})["validation_issues"] = issues
     paper_id = string_or_empty(memory.get("paper_id")) or "unknown"
     root = data_dir / MEMORY_V3_DIR
     root.mkdir(parents=True, exist_ok=True)
-    paths = [
-        write_json(root / f"{paper_id}.paper_memory.v3.json", memory),
-        write_json(root / f"{paper_id}.memory_audit.json", dict_value(memory.get("audit_trail")).get("memory_audit") or {}),
-        write_json(root / f"{paper_id}.report_audit.json", dict_value(memory.get("audit_trail")).get("report_audit") or {}),
-        write_jsonl(root / f"{paper_id}.claim_index.jsonl", memory.get("claims")),
-        write_jsonl(root / f"{paper_id}.evidence_index.jsonl", memory.get("evidence")),
-        write_text(root / f"{paper_id}.inspector.md", render_memory_v3_inspector(memory)),
-    ]
-    return paths
-
-
-def write_memory_v3_indexes(data_dir: Path, memories: list[dict[str, Any]]) -> list[Path]:
-    root = data_dir / MEMORY_V3_DIR
-    root.mkdir(parents=True, exist_ok=True)
-    claims = []
-    evidence = []
-    for memory in memories:
-        paper_id = string_or_empty(memory.get("paper_id"))
-        for claim in list_payload(memory.get("claims")):
-            claims.append({"paper_id": paper_id, **claim})
-        for item in list_payload(memory.get("evidence")):
-            evidence.append({"paper_id": paper_id, **item})
-    return [
-        write_jsonl(root / "claim_index.jsonl", claims),
-        write_jsonl(root / "evidence_index.jsonl", evidence),
-    ]
+    return write_json(root / f"{paper_id}.paper_memory.v3.json", memory)
 
 
 def read_paper_memory_v3(base_dir: Path, paper_id: str) -> dict[str, Any]:
@@ -120,60 +95,6 @@ def read_paper_memory_v3(base_dir: Path, paper_id: str) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return value if isinstance(value, dict) else {}
-
-
-def inspect_paper_memory_v3(
-    *,
-    output_dir: Path,
-    paper_id: str | None = None,
-    section: str = "summary",
-    claim_id: str | None = None,
-) -> str:
-    data_dir = resolve_data_dir(output_dir)
-    root = data_dir / MEMORY_V3_DIR
-    if paper_id is None:
-        candidates = sorted(root.glob("*.paper_memory.v3.json"))
-        if not candidates:
-            raise FileNotFoundError(f"No PaperMemoryV3 files found under {root}")
-        paper_id = candidates[0].name.split(".", 1)[0]
-    memory = read_paper_memory_v3(output_dir, paper_id)
-    if not memory:
-        raise FileNotFoundError(f"No PaperMemoryV3 found for paper_id={paper_id}")
-    return render_memory_v3_inspector(memory, section=section, claim_id=claim_id)
-
-
-def render_memory_v3_inspector(
-    memory: dict[str, Any],
-    *,
-    section: str = "summary",
-    claim_id: str | None = None,
-) -> str:
-    title = dict_value(memory.get("metadata")).get("title") or memory.get("paper_id")
-    lines = [f"# PaperMemoryV3 Inspector: {title}", ""]
-    lines.append(f"- Paper: `{memory.get('paper_id')}`")
-    lines.append(f"- Schema: `{memory.get('schema_version')}`")
-    lines.append(f"- Grade: `{dict_value(memory.get('reading_context')).get('grade')}`")
-    issues = validate_paper_memory_v3(memory)
-    lines.append(f"- Validation: {'PASS' if not issues else 'WARN'}")
-    if issues:
-        lines.extend(["", "## Validation Issues", ""])
-        lines.extend(f"- {issue}" for issue in issues[:40])
-    if section == "audit":
-        return "\n".join(lines + render_audit_section(memory)).rstrip() + "\n"
-    if section == "claims" or claim_id:
-        return "\n".join(lines + render_claims_section(memory, claim_id=claim_id)).rstrip() + "\n"
-    if section == "evidence":
-        return "\n".join(lines + render_evidence_section(memory)).rstrip() + "\n"
-    if section == "concepts":
-        return "\n".join(lines + render_concepts_section(memory)).rstrip() + "\n"
-    return "\n".join(
-        lines
-        + render_summary_section(memory)
-        + render_concepts_section(memory)
-        + render_claims_section(memory, limit=8)
-        + render_evidence_section(memory, limit=8)
-        + render_audit_section(memory)
-    ).rstrip() + "\n"
 
 
 def memory_v3_prompt_view(memory: dict[str, Any]) -> dict[str, Any]:
@@ -217,136 +138,6 @@ def extract_figures_tables(layout: dict[str, Any] | None) -> list[dict[str, Any]
         if len(items) >= 16:
             break
     return items
-
-
-def render_summary_section(memory: dict[str, Any]) -> list[str]:
-    problem = dict_value(memory.get("problem_frame")).get("problem") or ""
-    abstractions = list_payload(memory.get("core_abstractions"))
-    mechanism = dict_value(memory.get("mechanism")).get("overview") or ""
-    evaluation = dict_value(memory.get("evaluation")).get("summary") or ""
-    lines = ["", "## Summary", ""]
-    if problem:
-        lines.append(f"- Problem: {problem}")
-    if abstractions:
-        lines.append(f"- Core abstraction: {abstractions[0].get('text')}")
-    if mechanism:
-        lines.append(f"- Mechanism: {mechanism}")
-    if evaluation:
-        lines.append(f"- Evaluation: {evaluation}")
-    return lines
-
-
-def render_concepts_section(memory: dict[str, Any]) -> list[str]:
-    bridge = dict_value(memory.get("conceptual_bridge"))
-    terms = list_payload(bridge.get("terms"))
-    concepts = list_payload(memory.get("concepts"))
-    lines = ["", "## Conceptual Bridge", ""]
-    if not bridge and not concepts:
-        lines.append("No conceptual bridge.")
-        return lines
-    lines.append(f"- Needed: `{bool(bridge.get('needed'))}`")
-    if string_or_empty(bridge.get("reader_gap")):
-        lines.append(f"- Reader gap: {bridge.get('reader_gap')}")
-    if string_or_empty(bridge.get("bridge_text")):
-        lines.append(f"- Bridge: {bridge.get('bridge_text')}")
-    if terms:
-        lines.extend(["", "| Term | Provenance | Role | Explanation |", "|---|---|---|---|"])
-        for item in terms:
-            if not isinstance(item, dict):
-                continue
-            lines.append(
-                "| "
-                + " | ".join(
-                    [
-                        escape_table(item.get("term")),
-                        escape_table(item.get("provenance")),
-                        escape_table(item.get("paper_role")),
-                        escape_table(item.get("explanation")),
-                    ]
-                )
-                + " |"
-            )
-    elif concepts:
-        lines.extend(["", "| Term | Explanation |", "|---|---|"])
-        for item in concepts[:8]:
-            if isinstance(item, dict):
-                lines.append(
-                    f"| {escape_table(item.get('term'))} | {escape_table(item.get('explanation'))} |"
-                )
-    return lines
-
-
-def render_claims_section(
-    memory: dict[str, Any],
-    *,
-    claim_id: str | None = None,
-    limit: int | None = None,
-) -> list[str]:
-    claims = list_payload(memory.get("claims"))
-    if claim_id:
-        claims = [claim for claim in claims if claim.get("id") == claim_id]
-    if limit is not None:
-        claims = claims[:limit]
-    lines = ["", "## Claims", ""]
-    if not claims:
-        lines.append("No claims.")
-        return lines
-    lines.extend(["| ID | Type | Provenance | Confidence | Evidence | Text |", "|---|---|---|---|---|---|"])
-    for claim in claims:
-        lines.append(
-            "| "
-            + " | ".join(
-                [
-                    escape_table(claim.get("id")),
-                    escape_table(claim.get("type")),
-                    escape_table(claim.get("provenance")),
-                    escape_table(claim.get("confidence")),
-                    escape_table(", ".join(normalized_string_list(claim.get("evidence_refs")))),
-                    escape_table(claim.get("text")),
-                ]
-            )
-            + " |"
-        )
-    return lines
-
-
-def render_evidence_section(memory: dict[str, Any], *, limit: int | None = None) -> list[str]:
-    evidence = list_payload(memory.get("evidence"))
-    if limit is not None:
-        evidence = evidence[:limit]
-    lines = ["", "## Evidence", ""]
-    if not evidence:
-        lines.append("No evidence.")
-        return lines
-    lines.extend(["| ID | Source | Page | Reliability | Interpretation |", "|---|---|---|---|---|"])
-    for item in evidence:
-        lines.append(
-            "| "
-            + " | ".join(
-                [
-                    escape_table(item.get("id")),
-                    escape_table(item.get("source_type")),
-                    escape_table(item.get("page")),
-                    escape_table(item.get("reliability")),
-                    escape_table(item.get("interpretation") or item.get("excerpt_or_caption")),
-                ]
-            )
-            + " |"
-        )
-    return lines
-
-
-def render_audit_section(memory: dict[str, Any]) -> list[str]:
-    audit = dict_value(memory.get("audit_trail"))
-    memory_audit = dict_value(audit.get("memory_audit"))
-    report_audit = dict_value(audit.get("report_audit"))
-    lines = ["", "## Audit", ""]
-    lines.append(f"- Memory audit: `{memory_audit.get('status', 'missing')}`")
-    lines.append(f"- Report audit: `{report_audit.get('verdict', 'missing')}`")
-    issues = normalized_string_list(audit.get("validation_issues"))
-    if issues:
-        lines.append(f"- Validation issues: {', '.join(issues[:8])}")
-    return lines
 
 
 def infer_misunderstanding_guard(text: str) -> str | None:
@@ -414,19 +205,6 @@ def resolve_data_dir(base_dir: Path) -> Path:
 def write_json(path: Path, payload: Any) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
-    return path
-
-
-def write_jsonl(path: Path, payload: Any) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    rows = list_payload(payload)
-    path.write_text("".join(json.dumps(row, ensure_ascii=False, default=str) + "\n" for row in rows), encoding="utf-8")
-    return path
-
-
-def write_text(path: Path, text: str) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
     return path
 
 
@@ -543,10 +321,6 @@ def safe_float(value: Any) -> float | None:
 
 def compact_compare_text(value: Any) -> str:
     return re.sub(r"[\W_]+", "", string_or_empty(value).lower())
-
-
-def escape_table(value: Any) -> str:
-    return string_or_empty(str(value) if value is not None else "").replace("|", "\\|").replace("\n", " ")
 
 
 def now_iso() -> str:

@@ -20,7 +20,8 @@ from paperlens_core.agents.llm import (
     parse_json_text_for_schema,
 )
 from paperlens_core.library import (
-    MEMORY_SCHEMA_VERSION,
+    LIBRARY_RECORD_FILENAME,
+    LIBRARY_RECORD_SCHEMA_VERSION,
     build_library_ask_prompt,
     doctor_library,
     expand_search_query_terms,
@@ -33,18 +34,16 @@ from paperlens_core.library import (
 from paperlens_core.main import configure_utf8_stdio
 from paperlens_core.memory_v3 import (
     MEMORY_V3_SCHEMA_VERSION,
-    inspect_paper_memory_v3,
     read_paper_memory_v3,
     validate_paper_memory_v3,
-    write_memory_v3_indexes,
-    write_paper_memory_v3_bundle,
+    write_paper_memory_v3_file,
 )
 from paperlens_core.memory_store import MEMORY_PATCH_SCHEMA_VERSION, PaperMemoryStore
 from paperlens_core.protocol import RunRequest
-from paperlens_core.pipeline.simple import (
+from paperlens_core.workflow.agent import (
     REPORT_PLAN_SCHEMA,
     REPORT_SECTION_SCHEMA,
-    SimplePipeline,
+    PaperLensWorkflow,
     build_memory_critic_prompt,
     build_memory_repair_prompt,
     build_report_plan_prompt,
@@ -62,7 +61,6 @@ from paperlens_core.pipeline.simple import (
     readable_model_body,
     render_freeform_paper_report,
     render_paperlens_report,
-    resolve_pipeline_stages,
     sanitize_reader_hostile_text,
     select_rolling_read_pages,
     select_targeted_reread_pages,
@@ -71,6 +69,7 @@ from paperlens_core.pipeline.simple import (
     visual_crop_bbox_for_page,
     write_final_report_bundle,
 )
+from paperlens_core.workflow.stages import resolve_workflow_stages
 from paperlens_core.runtime import PaperLensRuntime
 from paperlens_core.quality import evaluate_capsule_quality
 from paperlens_core.qa import (
@@ -80,7 +79,6 @@ from paperlens_core.qa import (
     classify_question,
     normalize_answer,
 )
-from paperlens_core.skills import PAPERLENS_CORE_SKILLS, skill_names
 from paperlens_core.schemas import (
     ClassificationDecision,
     EvidenceRef,
@@ -91,22 +89,19 @@ from paperlens_core.schemas import (
 )
 
 
-def test_core_skill_registry_matches_agent_runtime_design():
-    names = skill_names()
+def test_workflow_stage_order_is_lean():
+    from paperlens_core.workflow.stages import WORKFLOW_STAGE_ORDER
 
-    assert names == [
-        "ReaderSkill",
-        "EvidenceSkill",
-        "CriticSkill",
-        "RepairSkill",
-        "ReportComposerSkill",
-        "QASkill",
+    assert WORKFLOW_STAGE_ORDER == [
+        "stage_00_ingest",
+        "stage_01_parse",
+        "stage_02_parse_verify",
+        "stage_03_skim",
+        "stage_07_normal_read",
+        "stage_08_evidence_verify",
+        "stage_15_export",
+        "stage_17_manifest",
     ]
-    assert {skill.name for skill in PAPERLENS_CORE_SKILLS if skill.mutates_memory} == {
-        "ReaderSkill",
-        "EvidenceSkill",
-        "RepairSkill",
-    }
 
 
 def test_output_validation_rejects_fallback_reports(tmp_path):
@@ -120,16 +115,10 @@ def test_output_validation_rejects_fallback_reports(tmp_path):
         encoding="utf-8",
     )
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError) as exc:
         validate_paperlens_output(tmp_path)
 
-    result = json.loads(
-        (tmp_path / ".paperlens" / "data" / "reports" / "output_validation.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    assert result["status"] == "FAIL"
-    assert any("Fallback report marker" in issue for issue in result["issues"])
+    assert "Fallback report marker" in str(exc.value)
 
 
 def test_output_validation_rejects_escaped_newline_markers(tmp_path):
@@ -139,16 +128,10 @@ def test_output_validation_rejects_escaped_newline_markers(tmp_path):
     )
     (tmp_path / "papers" / "bad.md").write_text("# Bad\n\nfirst\\n\\nsecond\n", encoding="utf-8")
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError) as exc:
         validate_paperlens_output(tmp_path)
 
-    result = json.loads(
-        (tmp_path / ".paperlens" / "data" / "reports" / "output_validation.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    assert result["status"] == "FAIL"
-    assert any("Escaped newline marker" in issue for issue in result["issues"])
+    assert "Escaped newline marker" in str(exc.value)
 
 
 def test_output_validation_rejects_full_page_visual_embeds(tmp_path):
@@ -161,16 +144,10 @@ def test_output_validation_rejects_full_page_visual_embeds(tmp_path):
         encoding="utf-8",
     )
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError) as exc:
         validate_paperlens_output(tmp_path)
 
-    result = json.loads(
-        (tmp_path / ".paperlens" / "data" / "reports" / "output_validation.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    assert result["status"] == "FAIL"
-    assert any("Full-page render embedded" in issue for issue in result["issues"])
+    assert "Full-page render embedded" in str(exc.value)
 
 
 def test_output_validation_rejects_reader_hostile_report_phrases(tmp_path):
@@ -183,16 +160,10 @@ def test_output_validation_rejects_reader_hostile_report_phrases(tmp_path):
         encoding="utf-8",
     )
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError) as exc:
         validate_paperlens_output(tmp_path)
 
-    result = json.loads(
-        (tmp_path / ".paperlens" / "data" / "reports" / "output_validation.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    assert result["status"] == "FAIL"
-    assert any("Reader-hostile implementation wording" in issue for issue in result["issues"])
+    assert "Reader-hostile implementation wording" in str(exc.value)
 
 
 def test_output_validation_counts_only_canonical_paper_reports(tmp_path):
@@ -205,14 +176,12 @@ def test_output_validation_counts_only_canonical_paper_reports(tmp_path):
         encoding="utf-8",
     )
     (tmp_path / "papers" / "p_test.md").write_text("# Good\n\nA useful report.\n", encoding="utf-8")
-    (tmp_path / ".paperlens" / "library" / "paper_memory.jsonl").write_text(
+    (tmp_path / ".paperlens" / "library" / LIBRARY_RECORD_FILENAME).write_text(
         "{}\n", encoding="utf-8"
     )
     (tmp_path / ".paperlens" / "library" / "index" / "search_index.json").write_text(
         "[]", encoding="utf-8"
     )
-    (memory_v3_dir / "claim_index.jsonl").write_text("{}\n", encoding="utf-8")
-    (memory_v3_dir / "evidence_index.jsonl").write_text("{}\n", encoding="utf-8")
     (memory_v3_dir / "p_test.paper_memory.v3.json").write_text("{}", encoding="utf-8")
 
     result = validate_paperlens_output(tmp_path)
@@ -238,7 +207,7 @@ def test_render_freeform_report_normalizes_model_newlines():
         decision=decision,
         model_report={
             "grade": "A",
-            "read_recommendation": "精读",
+            "read_recommendation": "重点关注",
             "one_line_reason": "核心理由\\n不该断在行内",
             "explanation_markdown": "第一段。\\n\\n第二段。",
             "uncertainty_note": "",
@@ -266,7 +235,7 @@ def test_freeform_report_sanitizes_hostile_phrases_and_redundant_anchor():
         decision=decision,
         model_report={
             "grade": "A",
-            "read_recommendation": "精读",
+            "read_recommendation": "重点关注",
             "one_line_reason": "供给的片段显示它提出了一个抽象。",
             "core_takeaway": "把 KV cache 当成分页内存，而不是连续数组。",
             "explanation_markdown": (
@@ -511,7 +480,7 @@ def test_report_section_prompt_uses_expanded_memory_and_plan():
     plan = {
         "paper_id": "p_test",
         "grade": "A",
-        "read_recommendation": "精读",
+        "read_recommendation": "重点关注",
         "one_line_reason": "reason",
         "core_takeaway": "takeaway",
         "sections": [
@@ -641,7 +610,7 @@ def test_freeform_report_hides_audit_todo_and_never_embeds_full_page_visuals():
         },
         model_report={
             "grade": "A",
-            "read_recommendation": "精读",
+            "read_recommendation": "重点关注",
             "one_line_reason": "核心理由",
             "core_takeaway": "先把这篇论文理解成一个内存抽象变化。",
             "explanation_markdown": "这是一份自然语言胶囊。",
@@ -850,7 +819,7 @@ def test_memory_patch_set_updates_capsule_fields(tmp_path):
     assert "When does FIFO fail?" in memory["open_questions"]
 
 
-def test_paper_memory_v3_builds_claim_evidence_ir_and_inspector(tmp_path):
+def test_paper_memory_v3_builds_claim_evidence_ir(tmp_path):
     output_dir = tmp_path / "out"
     data_dir = output_dir / ".paperlens" / "data"
     paper = PaperRecord(
@@ -980,19 +949,15 @@ def test_paper_memory_v3_builds_claim_evidence_ir_and_inspector(tmp_path):
         },
         source="test_patch",
     )
-    written = write_paper_memory_v3_bundle(data_dir, memory)
-    write_memory_v3_indexes(data_dir, [memory])
+    written = write_paper_memory_v3_file(data_dir, memory)
     loaded = read_paper_memory_v3(output_dir, "p_vllm")
-    inspector = inspect_paper_memory_v3(output_dir=output_dir, paper_id="p_vllm", section="claims")
 
     assert memory["schema_version"] == MEMORY_V3_SCHEMA_VERSION
     assert validate_paper_memory_v3(memory) == []
     assert memory["conceptual_bridge"]["terms"][0]["term"] == "KV cache"
-    assert any(path.name.endswith("paper_memory.v3.json") for path in written)
+    assert written.name.endswith("paper_memory.v3.json")
     assert loaded["claims"][0]["id"] == "C001"
     assert loaded["claims"][0]["evidence_refs"]
-    assert "PaperMemoryV3 Inspector" in inspector
-    assert "PagedAttention maps logical KV blocks" in inspector
 
 
 def test_paper_memory_store_materializes_patchable_v3_state(tmp_path):
@@ -1094,8 +1059,6 @@ def test_ask_prompt_includes_memory_without_report_body(tmp_path):
             "claims": [{"id": "C001", "text": "关键 claim", "evidence_refs": ["E001"]}],
             "evidence": [{"id": "E001", "page": 1, "interpretation": "关键证据"}],
         },
-        paper_card={"contribution_claims": ["贡献"]},
-        report_audit={"verdict": "PASS"},
         pages=[{"page_no": 1, "text": "page text", "captions": [], "visual_notes": []}],
         question_type="mechanism",
     )
@@ -1107,7 +1070,7 @@ def test_ask_prompt_includes_memory_without_report_body(tmp_path):
     assert "背景桥接" in prompt
     assert "question_type: mechanism" in prompt
     assert "agent_context_pack:" in prompt
-    assert "paper_card:" in prompt
+    assert "paper_card:" not in prompt
     assert "current_paper_report:" not in prompt
     assert "短报告" not in prompt
 
@@ -1222,36 +1185,69 @@ def test_paperlens_library_writes_single_memory_asset_and_searches(tmp_path):
                 "skim": skim,
                 "decision": decision,
                 "card": card,
-                "paper_memory": {
+                "paper_memory_v3": {
+                    "schema_version": "paper_memory.v3",
                     "paper_id": "p_vllm",
-                    "core_thesis": "PagedAttention treats KV cache as paged memory.",
-                    "core_abstraction": "Use OS-style paging for LLM KV cache.",
-                    "mechanism_model": [
-                        "KV cache is split into fixed-size blocks and mapped through a block table."
+                    "problem_frame": {"problem": "KV cache wastes GPU memory during LLM serving."},
+                    "core_abstractions": [
+                        {
+                            "id": "A001",
+                            "text": "Use OS-style paging for LLM KV cache.",
+                            "evidence_refs": ["E001"],
+                        }
                     ],
-                    "evidence_model": ["Experiments compare serving throughput and memory waste."],
+                    "mechanism": {
+                        "steps": [
+                            {
+                                "id": "M001",
+                                "text": "KV cache is split into fixed-size blocks and mapped through a block table.",
+                            }
+                        ]
+                    },
+                    "evaluation": {
+                        "items": [
+                            {
+                                "id": "V001",
+                                "text": "Experiments compare serving throughput and memory waste.",
+                            }
+                        ]
+                    },
                     "concepts": [
                         {
                             "term": "KV cache",
                             "explanation": "Transformer state kept for generation.",
                         }
                     ],
+                    "conceptual_bridge": {"needed": False, "terms": []},
                     "claims": [
                         {
-                            "claim": "Paging reduces KV cache fragmentation.",
+                            "id": "C001",
+                            "text": "Paging reduces KV cache fragmentation.",
+                            "type": "mechanism",
+                            "provenance": "explicit",
                             "confidence": "high",
-                            "evidence_pages": [2],
+                            "evidence_refs": ["E001"],
+                            "critic_status": "checked",
+                        }
+                    ],
+                    "evidence": [
+                        {
+                            "id": "E001",
+                            "source_type": "text_span",
+                            "page": 2,
+                            "interpretation": "The paper describes paging KV cache blocks.",
+                            "reliability": "direct",
                         }
                     ],
                     "limitations": ["Benefit depends on KV cache pressure."],
-                    "followup_questions": ["When does block-table overhead matter?"],
+                    "open_questions": ["When does block-table overhead matter?"],
                 },
                 "report_name": "p_vllm_pagedattention.md",
                 "report_title": "Efficient Memory Management for LLM Serving with PagedAttention",
                 "model_report": {
                     "one_line_reason": "它把 KV cache 管理变成分页式状态管理。",
                     "core_takeaway": "KV cache 可以像分页内存一样被管理。",
-                    "read_recommendation": "精读",
+                    "read_recommendation": "重点关注",
                 },
                 "report_audit": {"verdict": "PASS_WITH_WEAKNESSES"},
             }
@@ -1266,9 +1262,9 @@ def test_paperlens_library_writes_single_memory_asset_and_searches(tmp_path):
         output_dir=output_dir, query="哪些论文讲内存管理和缓存？", limit=3
     )
 
-    assert (output_dir / ".paperlens" / "library" / "paper_memory.jsonl").exists()
+    assert (output_dir / ".paperlens" / "library" / LIBRARY_RECORD_FILENAME).exists()
     assert (output_dir / ".paperlens" / "library" / "index" / "search_index.json").exists()
-    assert records[0]["schema_version"] == MEMORY_SCHEMA_VERSION
+    assert records[0]["schema_version"] == LIBRARY_RECORD_SCHEMA_VERSION
     assert records[0]["outputs"]["briefing_md"] == "papers/p_vllm_pagedattention.md"
     assert records[0]["memory"]["mechanism_steps"]
     assert records[0]["memory"]["reader_takeaways"]
@@ -1523,13 +1519,13 @@ def test_library_ask_prompt_keeps_source_grounding():
 
     prompt = build_library_ask_prompt(question="哪些论文讲 KV cache？", matches=matches)
 
-    assert "retrieved_paper_memory_records" in prompt
+    assert "retrieved_library_records" in prompt
     assert "specific papers" in prompt
     assert "cross-paper synthesis" in prompt
     assert "source_attribution" in prompt
 
 
-def test_library_rejects_old_memory_schema_in_dev(tmp_path):
+def test_library_rejects_old_library_record_schema_in_dev(tmp_path):
     output_dir = tmp_path / "out"
     memory_dir = output_dir / ".paperlens" / "library"
     memory_dir.mkdir(parents=True)
@@ -1542,7 +1538,7 @@ def test_library_rejects_old_memory_schema_in_dev(tmp_path):
         "provenance": {},
         "outputs": {"briefing_md": "papers/p_old.md"},
     }
-    (memory_dir / "paper_memory.jsonl").write_text(
+    (memory_dir / LIBRARY_RECORD_FILENAME).write_text(
         json.dumps(old_record, ensure_ascii=False) + "\n", encoding="utf-8"
     )
 
@@ -1773,7 +1769,7 @@ def test_rolling_page_limit_env_can_make_formal_smoke_tiny(monkeypatch):
     assert [page.page_no for page in selected] == [1]
 
 
-def test_standard_read_mode_uses_full_page_budget(monkeypatch):
+def test_standard_read_mode_reads_all_usable_pages_by_default(monkeypatch):
     monkeypatch.delenv("PAPERLENS_ROLLING_MAX_PAGES", raising=False)
     pages = [
         SimpleNamespace(page_no=page_no, text=f"page {page_no} design evaluation", captions=[])
@@ -1786,7 +1782,7 @@ def test_standard_read_mode_uses_full_page_budget(monkeypatch):
 
     selected = select_rolling_read_pages(pages, skim, decision, read_mode="standard")
 
-    assert len(selected) == 14
+    assert [page.page_no for page in selected] == list(range(1, 20))
 
 
 def test_stage07_partial_chunk_failure_preserves_successful_memory(tmp_path, monkeypatch):
@@ -1795,7 +1791,7 @@ def test_stage07_partial_chunk_failure_preserves_successful_memory(tmp_path, mon
     output_dir = tmp_path / "out"
     input_dir = tmp_path / "in"
     input_dir.mkdir()
-    pipeline = SimplePipeline(
+    pipeline = PaperLensWorkflow(
         input_dir=input_dir,
         output_dir=output_dir,
         config=CoreConfig(
@@ -1964,7 +1960,7 @@ def test_read_mode_controls_memory_repair_round_budget(monkeypatch):
 def test_zero_repair_budget_disables_targeted_reread_without_repair_call(tmp_path, monkeypatch):
     monkeypatch.setenv("PAPERLENS_MEMORY_REPAIR_ROUNDS", "0")
     output_dir = tmp_path / "out"
-    pipeline = SimplePipeline(
+    pipeline = PaperLensWorkflow(
         input_dir=tmp_path,
         output_dir=output_dir,
         config=CoreConfig(
@@ -2055,7 +2051,7 @@ def test_memory_repair_failure_keeps_existing_memory_under_strict_mode(
 ):
     monkeypatch.delenv("PAPERLENS_ALLOW_LLM_FALLBACK", raising=False)
     output_dir = tmp_path / "out"
-    pipeline = SimplePipeline(
+    pipeline = PaperLensWorkflow(
         input_dir=tmp_path,
         output_dir=output_dir,
         config=CoreConfig(
@@ -2195,7 +2191,7 @@ def test_agentic_report_composer_uses_step_cache(tmp_path):
                 data = {
                     "paper_id": "p_test",
                     "grade": "A",
-                    "read_recommendation": "精读",
+                    "read_recommendation": "重点关注",
                     "one_line_reason": "这篇论文提出了清晰的系统抽象。",
                     "core_takeaway": "把复杂机制压缩成可执行的系统抽象。",
                     "sections": [
@@ -2282,8 +2278,7 @@ def test_report_composer_repairs_only_the_failed_section(tmp_path):
     data_dir = output_dir / ".paperlens" / "data"
     for relative in [
         "papers",
-        ".paperlens/data/reports/paper_reports",
-        ".paperlens/data/reports/paper_report_audits",
+        ".paperlens/data",
     ]:
         (output_dir / relative).mkdir(parents=True, exist_ok=True)
     paper = PaperRecord(
@@ -2307,7 +2302,7 @@ def test_report_composer_repairs_only_the_failed_section(tmp_path):
                 data = {
                     "paper_id": "p_test",
                     "grade": "A",
-                    "read_recommendation": "精读",
+                    "read_recommendation": "重点关注",
                     "one_line_reason": "核心理由",
                     "core_takeaway": "核心抽象",
                     "sections": [
@@ -2400,152 +2395,6 @@ def test_report_composer_repairs_only_the_failed_section(tmp_path):
     assert not any("final_paper_report_repair" in str(run) for run in agent_runs)
 
 
-def test_export_stage_can_retry_one_paper_without_overwriting_existing_reports(
-    tmp_path, monkeypatch
-):
-    output_dir = tmp_path / "out"
-    data_dir = output_dir / ".paperlens" / "data"
-    for relative in [
-        "papers",
-        ".paperlens/data/reports/paper_reports",
-        ".paperlens/data/reports/paper_report_audits",
-    ]:
-        (output_dir / relative).mkdir(parents=True, exist_ok=True)
-    existing = {
-        "grade": "A",
-        "review_status": "已复核",
-        "read_recommendation": "精读",
-        "one_line_reason": "existing reason",
-        "core_takeaway": "existing takeaway",
-        "explanation_markdown": "existing report body",
-        "uncertainty_note": "",
-    }
-    (data_dir / "reports" / "paper_reports" / "p_keep.json").write_text(
-        json.dumps(existing, ensure_ascii=False),
-        encoding="utf-8",
-    )
-    (data_dir / "reports" / "paper_report_audits" / "p_keep.json").write_text(
-        json.dumps(
-            {
-                "verdict": "PASS",
-                "unsupported_items": [],
-                "missing_items": [],
-                "correction_notes": [],
-                "safe_usage_note": "ok",
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    papers = [
-        PaperRecord(
-            paper_id="p_keep", file_path="keep.pdf", file_hash="hash1", canonical_title="Keep Paper"
-        ),
-        PaperRecord(
-            paper_id="p_retry",
-            file_path="retry.pdf",
-            file_hash="hash2",
-            canonical_title="Retry Paper",
-        ),
-    ]
-    decisions = [
-        ClassificationDecision(
-            paper_id="p_keep", class_label="A", confidence=0.9, false_negative_risk=0.1
-        ),
-        ClassificationDecision(
-            paper_id="p_retry", class_label="A", confidence=0.9, false_negative_risk=0.1
-        ),
-    ]
-    calls: list[str] = []
-
-    class FakeClient:
-        config = SimpleNamespace(kind="openai-compatible", model="fake-model")
-
-        def invoke_json(self, *, schema_name, user_prompt, **_kwargs):
-            calls.append(schema_name)
-            if schema_name == "paperlens_report_plan":
-                data = {
-                    "paper_id": "p_retry",
-                    "grade": "A",
-                    "read_recommendation": "精读",
-                    "one_line_reason": "retry reason",
-                    "core_takeaway": "retry takeaway",
-                    "sections": [
-                        {
-                            "section_id": "idea",
-                            "section_kind": "orientation",
-                            "title": "核心抽象",
-                            "purpose": "explain",
-                            "focus_queries": [],
-                            "claim_ids": [],
-                            "evidence_refs": [],
-                            "target_pages": [],
-                        }
-                    ],
-                    "key_visual_pages": [],
-                    "uncertainty_note": "",
-                }
-            elif schema_name == "paperlens_report_section":
-                data = {
-                    "section_id": "idea",
-                    "title": "核心抽象",
-                    "paragraphs": ["retry report body"],
-                    "used_claim_ids": [],
-                    "used_evidence_refs": [],
-                    "uncertainty_note": "",
-                }
-            elif schema_name == "paperlens_report_section_audit":
-                data = {
-                    "verdict": "PASS",
-                    "unsupported_items": [],
-                    "missing_items": [],
-                    "repair_instructions": [],
-                    "safe_usage_note": "",
-                }
-            else:
-                raise AssertionError(schema_name)
-            return SimpleNamespace(
-                data=data,
-                usage={"prompt_tokens": 10, "completion_tokens": 20},
-                endpoint="fake",
-                request_id=schema_name,
-            )
-
-    monkeypatch.setenv("PAPERLENS_EXPORT_PAPER_IDS", "p_retry")
-
-    write_final_report_bundle(
-        output_dir=output_dir,
-        data_dir=data_dir,
-        evidence_dir=output_dir / ".paperlens",
-        client=FakeClient(),
-        record_usage=lambda _stage, _usage: None,
-        record_agent_run=lambda _run: None,
-        stage="stage_15_export",
-        papers=papers,
-        skim_cards=[],
-        decisions=decisions,
-        paper_cards=[],
-        review_items=[],
-        budget={},
-        config={"offline_debug": False},
-        topic=None,
-        idea=None,
-        cache_dir=output_dir / ".paperlens" / "cache",
-    )
-
-    assert calls == [
-        "paperlens_report_plan",
-        "paperlens_report_section",
-        "paperlens_report_section_audit",
-    ]
-    assert "existing report body" in (output_dir / "papers" / "p_keep_keep_paper.md").read_text(
-        encoding="utf-8"
-    )
-    assert "retry report body" in (output_dir / "papers" / "p_retry_retry_paper.md").read_text(
-        encoding="utf-8"
-    )
-
-
 def test_paper_question_answer_uses_cache(tmp_path, monkeypatch):
     output_dir = tmp_path / "out"
     (output_dir / "papers").mkdir(parents=True)
@@ -2595,13 +2444,14 @@ def test_paper_question_answer_uses_cache(tmp_path, monkeypatch):
 
 
 def test_resume_stage_resolution_supports_late_export():
-    assert resolve_pipeline_stages(from_stage="stage_15_export") == [
+    assert resolve_workflow_stages(from_stage="stage_15_export") == [
         "stage_15_export",
         "stage_17_manifest",
     ]
-    assert resolve_pipeline_stages(only_stage="stage_15_export_reports") == ["stage_15_export"]
     with pytest.raises(ValueError):
-        resolve_pipeline_stages(from_stage="stage_15_export", only_stage="stage_07_normal_read")
+        resolve_workflow_stages(only_stage="stage_15_export_reports")
+    with pytest.raises(ValueError):
+        resolve_workflow_stages(from_stage="stage_15_export", only_stage="stage_07_normal_read")
 
 
 def test_db_can_reload_completed_pipeline_state(tmp_path):
@@ -2632,7 +2482,7 @@ def test_db_can_reload_completed_pipeline_state(tmp_path):
 
 def test_stage07_persists_each_paper_card_for_resume(tmp_path):
     output_dir = tmp_path / "out"
-    pipeline = SimplePipeline(
+    pipeline = PaperLensWorkflow(
         input_dir=tmp_path / "in",
         output_dir=output_dir,
         config=CoreConfig(offline_debug=True),
@@ -2652,7 +2502,7 @@ def test_stage07_persists_each_paper_card_for_resume(tmp_path):
     pipeline.persist_paper_card("stage_07_normal_read", paper, card)
 
     assert pipeline.db.list_paper_cards()[0].paper_id == "p_test"
-    assert (output_dir / ".paperlens" / "data" / "cards" / "paper" / "p_test.json").exists()
+    assert not (output_dir / ".paperlens" / "data" / "cards").exists()
     pipeline.db.close()
 
 
@@ -2660,7 +2510,7 @@ def test_pipeline_failure_marks_run_json_failed(tmp_path, monkeypatch):
     output_dir = tmp_path / "out"
     input_dir = tmp_path / "in"
     input_dir.mkdir()
-    pipeline = SimplePipeline(
+    pipeline = PaperLensWorkflow(
         input_dir=input_dir,
         output_dir=output_dir,
         config=CoreConfig(offline_debug=True),
@@ -2691,7 +2541,7 @@ def test_only_stage_intermediate_run_marks_partial_completed(tmp_path, monkeypat
     output_dir = tmp_path / "out"
     input_dir = tmp_path / "in"
     input_dir.mkdir()
-    pipeline = SimplePipeline(
+    pipeline = PaperLensWorkflow(
         input_dir=input_dir,
         output_dir=output_dir,
         config=CoreConfig(offline_debug=True),
@@ -2717,7 +2567,7 @@ def test_only_stage_intermediate_run_marks_partial_completed(tmp_path, monkeypat
 
 def test_stage03_persists_skim_classification_for_resume(tmp_path):
     output_dir = tmp_path / "out"
-    pipeline = SimplePipeline(
+    pipeline = PaperLensWorkflow(
         input_dir=tmp_path / "in",
         output_dir=output_dir,
         config=CoreConfig(offline_debug=True),
@@ -2744,13 +2594,13 @@ def test_stage03_persists_skim_classification_for_resume(tmp_path):
 
     assert pipeline.db.list_skim_cards()[0].problem == "stable progress"
     assert pipeline.db.list_classifications()[0].class_label == "A"
-    assert (output_dir / ".paperlens" / "data" / "cards" / "skim" / "p_test.json").exists()
+    assert not (output_dir / ".paperlens" / "data" / "cards").exists()
     pipeline.db.close()
 
 
 def test_resume_from_stage03_loads_partial_skim_state(tmp_path):
     output_dir = tmp_path / "out"
-    pipeline = SimplePipeline(
+    pipeline = PaperLensWorkflow(
         input_dir=tmp_path / "in",
         output_dir=output_dir,
         config=CoreConfig(offline_debug=True),

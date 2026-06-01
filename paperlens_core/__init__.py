@@ -3,7 +3,6 @@ from __future__ import annotations
 from paperlens_core.engine import PaperLensEngine
 from paperlens_core.protocol import (
     CoreResult,
-    InspectMemoryRequest,
     LibraryBuildRequest,
     LibraryDoctorRequest,
     LibraryQuestionRequest,
@@ -16,7 +15,6 @@ from paperlens_core.protocol import (
 
 __all__ = [
     "CoreResult",
-    "InspectMemoryRequest",
     "LibraryBuildRequest",
     "LibraryDoctorRequest",
     "LibraryQuestionRequest",

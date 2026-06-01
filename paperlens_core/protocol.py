@@ -61,10 +61,3 @@ class LibraryQuestionRequest(CoreRequest):
     question: str
     limit: int = 8
 
-
-class InspectMemoryRequest(BaseModel):
-    output_dir: Path
-    paper_id: str | None = None
-    section: Literal["summary", "claims", "evidence", "concepts", "audit"] = "summary"
-    claim_id: str | None = None
-    patches: bool = False

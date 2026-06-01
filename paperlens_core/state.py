@@ -1,21 +1,10 @@
 from __future__ import annotations
 
 from paperlens_core.schemas import PaperState, now_iso
+from paperlens_core.workflow.stages import WORKFLOW_STAGE_STATES
 
 
-MAIN_STAGE_STATES = {
-    "stage_00_ingest": "INGESTED",
-    "stage_01_parse": "PARSED",
-    "stage_02_parse_verify": "PARSE_VERIFIED",
-    "stage_03_skim": "SKIMMED",
-    "stage_04_classify": "CLASSIFIED",
-    "stage_05_classification_audit": "CLASSIFICATION_AUDITED",
-    "stage_06_queue": "QUEUED_FOR_NORMAL_READ",
-    "stage_07_normal_read": "NORMAL_READ",
-    "stage_08_evidence_verify": "EVIDENCE_VERIFIED",
-    "stage_15_export": "REPORT_EXPORTED",
-    "stage_17_manifest": "RUN_MANIFEST_READY",
-}
+MAIN_STAGE_STATES = WORKFLOW_STAGE_STATES
 
 
 def transition_state(

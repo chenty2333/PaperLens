@@ -2,7 +2,7 @@
 
 PaperLens Core is a paper knowledge-processing agent. It is not a PDF reader, a classic reference manager, or a generic paper summarizer.
 
-The core pipeline is:
+The core workflow is:
 
 ```text
 PDF / text / page images
@@ -17,11 +17,28 @@ PDF / text / page images
 -> later: Discovery / Reproduction skill
 ```
 
+The active run is deliberately smaller than a general agent framework:
+
+```text
+ingest
+-> parse
+-> parse verification
+-> paper map
+-> standard read loop
+-> memory/evidence verification
+-> report assembly
+-> manifest/library
+```
+
+PaperLens does not spend separate stages on grade validation or queue construction.
+Every imported paper enters the same standard reading loop. Grade is a presentation
+signal, not an execution branch or a shortcut around memory construction.
+
 ## Product Principles
 
 1. PaperMemoryV3 is the source of truth. Reports, QA, Library, and future reproduction must consume memory and evidence, not each other.
 2. Core v1 has one default report view: a Standard knowledge capsule. The report is streamed at the workflow level through `ReportPlan -> ReportSection[] -> SectionAudit[] -> Assemble`; no single model call is responsible for writing the full report, and no hard length floor or regex fact rewrite is allowed. A close-reading view can be added later as an explicit opt-in skill.
-3. Grade controls reading investment and presentation depth. It never controls claim truthfulness.
+3. Grade is a presentation and prioritization signal. It never controls claim truthfulness, and the standard read loop does not skip papers based on grade.
 4. Every meaningful claim should carry provenance, confidence, evidence refs, and critic status.
 5. Output language is a rendering preference. Chinese and English reports consume the same PaperMemory/library; internal reading prompts may stay English.
 6. PaperMemory keeps a fixed concept-introduction layer for necessary background terms. Reports should use that layer organically, without turning into a generic basics section.
@@ -66,33 +83,28 @@ Output contract:
 
 This is the PaperLens equivalent of a lightweight Codex/Claude-Code style loop: the model receives task state and local tool results, decides what is uncertain, and returns a patch or bounded answer. The runtime remains responsible for applying patches, preserving evidence refs, writing the audit trail, and preventing reports or QA from becoming the source of truth.
 
-## Core Skills
+## Core Loop
 
-PaperLens Core exposes a small paper-specific skill registry:
+PaperLens Core does not expose a general skill registry. The workflow uses a small fixed loop:
 
 ```text
-ReaderSkill
-  Reads a page/section window and emits MemoryPatchSet only.
-
-EvidenceSkill
-  Grounds claims in text spans, captions, figures, and tables.
-
-CriticSkill
-  Finds missing contributions, unsupported claims, overclaims, and evaluation gaps.
-
-RepairSkill
-  Applies targeted reread results as MemoryPatchSet.
-
-ReportComposerSkill
-  Produces ReportPlan, writes section drafts, audits each section, then assembles Markdown.
-  Mechanism sections get an explicit detail contract: state before/after, data structures,
-  request/object lifecycle, bottleneck shift, and tradeoffs.
-
-QASkill
-  Answers from PaperMemory, library memory, focused pages, and tool observations.
+Read pages/sections
+  -> emit MemoryPatchSet
+Ground claims
+  -> attach text/figure/table evidence
+Critic
+  -> identify only high-risk gaps
+Targeted repair
+  -> patch memory
+Compose capsule
+  -> plan, section drafts, section audit, assembly
+QA
+  -> answer from PaperMemory, library records, focused pages, and tool observations
 ```
 
-The main agent owns job state and stage ordering; tools retrieve paper-local evidence; hooks validate patches and section outputs; memory remains the only durable knowledge state.
+The workflow owns job state and stage ordering. Deterministic paper tools retrieve
+paper-local evidence; hooks validate patches and section outputs; memory remains
+the only durable knowledge state.
 
 Minimum sections:
 
@@ -201,9 +213,9 @@ PaperMemoryV3
 
 The assembler may repair Markdown boundaries and render figure/table crops, but it must not rewrite factual content. Whole-report repair and `paperlens_final_*` protocols are removed from the active workflow.
 
-## Developer Artifacts
+## Internal State
 
-Current developer-facing artifacts live under:
+The active workflow keeps only the durable memory state and its patch log under:
 
 ```text
 .paperlens/data/memory/v3/
@@ -213,34 +225,7 @@ Per paper:
 
 ```text
 <paper_id>.paper_memory.v3.json
-<paper_id>.claim_index.jsonl
-<paper_id>.evidence_index.jsonl
-<paper_id>.memory_audit.json
-<paper_id>.report_audit.json
-<paper_id>.report_plan.json
-<paper_id>.<section_id>.report_section.json
-<paper_id>.<section_id>.report_section_audit.json
-<paper_id>.inspector.md
 <paper_id>.memory_patches.jsonl
-```
-
-Aggregate:
-
-```text
-claim_index.jsonl
-evidence_index.jsonl
-```
-
-CLI inspection:
-
-```text
-paperlens-core inspect --output-dir <output> --paper-id <paper_id>
-paperlens-core inspect --output-dir <output> --paper-id <paper_id> --concepts
-paperlens-core inspect --output-dir <output> --paper-id <paper_id> --claims
-paperlens-core inspect --output-dir <output> --paper-id <paper_id> --evidence
-paperlens-core inspect --output-dir <output> --paper-id <paper_id> --audit
-paperlens-core inspect --output-dir <output> --paper-id <paper_id> --claim C001
-paperlens-core inspect --output-dir <output> --paper-id <paper_id> --patches
 ```
 
 ## QA v2 Direction

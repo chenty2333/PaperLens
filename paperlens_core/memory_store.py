@@ -20,7 +20,7 @@ from paperlens_core.memory_v3 import (
     read_paper_memory_v3,
     safe_int,
     validate_paper_memory_v3,
-    write_paper_memory_v3_bundle,
+    write_paper_memory_v3_file,
 )
 from paperlens_core.schemas import ClassificationDecision, PaperCard, PaperRecord, SkimCard
 
@@ -117,7 +117,7 @@ class PaperMemoryStore:
         return memory
 
     def write(self, memory: dict[str, Any]) -> list[Path]:
-        return write_paper_memory_v3_bundle(self.data_dir, memory)
+        return [write_paper_memory_v3_file(self.data_dir, memory)]
 
     def apply_patch_set(
         self,

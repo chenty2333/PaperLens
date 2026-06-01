@@ -38,7 +38,7 @@ output/
   .paperlens/
     state.sqlite
     library/
-      paper_memory.jsonl
+      library_records.jsonl
       index/
         search_index.json
     pages/
@@ -50,8 +50,6 @@ output/
         v3/
           <paper_id>.paper_memory.v3.json
           <paper_id>.memory_patches.jsonl
-          claim_index.jsonl
-          evidence_index.jsonl
 ```
 
 Open `PaperLens.md` first when using raw output files. The desktop app reads the same output directory and presents the library, capsule, evidence, and chat surfaces.
