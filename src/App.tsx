@@ -251,13 +251,45 @@ function normalizeLocalPath(path: string) {
   return parts.join(slash)
 }
 
-function localAssetSrc(src: string | undefined, report: ReportPayload | null, outputDir: string) {
+function dirname(path: string) {
+  const normalized = path.replace(/\\/g, '/')
+  const index = normalized.lastIndexOf('/')
+  return index >= 0 ? normalized.slice(0, index) : ''
+}
+
+function resolveRelativePath(baseDir: string, target: string) {
+  const normalized = target.replace(/\\/g, '/')
+  if (/^[A-Za-z]:[\\/]/.test(normalized) || normalized.startsWith('/')) return normalized
+  const parts: string[] = []
+  for (const part of `${baseDir}/${normalized}`.split('/')) {
+    if (!part || part === '.') continue
+    if (part === '..') {
+      parts.pop()
+    } else {
+      parts.push(part)
+    }
+  }
+  return parts.join('/')
+}
+
+function assetServiceSrc(service: ServiceInfo | null, outputDir: string, assetPath: string) {
+  if (!service || !outputDir || !assetPath) return ''
+  return serviceUrl(
+    service,
+    `/assets?output_dir=${encodeOutput(outputDir)}&path=${encodeURIComponent(assetPath)}&token=${encodeURIComponent(service.token)}`,
+  )
+}
+
+function localAssetSrc(src: string | undefined, report: ReportPayload | null, outputDir: string, service: ServiceInfo | null) {
   if (!src) return ''
   if (/^(https?:|data:|blob:)/i.test(src)) return src
-  const relative = src.replace(/^\.\//, '')
-  const root = src.startsWith('../') || src.startsWith('./') ? report?.base_dir : outputDir
+  const baseDir = report?.paper.report_path ? dirname(report.paper.report_path) : ''
+  const assetPath = resolveRelativePath(baseDir, src)
+  const serviceSrc = assetServiceSrc(service, outputDir, assetPath)
+  if (serviceSrc) return serviceSrc
+  const root = report?.base_dir && (src.startsWith('../') || src.startsWith('./')) ? report.base_dir : outputDir
   if (!root) return src
-  return convertFileSrc(normalizeLocalPath(`${root}\\${relative.replace(/\//g, '\\')}`))
+  return convertFileSrc(normalizeLocalPath(`${root}\\${src.replace(/\//g, '\\')}`))
 }
 
 function statusLabel(status?: string) {
@@ -958,7 +990,7 @@ function App() {
         <div className="reader-scroll">
           <article className="report-article">
             {report ? (
-              <MarkdownBlock markdown={report.markdown} report={report} outputDir={currentOutputDir} />
+              <MarkdownBlock markdown={report.markdown} report={report} outputDir={currentOutputDir} service={service} />
             ) : (
               <div className="empty large">还没有可展示的报告</div>
             )}
@@ -1074,7 +1106,7 @@ function App() {
                   </div>
                 )}
                 {chatMessages.map((message) => (
-                  <ChatBubble key={message.id} message={message} report={report} outputDir={currentOutputDir} />
+                  <ChatBubble key={message.id} message={message} report={report} outputDir={currentOutputDir} service={service} />
                 ))}
                 <div ref={chatEndRef} />
               </div>
@@ -1219,7 +1251,17 @@ function DirectoryField({ label, value, onChange, onPick }: { label: string; val
   )
 }
 
-function MarkdownBlock({ markdown, report, outputDir }: { markdown: string; report: ReportPayload | null; outputDir: string }) {
+function MarkdownBlock({
+  markdown,
+  report,
+  outputDir,
+  service,
+}: {
+  markdown: string
+  report: ReportPayload | null
+  outputDir: string
+  service: ServiceInfo | null
+}) {
   return (
     <div className="markdown-body">
       <ReactMarkdown
@@ -1227,7 +1269,7 @@ function MarkdownBlock({ markdown, report, outputDir }: { markdown: string; repo
         rehypePlugins={[rehypeRaw, rehypeKatex]}
         components={{
           img: ({ src, alt }) => (
-            <img src={localAssetSrc(src, report, outputDir)} alt={alt ?? ''} loading="lazy" />
+            <img src={localAssetSrc(src, report, outputDir, service)} alt={alt ?? ''} loading="lazy" />
           ),
           a: ({ href, children }) => (
             <a href={href} onClick={(event) => {
@@ -1246,7 +1288,17 @@ function MarkdownBlock({ markdown, report, outputDir }: { markdown: string; repo
   )
 }
 
-function ChatBubble({ message, report, outputDir }: { message: ChatMessage; report: ReportPayload | null; outputDir: string }) {
+function ChatBubble({
+  message,
+  report,
+  outputDir,
+  service,
+}: {
+  message: ChatMessage
+  report: ReportPayload | null
+  outputDir: string
+  service: ServiceInfo | null
+}) {
   return (
     <div className={`chat-message ${message.role} ${message.pending ? 'pending' : ''}`}>
       <strong>{message.role === 'user' ? '你' : 'PaperLens'}</strong>
@@ -1255,7 +1307,7 @@ function ChatBubble({ message, report, outputDir }: { message: ChatMessage; repo
           <Loader2 className="spinning" size={15} /> 正在核对证据...
         </div>
       ) : (
-        <MarkdownBlock markdown={message.content} report={report} outputDir={outputDir} />
+        <MarkdownBlock markdown={message.content} report={report} outputDir={outputDir} service={service} />
       )}
       {message.answer && <AnswerEvidence answer={message.answer} />}
       {message.error && (

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import secrets
 import threading
 import time
@@ -60,6 +61,17 @@ def write_json_response(handler: BaseHTTPRequestHandler, status: int, payload: A
     handler.send_response(status)
     write_common_headers(handler)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def write_file_response(handler: BaseHTTPRequestHandler, path: Path) -> None:
+    body = path.read_bytes()
+    content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    handler.send_response(HTTPStatus.OK)
+    write_common_headers(handler)
+    handler.send_header("Content-Type", content_type)
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
@@ -277,6 +289,25 @@ def load_evidence(output_dir: Path, paper_id: str) -> dict[str, Any]:
         "claims": claims,
         "evidence": evidence,
     }
+
+
+def resolve_output_asset(output_dir: Path, asset_path: str) -> Path:
+    if not asset_path:
+        raise ValueError("Missing asset path")
+    if "\x00" in asset_path:
+        raise ValueError("Invalid asset path")
+    output_dir = output_dir.expanduser().resolve()
+    requested = Path(asset_path)
+    if requested.is_absolute():
+        raise ValueError("Asset path must be relative to output_dir")
+    target = (output_dir / requested).resolve()
+    try:
+        target.relative_to(output_dir)
+    except ValueError as exc:
+        raise ValueError("Asset path escapes output_dir") from exc
+    if not target.exists() or not target.is_file():
+        raise FileNotFoundError(f"Asset file missing: {asset_path}")
+    return target
 
 
 class EventStream:
@@ -666,7 +697,10 @@ class PaperLensRequestHandler(BaseHTTPRequestHandler):
             else:
                 raise RouteError(HTTPStatus.METHOD_NOT_ALLOWED, "method not allowed")
             if result is not None:
-                write_json_response(self, HTTPStatus.OK, result)
+                if isinstance(result, FileResult):
+                    write_file_response(self, result.path)
+                else:
+                    write_json_response(self, HTTPStatus.OK, result)
         except RouteError as exc:
             write_json_response(self, int(exc.status), {"error": exc.message})
         except FileNotFoundError as exc:
@@ -717,6 +751,10 @@ class PaperLensRequestHandler(BaseHTTPRequestHandler):
         if len(parts) == 3 and parts[0] == "papers" and parts[2] == "evidence":
             output_dir = output_dir_from_query(query, self.state.current_output_dir)
             return load_evidence(output_dir, parts[1])
+        if parts == ["assets"]:
+            output_dir = output_dir_from_query(query, self.state.current_output_dir)
+            asset_path = query.get("path", [""])[0]
+            return FileResult(resolve_output_asset(output_dir, asset_path))
         if parts == ["jobs"]:
             return {"jobs": [job.summary() for job in self.state.jobs.values()]}
         if len(parts) == 2 and parts[0] == "jobs":
@@ -795,6 +833,11 @@ class RouteError(Exception):
         super().__init__(message)
         self.status = status
         self.message = message
+
+
+@dataclass(frozen=True)
+class FileResult:
+    path: Path
 
 
 def serve(

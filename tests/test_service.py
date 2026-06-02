@@ -4,6 +4,7 @@ import json
 import threading
 import urllib.error
 import urllib.request
+from urllib.parse import quote
 from pathlib import Path
 
 from paperlens_core.service import (
@@ -94,6 +95,43 @@ def test_service_requires_auth_for_workspace_routes(tmp_path: Path) -> None:
         with urllib.request.urlopen(request, timeout=5) as response:
             payload = json.loads(response.read().decode("utf-8"))
         assert payload["papers"][0]["paper_id"] == "p_test"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_service_serves_only_workspace_assets(tmp_path: Path) -> None:
+    write_sample_library(tmp_path)
+    asset_path = tmp_path / ".paperlens" / "figures" / "p_test" / "figure.png"
+    asset_path.parent.mkdir(parents=True)
+    asset_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    outside = tmp_path.parent / "outside.png"
+    outside.write_bytes(b"outside")
+    state = PaperLensServiceState(token="test-token")
+    server = PaperLensHttpServer(("127.0.0.1", 0), PaperLensRequestHandler, state=state)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        path_query = quote(".paperlens/figures/p_test/figure.png", safe="")
+        output_query = quote(str(tmp_path), safe="")
+        with urllib.request.urlopen(
+            f"{base_url}/assets?output_dir={output_query}&path={path_query}&token=test-token",
+            timeout=5,
+        ) as response:
+            assert response.status == 200
+            assert response.headers["Content-Type"] == "image/png"
+            assert response.read() == b"\x89PNG\r\n\x1a\n"
+
+        escaped_path_query = quote("../outside.png", safe="")
+        try:
+            urllib.request.urlopen(
+                f"{base_url}/assets?output_dir={output_query}&path={escaped_path_query}&token=test-token",
+                timeout=5,
+            )
+            raise AssertionError("expected bad request for escaped asset path")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 400
     finally:
         server.shutdown()
         server.server_close()
