@@ -280,16 +280,49 @@ function assetServiceSrc(service: ServiceInfo | null, outputDir: string, assetPa
   )
 }
 
-function localAssetSrc(src: string | undefined, report: ReportPayload | null, outputDir: string, service: ServiceInfo | null) {
-  if (!src) return ''
-  if (/^(https?:|data:|blob:)/i.test(src)) return src
+function outputRootForReport(report: ReportPayload | null, outputDir: string) {
+  if (outputDir) return outputDir
+  if (!report?.base_dir) return ''
+  const normalized = report.base_dir.replace(/\\/g, '/')
+  return normalized.endsWith('/papers') ? normalized.slice(0, -'/papers'.length) : ''
+}
+
+function isAbsoluteLocalPath(path: string) {
+  return /^[A-Za-z]:[\\/]/.test(path) || path.startsWith('/') || path.startsWith('\\')
+}
+
+function absoluteReportAssetPath(src: string, report: ReportPayload | null, outputDir: string) {
+  const normalized = src.replace(/\\/g, '/')
+  if (isAbsoluteLocalPath(normalized)) return normalizeLocalPath(normalized)
+  const root = report?.base_dir && (normalized.startsWith('../') || normalized.startsWith('./'))
+    ? report.base_dir
+    : outputRootForReport(report, outputDir)
+  if (!root) return ''
+  return normalizeLocalPath(`${root}\\${normalized.replace(/\//g, '\\')}`)
+}
+
+function viteDevFileSrc(path: string) {
+  if (!path || !import.meta.env.DEV) return ''
+  return `/paperlens-media?path=${encodeURIComponent(path)}`
+}
+
+function uniqueCandidates(values: string[]) {
+  return values.filter((value, index) => value && values.indexOf(value) === index)
+}
+
+function localAssetCandidates(src: string | undefined, report: ReportPayload | null, outputDir: string, service: ServiceInfo | null) {
+  if (!src) return []
+  if (/^(https?:|data:|blob:)/i.test(src)) return [src]
   const baseDir = report?.paper.report_path ? dirname(report.paper.report_path) : ''
   const assetPath = resolveRelativePath(baseDir, src)
-  const serviceSrc = assetServiceSrc(service, outputDir, assetPath)
-  if (serviceSrc) return serviceSrc
-  const root = report?.base_dir && (src.startsWith('../') || src.startsWith('./')) ? report.base_dir : outputDir
-  if (!root) return src
-  return convertFileSrc(normalizeLocalPath(`${root}\\${src.replace(/\//g, '\\')}`))
+  const outputRoot = outputRootForReport(report, outputDir)
+  const absolutePath = absoluteReportAssetPath(src, report, outputDir)
+  return uniqueCandidates([
+    assetServiceSrc(service, outputRoot, assetPath),
+    viteDevFileSrc(absolutePath),
+    absolutePath ? convertFileSrc(absolutePath) : '',
+    src,
+  ])
 }
 
 function statusLabel(status?: string) {
@@ -1269,7 +1302,7 @@ function MarkdownBlock({
         rehypePlugins={[rehypeRaw, rehypeKatex]}
         components={{
           img: ({ src, alt }) => (
-            <img src={localAssetSrc(src, report, outputDir, service)} alt={alt ?? ''} loading="lazy" />
+            <MarkdownImage src={src} alt={alt ?? ''} report={report} outputDir={outputDir} service={service} />
           ),
           a: ({ href, children }) => (
             <a href={href} onClick={(event) => {
@@ -1285,6 +1318,40 @@ function MarkdownBlock({
         {markdown}
       </ReactMarkdown>
     </div>
+  )
+}
+
+function MarkdownImage({
+  src,
+  alt,
+  report,
+  outputDir,
+  service,
+}: {
+  src?: string
+  alt: string
+  report: ReportPayload | null
+  outputDir: string
+  service: ServiceInfo | null
+}) {
+  const candidates = localAssetCandidates(src, report, outputDir, service)
+  const candidateKey = candidates.join('\n')
+  const [loadState, setLoadState] = useState({ key: '', index: 0 })
+  const candidateIndex = loadState.key === candidateKey ? loadState.index : 0
+  const currentSrc = candidates[candidateIndex] ?? ''
+  return (
+    <img
+      src={currentSrc}
+      alt={alt}
+      loading="lazy"
+      onError={() => {
+        setLoadState((current) => {
+          const currentIndex = current.key === candidateKey ? current.index : 0
+          const nextIndex = currentIndex + 1
+          return nextIndex < candidates.length ? { key: candidateKey, index: nextIndex } : current
+        })
+      }}
+    />
   )
 }
 
