@@ -252,8 +252,6 @@ class PaperLensRuntime:
                 if isinstance(number, int) and number not in evidence_pages:
                     evidence_pages.append(number)
         explicit_pages = pages_from_memory(memory)
-        if audit:
-            explicit_pages.extend(pages_from_audit(audit))
         for page in explicit_pages:
             if page not in evidence_pages:
                 evidence_pages.append(page)
@@ -263,10 +261,10 @@ class PaperLensRuntime:
         figure_query = " ".join(queries[:2]) or str(memory.get("core_abstraction") or "")
         figures = self.find_figures(figure_query, limit=3)
         context_pack = self.build_context_pack(
-            stage="memory_critic",
+            stage="central_memory_verify",
             objective=(
-                "Audit PaperMemoryV3 like a lightweight paper-reading agent: decide which claims "
-                "are grounded, which need focused reread, and which can be repaired or bounded."
+                "Verify PaperMemoryV3 like a lightweight paper-reading agent: decide which claims "
+                "are grounded, which should be weakened, and which evidence boundaries must remain visible."
             ),
             paper_id=str(memory.get("paper_id") or "unknown"),
             title=str(dict_value(memory.get("metadata")).get("title") or ""),
@@ -276,10 +274,9 @@ class PaperLensRuntime:
             focus_pages=evidence_pages[:8],
             read_artifacts=read_artifacts,
             output_contract={
-                "type": "MemoryCritic",
+                "type": "MemoryPatchSet",
                 "rule": (
-                    "Do not run a mechanical checklist. Use the local tool trace to decide whether "
-                    "targeted reread is actually needed; return reread requests only for unresolved gaps."
+                    "Use the local tool trace to fix or bound memory in one verification pass."
                 ),
             },
             search_limit=4,
@@ -288,7 +285,7 @@ class PaperLensRuntime:
         return {
             "runtime_contract": (
                 "Deterministic local retrieval over parsed paper text/captions. Use it to verify "
-                "where claims might be grounded before asking for expensive targeted reread."
+                "where claims might be grounded before finalizing the memory boundary."
             ),
             "agent_context_pack": context_pack.as_dict(),
             "queries": queries[:5],
@@ -435,17 +432,6 @@ def audit_queries(memory: dict[str, Any], audit: dict[str, Any] | None) -> list[
         for item in audit.get("missing_items") if isinstance(audit.get("missing_items"), list) else []:
             if isinstance(item, str) and item.strip():
                 queries.append(item)
-        requests = audit.get("reread_requests") if isinstance(audit.get("reread_requests"), list) else []
-        for item in requests:
-            if not isinstance(item, dict):
-                continue
-            query = " ".join(
-                str(value)
-                for value in [item.get("reason"), item.get("keyword")]
-                if isinstance(value, str) and value.strip()
-            )
-            if query:
-                queries.append(query)
     return dedupe_queries(queries)
 
 
@@ -488,15 +474,6 @@ def pages_from_memory(memory: dict[str, Any]) -> list[int]:
                 add_page(pages, value)
         for value in claim.get("evidence_pages") if isinstance(claim.get("evidence_pages"), list) else []:
             add_page(pages, value)
-    return pages
-
-
-def pages_from_audit(audit: dict[str, Any]) -> list[int]:
-    pages: list[int] = []
-    requests = audit.get("reread_requests") if isinstance(audit.get("reread_requests"), list) else []
-    for item in requests:
-        if isinstance(item, dict):
-            add_page(pages, item.get("page_no"))
     return pages
 
 

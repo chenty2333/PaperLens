@@ -1170,16 +1170,6 @@ class PaperLensWorkflow:
                     data={"paper_id": paper.paper_id, "pages": pages, "error": str(exc)},
                 )
         _ = failed_chunks
-        memory = self.audit_and_repair_paper_memory(
-            client=client,
-            stage=stage,
-            paper=paper,
-            skim=skim,
-            decision=decision,
-            memory=memory,
-            all_artifacts=artifacts,
-            read_artifacts=selected_pages,
-        )
         return paper_card_from_memory_v3(
             paper=paper,
             skim=skim,
@@ -1289,7 +1279,7 @@ class PaperLensWorkflow:
         )
         return normalize_memory_patch_set(raw.data, paper_id=paper.paper_id)
 
-    def audit_and_repair_paper_memory(
+    def central_verify_paper_memory(
         self,
         *,
         client: JsonLlmClient,
@@ -1301,41 +1291,49 @@ class PaperLensWorkflow:
         all_artifacts: list[Any],
         read_artifacts: list[Any],
     ) -> dict[str, Any]:
-        max_rounds = memory_repair_round_budget(self.config.read_mode)
         current_memory = dict(memory)
         if current_memory.get("schema_version") == "paper_memory.v3" and not self.memory_store.read(
             paper.paper_id
         ):
             self.memory_store.write(current_memory)
-        current_artifacts = list(read_artifacts)
-        runtime = PaperLensRuntime(artifacts=all_artifacts)
+        verification_artifacts = select_central_verification_pages(
+            memory=current_memory,
+            all_artifacts=all_artifacts,
+            read_artifacts=read_artifacts,
+        )
         try:
-            tool_context = runtime.audit_context(
-                memory=current_memory,
-                read_artifacts=current_artifacts,
-            )
-            audit = self.audit_paper_memory(
+            patch_set = self.verify_paper_memory_once(
                 client=client,
                 stage=stage,
                 paper=paper,
                 skim=skim,
                 decision=decision,
                 memory=current_memory,
-                artifacts=current_artifacts,
-                tool_context=tool_context,
+                artifacts=verification_artifacts,
+            )
+            return self.memory_store.apply_patch_set(
+                paper.paper_id,
+                ensure_memory_audit_operation(
+                    patch_set,
+                    paper_id=paper.paper_id,
+                    phase="central_memory_verify",
+                ),
+                source="central_memory_verify",
             )
         except BudgetExceeded:
             raise
         except Exception as exc:
-            if self.require_llm_success():
+            if self.require_llm_success() and not paper_memory_has_recoverable_content(
+                current_memory
+            ):
                 raise
-            audit = fallback_memory_audit(reason=str(exc), phase="memory_critic")
+            audit = fallback_memory_audit(reason=str(exc), phase="central_memory_verify")
             current_memory = apply_memory_audit_patch(
-                self.memory_store, paper.paper_id, audit, source="memory_critic_failed"
+                self.memory_store, paper.paper_id, audit, source="central_memory_verify_failed"
             )
             self.write_agent_run(
                 {
-                    "agent_run_id": f"memory_critic_{paper.paper_id}_failed",
+                    "agent_run_id": f"central_memory_verify_{paper.paper_id}_failed",
                     "paper_id": paper.paper_id,
                     "stage": stage,
                     "provider_kind": self.config.provider.kind,
@@ -1348,229 +1346,12 @@ class PaperLensWorkflow:
                 "agent_run_fallback",
                 stage=stage,
                 level="warning",
-                message=f"MemoryCritic failed for {paper.paper_id}; marking memory as weak but usable",
+                message=f"Memory verification failed for {paper.paper_id}; marking memory as weak but usable",
                 data={"paper_id": paper.paper_id, "error": str(exc)},
             )
             return current_memory
-        for round_index in range(max_rounds + 1):
-            current_memory = apply_memory_audit_patch(
-                self.memory_store, paper.paper_id, audit, source="memory_critic"
-            )
-            if not memory_audit_needs_targeted_reread(audit):
-                if self.require_llm_success() and not memory_audit_acceptable(audit):
-                    raise RuntimeError(
-                        f"Paper memory audit failed for {paper.paper_id}: {audit.get('status')}"
-                    )
-                return current_memory
-            if round_index >= max_rounds:
-                break
-            self.control.wait_if_paused()
-            self.control.require_not_cancelled()
 
-            reread_pages = select_targeted_reread_pages(
-                all_artifacts,
-                audit,
-                already_read=memory_v3_pages_read(current_memory),
-            )
-            if not reread_pages:
-                break
-
-            self.events.emit(
-                "targeted_reread_started",
-                stage=stage,
-                message=f"Targeted reread for {paper.paper_id}",
-                data={
-                    "paper_id": paper.paper_id,
-                    "round": round_index + 1,
-                    "pages": [item.page_no for item in reread_pages],
-                    "audit_status": audit.get("status"),
-                },
-            )
-            try:
-                patch_set = self.repair_paper_memory_with_targeted_reread(
-                    client=client,
-                    stage=stage,
-                    paper=paper,
-                    skim=skim,
-                    decision=decision,
-                    memory=current_memory,
-                    audit=audit,
-                    artifacts=reread_pages,
-                )
-                current_memory = self.memory_store.apply_patch_set(
-                    paper.paper_id,
-                    ensure_read_pages_operation(
-                        patch_set,
-                        paper_id=paper.paper_id,
-                        pages=[item.page_no for item in reread_pages],
-                    ),
-                    source=f"memory_repair_round_{round_index + 1}",
-                )
-            except BudgetExceeded:
-                raise
-            except Exception as exc:
-                if self.require_llm_success() and not paper_memory_has_recoverable_content(
-                    current_memory
-                ):
-                    raise
-                audit = fallback_memory_audit(reason=str(exc), phase="memory_repair")
-                current_memory = apply_memory_audit_patch(
-                    self.memory_store, paper.paper_id, audit, source="memory_repair_failed"
-                )
-                self.db.upsert_review_item(
-                    ReviewItem(
-                        item_id=f"memory_repair_failed:{paper.paper_id}:{round_index + 1}",
-                        paper_id=paper.paper_id,
-                        item_type="MEMORY_REPAIR_FAILED",
-                        priority=1,
-                        reason="MemoryRepair failed after a usable memory already existed; the run continued with the previous audited memory.",
-                        payload={
-                            "round": round_index + 1,
-                            "pages": [item.page_no for item in reread_pages],
-                            "error": compact_reason(str(exc), max_chars=320),
-                        },
-                    )
-                )
-                self.write_agent_run(
-                    {
-                        "agent_run_id": f"memory_repair_{paper.paper_id}_failed",
-                        "paper_id": paper.paper_id,
-                        "stage": stage,
-                        "provider_kind": self.config.provider.kind,
-                        "model": self.config.provider.model,
-                        "status": "FALLBACK",
-                        "error": str(exc),
-                    }
-                )
-                self.events.emit(
-                    "agent_run_fallback",
-                    stage=stage,
-                    level="warning",
-                    message=f"MemoryRepair failed for {paper.paper_id}; keeping pre-repair memory",
-                    data={"paper_id": paper.paper_id, "error": str(exc)},
-                )
-                return current_memory
-            current_artifacts = dedupe_artifacts_by_page(current_artifacts + reread_pages)
-            try:
-                tool_context = runtime.audit_context(
-                    memory=current_memory,
-                    audit=audit,
-                    read_artifacts=current_artifacts,
-                )
-                audit = self.audit_paper_memory(
-                    client=client,
-                    stage=stage,
-                    paper=paper,
-                    skim=skim,
-                    decision=decision,
-                    memory=current_memory,
-                    artifacts=current_artifacts,
-                    tool_context=tool_context,
-                )
-            except BudgetExceeded:
-                raise
-            except Exception as exc:
-                if self.require_llm_success() and not paper_memory_has_recoverable_content(
-                    current_memory
-                ):
-                    raise
-                audit = fallback_memory_audit(reason=str(exc), phase="memory_critic_after_repair")
-                current_memory = apply_memory_audit_patch(
-                    self.memory_store,
-                    paper.paper_id,
-                    audit,
-                    source="memory_critic_after_repair_failed",
-                )
-                self.db.upsert_review_item(
-                    ReviewItem(
-                        item_id=f"memory_critic_after_repair_failed:{paper.paper_id}:{round_index + 1}",
-                        paper_id=paper.paper_id,
-                        item_type="MEMORY_CRITIC_AFTER_REPAIR_FAILED",
-                        priority=1,
-                        reason="MemoryCritic failed after repair while a usable memory already existed; the run continued with a weak audit marker.",
-                        payload={
-                            "round": round_index + 1,
-                            "pages": [item.page_no for item in reread_pages],
-                            "error": compact_reason(str(exc), max_chars=320),
-                        },
-                    )
-                )
-                self.write_agent_run(
-                    {
-                        "agent_run_id": f"memory_critic_after_repair_{paper.paper_id}_failed",
-                        "paper_id": paper.paper_id,
-                        "stage": stage,
-                        "provider_kind": self.config.provider.kind,
-                        "model": self.config.provider.model,
-                        "status": "FALLBACK",
-                        "error": str(exc),
-                    }
-                )
-                self.events.emit(
-                    "agent_run_fallback",
-                    stage=stage,
-                    level="warning",
-                    message=f"MemoryCritic after repair failed for {paper.paper_id}; marking memory as weak but usable",
-                    data={"paper_id": paper.paper_id, "error": str(exc)},
-                )
-                return current_memory
-            current_memory = apply_memory_audit_patch(
-                self.memory_store, paper.paper_id, audit, source="memory_critic_after_repair"
-            )
-            self.events.emit(
-                "targeted_reread_completed",
-                stage=stage,
-                message=f"Targeted reread completed for {paper.paper_id}",
-                data={
-                    "paper_id": paper.paper_id,
-                    "round": round_index + 1,
-                    "pages": [item.page_no for item in reread_pages],
-                    "audit_status": audit.get("status"),
-                },
-            )
-
-        exhausted_audit = downgrade_exhausted_targeted_reread(audit)
-        current_memory = apply_memory_audit_patch(
-            self.memory_store, paper.paper_id, exhausted_audit, source="targeted_reread_exhausted"
-        )
-        self.db.upsert_review_item(
-            ReviewItem(
-                item_id=f"targeted_reread:{paper.paper_id}",
-                paper_id=paper.paper_id,
-                item_type="NEED_TARGETED_REREAD",
-                priority=1,
-                reason=(
-                    "Targeted reread was disabled by the configured repair round budget; use QA "
-                    "challenge to spend more attention on this paper."
-                    if max_rounds == 0
-                    else "MemoryCritic still requested targeted reread after the configured repair rounds."
-                ),
-                payload={"audit": audit, "max_rounds": max_rounds},
-            )
-        )
-        self.events.emit(
-            "targeted_reread_disabled" if max_rounds == 0 else "targeted_reread_exhausted",
-            stage=stage,
-            level="warning",
-            message=(
-                f"Targeted reread disabled by repair budget for {paper.paper_id}"
-                if max_rounds == 0
-                else f"Targeted reread budget exhausted for {paper.paper_id}"
-            ),
-            data={
-                "paper_id": paper.paper_id,
-                "audit_status": audit.get("status"),
-                "max_rounds": max_rounds,
-            },
-        )
-        if self.require_llm_success() and not memory_audit_acceptable(exhausted_audit):
-            raise RuntimeError(
-                f"Paper memory repair did not produce a usable memory for {paper.paper_id}: "
-                f"{audit.get('status')}"
-            )
-        return current_memory
-
-    def audit_paper_memory(
+    def verify_paper_memory_once(
         self,
         *,
         client: JsonLlmClient,
@@ -1579,120 +1360,52 @@ class PaperLensWorkflow:
         skim: SkimCard,
         decision: ClassificationDecision,
         memory: dict[str, Any],
-        artifacts: list[Any],
-        tool_context: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        pages = [item.page_no for item in artifacts]
-        key_payload = {
-            "version": MEMORY_CRITIC_PROMPT_VERSION,
-            "model": self.config.provider.model,
-            "paper_hash": paper.file_hash,
-            "memory_hash": hash_json_payload(memory_without_audit(memory)),
-            "pages": pages,
-            "page_hashes": [hash_text(getattr(item, "text", "")) for item in artifacts],
-            "tool_context_hash": hash_json_payload(tool_context or {}),
-        }
-        cache_path = self.cache_path("memory_critic", paper.paper_id, key_payload)
-        cached = self.read_cache_payload(cache_path)
-        if cached and isinstance(cached.get("data"), dict):
-            self.events.emit(
-                "cache_hit",
-                stage=stage,
-                message=f"MemoryCritic cache hit for {paper.paper_id}",
-                data={"paper_id": paper.paper_id, "cache": str(cache_path)},
-            )
-            return normalize_memory_audit(cached["data"])
-        raw = self.invoke_json_with_stage_retries(
-            client=client,
-            stage=stage,
-            paper_id=paper.paper_id,
-            agent_prefix="memory_critic",
-            system_prompt=MEMORY_CRITIC_SYSTEM_PROMPT,
-            user_prompt=build_memory_critic_prompt(
-                paper=paper,
-                skim=skim,
-                decision=decision,
-                memory=memory,
-                artifacts=artifacts,
-                tool_context=tool_context,
-            ),
-            schema_name="paperlens_memory_critic",
-            schema=MEMORY_CRITIC_SCHEMA,
-            max_tokens=1200,
-            retry_message=f"MemoryCritic retrying for {paper.paper_id}",
-            retry_data={"pages": pages},
-        )
-        audit = normalize_memory_audit(raw.data)
-        self.write_cache_payload(
-            cache_path,
-            {
-                "key": key_payload,
-                "data": audit,
-                "usage": raw.usage,
-                "request_id": raw.request_id,
-                "endpoint": raw.endpoint,
-            },
-        )
-        return audit
-
-    def repair_paper_memory_with_targeted_reread(
-        self,
-        *,
-        client: JsonLlmClient,
-        stage: str,
-        paper: PaperRecord,
-        skim: SkimCard,
-        decision: ClassificationDecision,
-        memory: dict[str, Any],
-        audit: dict[str, Any],
         artifacts: list[Any],
     ) -> dict[str, Any]:
         pages = [item.page_no for item in artifacts]
         runtime = PaperLensRuntime(artifacts=artifacts)
-        repair_queries = []
-        repair_queries.extend(str(item) for item in audit.get("unsupported_claims", []) if item)
-        repair_queries.extend(str(item) for item in audit.get("missing_items", []) if item)
-        repair_queries.extend(str(item) for item in audit.get("repair_instructions", []) if item)
+        high_risk_claims = select_high_risk_memory_claims(memory)
         agent_context = runtime.build_context_pack(
-            stage="memory_repair",
+            stage="central_memory_verify",
             objective=(
-                "Repair the durable paper memory with focused reread evidence. Update claims and "
-                "evidence instead of rewriting the whole memory."
+                "Verify the current paper memory once against the paper map and relevant original "
+                "page evidence. Return one MemoryPatchSet that both fixes memory and records the "
+                "audit boundary."
             ),
             paper_id=paper.paper_id,
             title=paper.canonical_title,
             classification=decision.class_label,
             memory=memory,
-            focus_queries=repair_queries,
+            focus_queries=[claim.get("text") for claim in high_risk_claims if claim.get("text")],
             focus_pages=pages,
             read_artifacts=artifacts,
             output_contract={
                 "type": "MemoryPatchSet",
                 "rule": (
-                    "Add evidence first, then link or revise claims. Unsupported claims should be "
-                    "downgraded or disputed, not silently kept."
+                    "Return a single patch set. Add or link evidence, weaken unsupported claims, "
+                    "add missing limitations/open questions, and include exactly one set_memory_audit operation."
                 ),
             },
-            search_limit=3,
-            page_text_limit=1000,
+            search_limit=5,
+            page_text_limit=1100,
         ).as_dict()
         key_payload = {
-            "version": MEMORY_REPAIR_PROMPT_VERSION,
+            "version": CENTRAL_MEMORY_VERIFY_PROMPT_VERSION,
             "model": self.config.provider.model,
             "paper_hash": paper.file_hash,
-            "memory_hash": hash_json_payload(memory_without_audit(memory_v3_prompt_view(memory))),
-            "audit_hash": hash_json_payload(audit),
+            "memory_hash": hash_json_payload(memory_without_audit(memory)),
             "pages": pages,
             "page_hashes": [hash_text(getattr(item, "text", "")) for item in artifacts],
+            "high_risk_claims_hash": hash_json_payload(high_risk_claims),
             "agent_context_hash": hash_json_payload(agent_context),
         }
-        cache_path = self.cache_path("memory_repair", paper.paper_id, key_payload)
+        cache_path = self.cache_path("central_memory_verify", paper.paper_id, key_payload)
         cached = self.read_cache_payload(cache_path)
         if cached and isinstance(cached.get("data"), dict):
             self.events.emit(
                 "cache_hit",
                 stage=stage,
-                message=f"MemoryRepair cache hit for {paper.paper_id}",
+                message=f"Memory verification cache hit for {paper.paper_id}",
                 data={"paper_id": paper.paper_id, "pages": pages, "cache": str(cache_path)},
             )
             return normalize_memory_patch_set(cached["data"], paper_id=paper.paper_id)
@@ -1700,26 +1413,26 @@ class PaperLensWorkflow:
             client=client,
             stage=stage,
             paper_id=paper.paper_id,
-            agent_prefix="memory_repair",
-            system_prompt=MEMORY_REPAIR_SYSTEM_PROMPT,
-            user_prompt=build_memory_repair_prompt(
+            agent_prefix="central_memory_verify",
+            system_prompt=CENTRAL_MEMORY_VERIFY_SYSTEM_PROMPT,
+            user_prompt=build_central_memory_verify_prompt(
                 paper=paper,
                 skim=skim,
                 decision=decision,
                 memory=memory,
-                audit=audit,
+                high_risk_claims=high_risk_claims,
                 agent_context=agent_context,
                 artifacts=artifacts,
             ),
             schema_name="paperlens_memory_patch_set",
             schema=MEMORY_PATCH_SET_SCHEMA,
             max_tokens=bounded_env_int(
-                "PAPERLENS_MEMORY_REPAIR_MAX_TOKENS",
-                default=3000,
-                minimum=1200,
-                maximum=12000,
+                "PAPERLENS_MEMORY_VERIFY_MAX_TOKENS",
+                default=2200,
+                minimum=800,
+                maximum=5000,
             ),
-            retry_message=f"MemoryRepair retrying for {paper.paper_id}",
+            retry_message=f"Memory verification retrying for {paper.paper_id}",
             retry_data={"pages": pages},
         )
         patch_set = normalize_memory_patch_set(raw.data, paper_id=paper.paper_id)
@@ -1804,12 +1517,65 @@ class PaperLensWorkflow:
     def stage_08_evidence_verify(self) -> None:
         stage = "stage_08_evidence_verify"
         self.checkpoint(stage)
-        self.events.stage_started(stage, "Checking derived PaperCard evidence bindings")
+        self.events.stage_started(stage, "Verifying paper memory once against local evidence")
+        client = JsonLlmClient(self.config.provider) if self.llm_enabled() else None
+        papers_by_id = {paper.paper_id: paper for paper in self.papers}
+        skims_by_id = {skim.paper_id: skim for skim in self.skim_cards}
+        decisions_by_id = {decision.paper_id: decision for decision in self.classifications}
         rows = []
+        verified_cards: list[PaperCard] = []
         for card in self.paper_cards:
+            paper = papers_by_id.get(card.paper_id)
+            skim = skims_by_id.get(card.paper_id)
+            decision = decisions_by_id.get(card.paper_id)
+            memory = self.memory_store.read(card.paper_id)
+            if client and paper and skim and decision and memory:
+                artifacts = self.db.get_page_artifacts(card.paper_id)
+                try:
+                    memory = self.central_verify_paper_memory(
+                        client=client,
+                        stage=stage,
+                        paper=paper,
+                        skim=skim,
+                        decision=decision,
+                        memory=memory,
+                        all_artifacts=artifacts,
+                        read_artifacts=[
+                            artifact
+                            for artifact in artifacts
+                            if getattr(artifact, "page_no", None) in memory_v3_pages_read(memory)
+                        ],
+                    )
+                    card = paper_card_from_memory_v3(
+                        paper=paper,
+                        skim=skim,
+                        decision=decision,
+                        memory=memory,
+                        fallback=card,
+                    )
+                except BudgetExceeded:
+                    raise
+                except Exception as exc:
+                    if self.require_llm_success():
+                        raise
+                    audit = fallback_memory_audit(reason=str(exc), phase="central_memory_verify")
+                    apply_memory_audit_patch(
+                        self.memory_store,
+                        card.paper_id,
+                        audit,
+                        source="central_memory_verify_failed",
+                    )
+                    self.events.emit(
+                        "agent_run_fallback",
+                        stage=stage,
+                        level="warning",
+                        message=f"Memory verification failed for {card.paper_id}; keeping read memory",
+                        data={"paper_id": card.paper_id, "error": str(exc)},
+                    )
             status, notes = audit_paper_card_evidence(card)
             card.verification_status = status
             self.db.upsert_paper_card(card)
+            verified_cards.append(card)
             side = []
             if status == "NEED_HUMAN_REVIEW":
                 side.append("NEED_HUMAN_REVIEW")
@@ -1824,12 +1590,12 @@ class PaperLensWorkflow:
                     )
                 )
             elif status == "PASS_WITH_WEAKNESSES":
-                side.append("NEED_TARGETED_REREAD")
+                side.append("WEAK_EVIDENCE_BOUNDARY")
                 self.db.upsert_review_item(
                     ReviewItem(
-                        item_id=f"targeted:{card.paper_id}",
+                        item_id=f"weak_evidence:{card.paper_id}",
                         paper_id=card.paper_id,
-                        item_type="NEED_TARGETED_REREAD",
+                        item_type="WEAK_EVIDENCE_BOUNDARY",
                         priority=2,
                         reason=";".join(notes),
                         payload=card.model_dump(),
@@ -1837,6 +1603,7 @@ class PaperLensWorkflow:
                 )
             self.mark_paper_state(card.paper_id, stage, side_statuses=side)
             rows.append({"paper_id": card.paper_id, "status": status, "notes": notes})
+        self.paper_cards = verified_cards
         self.events.stage_completed(stage, "Evidence audit completed", {"paper_cards": len(rows)})
 
     def stage_15_export(self) -> list[Path]:
@@ -1988,8 +1755,7 @@ SKIM_CLASSIFICATION_SCHEMA: dict[str, Any] = {
 
 
 ROLLING_MEMORY_PROMPT_VERSION = "memory-patch-rolling-v2-context"
-MEMORY_CRITIC_PROMPT_VERSION = "memory-critic-v4-context"
-MEMORY_REPAIR_PROMPT_VERSION = "memory-patch-repair-v2-context"
+CENTRAL_MEMORY_VERIFY_PROMPT_VERSION = "central-memory-verify-v1"
 REPORT_PLAN_PROMPT_VERSION = "report-plan-v3-mechanism-contract"
 REPORT_SECTION_PROMPT_VERSION = "report-section-v5-paragraph-artifact"
 REPORT_SECTION_AUDIT_PROMPT_VERSION = "report-section-audit-v2-repair-unsupported"
@@ -2015,77 +1781,21 @@ Return only JSON matching the MemoryPatchSet schema.
 """.strip()
 
 
-MEMORY_CRITIC_SYSTEM_PROMPT = """
-You are the PaperLens MemoryCritic.
-Audit paper_memory as the internal knowledge capsule for a paper. The user may rely on this memory
-without reading the PDF, so it must be useful, evidence-grounded, and honest about uncertainty.
+CENTRAL_MEMORY_VERIFY_SYSTEM_PROMPT = """
+You are the PaperLens MemoryVerifier.
+Verify one paper's accumulated memory against the local paper map and relevant original page
+evidence in a single pass. Do not request another verification round.
 
 Rules:
-- Use only supplied memory, skim/classification context, page excerpts, and agent_context_pack tool
-  observations.
-- Behave like an agent with local tools already called: decide what is actually uncertain, which
-  claims can be grounded from the local tool trace, and which gaps deserve targeted reread.
-- Check whether conceptual_bridge names the necessary prerequisite concepts and keeps background
-  separate from paper claims.
-- Return concrete reread requests only when local tool observations and supplied excerpts are still
-  insufficient to repair or bound the claim.
-- Do not rewrite the memory here. Return only JSON matching the schema.
-""".strip()
-
-
-MEMORY_CRITIC_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": [
-        "status",
-        "unsupported_claims",
-        "missing_items",
-        "reread_requests",
-        "repair_instructions",
-        "safe_to_generate_capsule",
-        "confidence",
-    ],
-    "properties": {
-        "status": {
-            "type": "string",
-            "enum": ["PASS", "PASS_WITH_WEAKNESSES", "NEED_TARGETED_REREAD", "NEED_HUMAN_REVIEW"],
-        },
-        "unsupported_claims": {"type": "array", "maxItems": 6, "items": {"type": "string"}},
-        "missing_items": {"type": "array", "maxItems": 8, "items": {"type": "string"}},
-        "reread_requests": {
-            "type": "array",
-            "maxItems": 6,
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["reason", "page_no", "keyword"],
-                "properties": {
-                    "reason": {"type": "string"},
-                    "page_no": {"type": ["integer", "null"], "minimum": 1},
-                    "keyword": {"type": ["string", "null"]},
-                },
-            },
-        },
-        "repair_instructions": {"type": "array", "maxItems": 8, "items": {"type": "string"}},
-        "safe_to_generate_capsule": {"type": "boolean"},
-        "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
-    },
-}
-
-
-MEMORY_REPAIR_SYSTEM_PROMPT = """
-You are the PaperLens MemoryRepair agent.
-Repair PaperMemoryV3 by returning a MemoryPatchSet based on the MemoryCritic audit and targeted
-reread pages.
-
-Rules:
-- Use agent_context_pack as the persistent task state and local tool trace for this repair step.
-- Return only patch operations; do not rewrite the whole memory.
-- Remove, weaken, or dispute unsupported claims instead of defending them.
-- Add missing mechanisms, evidence, concepts, conceptual bridge terms, and limitations only when
-  targeted pages or safe background context support them.
-- Keep background separate from paper claims.
-- Preserve useful existing claim/evidence IDs where possible.
+- Treat PaperMemoryV3 as the only durable knowledge state.
+- Use the supplied high-risk claims, evidence-linked pages, paper-map snippets, captions, figures,
+  tables, and agent_context_pack observations.
+- Return only a MemoryPatchSet. Do not write a report.
+- Fix memory directly: add or link evidence, weaken overclaims, mark unsupported claims disputed,
+  add missing limitations/open questions, and add prerequisite background only through
+  conceptual_bridge.
+- Include exactly one set_memory_audit operation. If evidence is not enough after this pass, record
+  PASS_WITH_WEAKNESSES or NEED_HUMAN_REVIEW with clear missing_items.
 Return only JSON matching the MemoryPatchSet schema.
 """.strip()
 
@@ -2257,51 +1967,13 @@ def build_rolling_memory_prompt(
     )
 
 
-def build_memory_critic_prompt(
+def build_central_memory_verify_prompt(
     *,
     paper: PaperRecord,
     skim: SkimCard,
     decision: ClassificationDecision,
     memory: dict[str, Any],
-    artifacts: list[Any],
-    tool_context: dict[str, Any] | None = None,
-) -> str:
-    return "\n\n".join(
-        [
-            f"paper_id: {paper.paper_id}",
-            f"title: {paper.canonical_title or 'unknown'}",
-            f"classification: {decision.class_label}",
-            "skim_card:",
-            json.dumps(skim.model_dump(), ensure_ascii=False),
-            "paper_memory_to_audit:",
-            json.dumps(memory_without_audit(memory), ensure_ascii=False),
-            "available_page_excerpts:",
-            json.dumps(
-                memory_page_excerpt_blocks(artifacts, limit_per_page=1600, max_chars=16000),
-                ensure_ascii=False,
-            ),
-            "agent_context_pack:",
-            context_pack_prompt((tool_context or {}).get("agent_context_pack") if isinstance(tool_context, dict) else None),
-            "local_tool_observations:",
-            json.dumps(tool_context or {}, ensure_ascii=False),
-            (
-                "Task: audit whether paper_memory is ready to drive a standalone knowledge capsule "
-                "and grounded Q&A. If it lacks key experiments, mechanisms, concepts, limitations, "
-                "or evidence pages, first use agent_context_pack/local_tool_observations as deterministic "
-                "retrieval over the parsed paper. Request targeted rereads only when this retrieved "
-                "context still cannot safely repair or bound the issue."
-            ),
-        ]
-    )
-
-
-def build_memory_repair_prompt(
-    *,
-    paper: PaperRecord,
-    skim: SkimCard,
-    decision: ClassificationDecision,
-    memory: dict[str, Any],
-    audit: dict[str, Any],
+    high_risk_claims: list[dict[str, Any]],
     agent_context: dict[str, Any] | None = None,
     artifacts: list[Any],
 ) -> str:
@@ -2314,22 +1986,23 @@ def build_memory_repair_prompt(
             json.dumps(skim.model_dump(), ensure_ascii=False),
             "current_paper_memory_v3:",
             json.dumps(memory_v3_prompt_view(memory_without_audit(memory)), ensure_ascii=False),
-            "memory_audit:",
-            json.dumps(audit, ensure_ascii=False),
+            "high_risk_claims_to_verify:",
+            json.dumps(high_risk_claims, ensure_ascii=False),
             "agent_context_pack:",
             context_pack_prompt(agent_context),
             "memory_patch_protocol:",
             memory_patch_protocol_text(),
-            "targeted_reread_pages:",
+            "verification_pages:",
             json.dumps(
-                memory_page_excerpt_blocks(artifacts, limit_per_page=2200, max_chars=18000),
+                memory_page_excerpt_blocks(artifacts, limit_per_page=2400, max_chars=22000),
                 ensure_ascii=False,
             ),
             (
-                "Task: return a MemoryPatchSet that repairs the current PaperMemoryV3. Use the "
-                "targeted pages to address the audit. Add new evidence first, then link or repair "
-                "claims. If a claim is unsupported, lower confidence, add risk tags, or mark it "
-                "disputed rather than inventing support."
+                "Task: verify the memory once and return a MemoryPatchSet. Do not request more "
+                "rounds. If a claim is supported, add/link evidence and mark it checked. If it is "
+                "too strong, rewrite it with lower confidence or mark it disputed. If something "
+                "important is missing but not supported by these pages, add an open question and "
+                "record the boundary in set_memory_audit."
             ),
         ]
     )
@@ -2347,7 +2020,9 @@ def memory_patch_protocol_text() -> str:
         "upsert_evidence {id?,source_type,page,section?,excerpt_or_caption?,interpretation,reliability}; "
         "upsert_claim {id?,text,type,provenance,confidence,evidence_refs,depends_on?,risk_tags?,critic_status}; "
         "link_claim_evidence {claim_id,evidence_refs}; add_limitation {text}; "
-        "add_open_question {text}. Prefer stable IDs when updating existing entries."
+        "add_open_question {text}; set_memory_audit {status,unsupported_claims,missing_items,"
+        "repair_instructions,safe_to_generate_capsule,confidence}. "
+        "Prefer stable IDs when updating existing entries."
     )
 
 
@@ -2524,28 +2199,15 @@ def select_rolling_read_pages(
 
 def normalize_memory_audit(data: dict[str, Any]) -> dict[str, Any]:
     status = str(data.get("status") or "NEED_HUMAN_REVIEW").upper()
-    if status not in {"PASS", "PASS_WITH_WEAKNESSES", "NEED_TARGETED_REREAD", "NEED_HUMAN_REVIEW"}:
+    if status not in {"PASS", "PASS_WITH_WEAKNESSES", "NEED_HUMAN_REVIEW"}:
         status = "NEED_HUMAN_REVIEW"
-    requests = []
-    for item in (
-        data.get("reread_requests") if isinstance(data.get("reread_requests"), list) else []
-    ):
-        if not isinstance(item, dict):
-            continue
-        page_no = item.get("page_no")
-        if isinstance(page_no, str) and page_no.isdigit():
-            page_no = int(page_no)
-        if not isinstance(page_no, int):
-            page_no = None
-        reason = string_or_none(item.get("reason")) or "needs targeted reread"
-        keyword = string_or_none(item.get("keyword"))
-        requests.append({"reason": reason, "page_no": page_no, "keyword": keyword})
     return {
         "status": status,
         "unsupported_claims": normalized_string_list(data.get("unsupported_claims"))[:6],
         "missing_items": normalized_string_list(data.get("missing_items"))[:8],
-        "reread_requests": requests[:6],
-        "repair_instructions": normalized_string_list(data.get("repair_instructions"))[:8],
+        "repair_instructions": normalized_string_list(
+            data.get("repair_instructions") or data.get("correction_notes")
+        )[:8],
         "safe_to_generate_capsule": bool(data.get("safe_to_generate_capsule"))
         if "safe_to_generate_capsule" in data
         else False,
@@ -2561,7 +2223,6 @@ def fallback_memory_audit(*, reason: str, phase: str) -> dict[str, Any]:
             "status": "PASS_WITH_WEAKNESSES",
             "unsupported_claims": [],
             "missing_items": [f"{phase} did not complete"],
-            "reread_requests": [],
             "repair_instructions": [
                 f"{phase} failed during this run; treat the memory as usable but weak until rerun succeeds.",
                 compact_reason(reason, max_chars=220),
@@ -2572,32 +2233,10 @@ def fallback_memory_audit(*, reason: str, phase: str) -> dict[str, Any]:
     )
 
 
-def memory_audit_needs_targeted_reread(audit: dict[str, Any]) -> bool:
-    if audit.get("status") in {"NEED_TARGETED_REREAD", "NEED_HUMAN_REVIEW"}:
-        return True
-    return bool(audit.get("reread_requests")) and bool(
-        audit.get("missing_items") or audit.get("unsupported_claims")
-    )
-
-
 def memory_audit_acceptable(audit: dict[str, Any]) -> bool:
     return audit.get("status") in {"PASS", "PASS_WITH_WEAKNESSES"} and bool(
         audit.get("safe_to_generate_capsule")
     )
-
-
-def downgrade_exhausted_targeted_reread(audit: dict[str, Any]) -> dict[str, Any]:
-    if audit.get("status") == "NEED_HUMAN_REVIEW":
-        return dict(audit)
-    downgraded = normalize_memory_audit(audit)
-    downgraded["status"] = "PASS_WITH_WEAKNESSES"
-    downgraded["safe_to_generate_capsule"] = True
-    notes = list(downgraded.get("repair_instructions") or [])
-    notes.append(
-        "Targeted reread rounds were exhausted; keep these weaknesses visible in the final capsule."
-    )
-    downgraded["repair_instructions"] = list(dict.fromkeys(notes))[:8]
-    return downgraded
 
 
 def memory_without_audit(memory: dict[str, Any]) -> dict[str, Any]:
@@ -2668,6 +2307,30 @@ def ensure_read_pages_operation(
     return normalized
 
 
+def ensure_memory_audit_operation(
+    patch_set: dict[str, Any],
+    *,
+    paper_id: str,
+    phase: str,
+) -> dict[str, Any]:
+    normalized = normalize_memory_patch_set(patch_set, paper_id=paper_id)
+    operations = normalized.setdefault("operations", [])
+    for operation in operations:
+        if operation.get("op") == "set_memory_audit":
+            operation["payload"] = normalize_memory_audit(dict_value(operation.get("payload")))
+            return normalized
+    operations.append(
+        {
+            "op": "set_memory_audit",
+            "payload": fallback_memory_audit(
+                reason="Verifier did not include an explicit audit operation.",
+                phase=phase,
+            ),
+        }
+    )
+    return normalized
+
+
 def memory_v3_pages_read(memory: dict[str, Any]) -> set[int]:
     context = dict_value(memory.get("reading_context"))
     return {
@@ -2689,100 +2352,128 @@ def dedupe_artifacts_by_page(artifacts: list[Any]) -> list[Any]:
     return result
 
 
-def select_targeted_reread_pages(
-    artifacts: list[Any],
-    audit: dict[str, Any],
+def select_high_risk_memory_claims(memory: dict[str, Any], *, limit: int = 10) -> list[dict[str, Any]]:
+    claims = [claim for claim in list_payload(memory.get("claims")) if isinstance(claim, dict)]
+    evidence = {
+        str(item.get("id")): item
+        for item in list_payload(memory.get("evidence"))
+        if isinstance(item, dict) and item.get("id")
+    }
+
+    def score(claim: dict[str, Any]) -> tuple[int, str]:
+        refs = normalized_string_list(claim.get("evidence_refs"))
+        risk_tags = normalized_string_list(claim.get("risk_tags"))
+        value = 0
+        if not refs:
+            value += 8
+        if claim.get("confidence") in {"low", "medium"}:
+            value += 3
+        if claim.get("critic_status") in {"unchecked", "disputed"}:
+            value += 4
+        if claim.get("provenance") in {"inferred", "background"}:
+            value += 2
+        if any(tag in {"needs_evidence", "number_sensitive", "analogy_overreach"} for tag in risk_tags):
+            value += 3
+        if claim.get("type") in {"evaluation", "comparison", "limitation"}:
+            value += 2
+        if refs and not any(ref in evidence for ref in refs):
+            value += 5
+        return (-value, str(claim.get("id") or claim.get("text") or ""))
+
+    selected = sorted(claims, key=score)[:limit]
+    return [
+        {
+            "id": claim.get("id"),
+            "text": claim.get("text"),
+            "type": claim.get("type"),
+            "provenance": claim.get("provenance"),
+            "confidence": claim.get("confidence"),
+            "critic_status": claim.get("critic_status"),
+            "risk_tags": normalized_string_list(claim.get("risk_tags"))[:6],
+            "evidence_refs": normalized_string_list(claim.get("evidence_refs"))[:8],
+        }
+        for claim in selected
+    ]
+
+
+def select_central_verification_pages(
     *,
-    already_read: set[int],
+    memory: dict[str, Any],
+    all_artifacts: list[Any],
+    read_artifacts: list[Any],
 ) -> list[Any]:
     max_pages = bounded_env_int(
-        "PAPERLENS_TARGETED_REREAD_MAX_PAGES", default=6, minimum=1, maximum=12
+        "PAPERLENS_MEMORY_VERIFY_MAX_PAGES", default=8, minimum=3, maximum=14
     )
-    by_no = {getattr(artifact, "page_no", None): artifact for artifact in artifacts}
+    by_no = {getattr(artifact, "page_no", None): artifact for artifact in all_artifacts}
     selected: list[Any] = []
+    selected_pages: set[int] = set()
 
-    def add(page_no: int | None) -> None:
-        if not isinstance(page_no, int) or page_no not in by_no:
+    def add(page_no: Any) -> None:
+        page = safe_int(page_no)
+        if page is None or page not in by_no or page in selected_pages:
             return
-        if page_no in already_read:
-            return
-        if page_no in [getattr(item, "page_no", None) for item in selected]:
-            return
-        selected.append(by_no[page_no])
+        selected.append(by_no[page])
+        selected_pages.add(page)
 
-    for request in (
-        audit.get("reread_requests") if isinstance(audit.get("reread_requests"), list) else []
-    ):
-        if not isinstance(request, dict):
+    evidence_page_by_id = {}
+    for item in list_payload(memory.get("evidence")):
+        if not isinstance(item, dict):
             continue
-        add(request.get("page_no") if isinstance(request.get("page_no"), int) else None)
+        page = safe_int(item.get("page"))
+        if item.get("id") and page:
+            evidence_page_by_id[str(item.get("id"))] = page
+        add(page)
+        if len(selected) >= max_pages // 2:
+            break
+
+    for claim in select_high_risk_memory_claims(memory, limit=8):
+        for ref in normalized_string_list(claim.get("evidence_refs")):
+            add(safe_int(ref) or evidence_page_by_id.get(ref))
+        if len(selected) >= max_pages:
+            break
+
+    for artifact in read_artifacts:
+        add(getattr(artifact, "page_no", None))
         if len(selected) >= max_pages:
             return selected[:max_pages]
 
-    keywords = []
-    for request in (
-        audit.get("reread_requests") if isinstance(audit.get("reread_requests"), list) else []
-    ):
-        if isinstance(request, dict):
-            keywords.extend(
-                tokenize_memory_query(
-                    " ".join([str(request.get("keyword") or ""), str(request.get("reason") or "")])
-                )
-            )
-    for item in normalized_string_list(audit.get("missing_items")) + normalized_string_list(
-        audit.get("repair_instructions")
-    ):
-        keywords.extend(tokenize_memory_query(item))
-    keywords = list(dict.fromkeys(keywords))[:24]
-
-    scored = []
-    for artifact in artifacts:
+    keyword_pages = []
+    for artifact in all_artifacts:
         page_no = getattr(artifact, "page_no", None)
-        text = " ".join(
-            [
-                str(getattr(artifact, "text", "") or ""),
-                json.dumps(getattr(artifact, "captions", [])[:5], ensure_ascii=False),
-                json.dumps(getattr(artifact, "visual_notes", [])[:5], ensure_ascii=False),
-            ]
+        text = normalize_for_search(
+            " ".join(
+                [
+                    str(getattr(artifact, "text", "") or "")[:1800],
+                    json.dumps(getattr(artifact, "captions", [])[:4], ensure_ascii=False),
+                ]
+            )
         )
-        haystack = normalize_for_search(text)
-        score = sum(2 for keyword in keywords if keyword in haystack)
-        if isinstance(page_no, int) and page_no not in already_read:
-            score += 1
-        if any(
-            section in haystack
-            for section in [
+        score = sum(
+            1
+            for word in [
+                "abstract",
+                "introduction",
+                "overview",
+                "design",
+                "implementation",
                 "evaluation",
                 "experiment",
                 "result",
+                "ablation",
                 "limitation",
-                "design",
-                "overview",
             ]
-        ):
-            score += 1
-        if score > 0:
-            scored.append((score, page_no if isinstance(page_no, int) else 10_000, artifact))
-    scored.sort(key=lambda item: (-item[0], item[1]))
-    for _score, _page_no, artifact in scored:
-        add(getattr(artifact, "page_no", None))
+            if word in text
+        )
+        if score and isinstance(page_no, int):
+            keyword_pages.append((score, page_no))
+    for _score, page_no in sorted(keyword_pages, key=lambda item: (-item[0], item[1])):
+        add(page_no)
         if len(selected) >= max_pages:
             break
     if not selected:
-        for artifact in artifacts:
-            page_no = getattr(artifact, "page_no", None)
-            haystack = normalize_for_search(str(getattr(artifact, "text", "") or ""))
-            if (
-                isinstance(page_no, int)
-                and page_no not in already_read
-                and any(
-                    section in haystack
-                    for section in ["evaluation", "experiment", "result", "limitation", "design"]
-                )
-            ):
-                add(page_no)
-            if len(selected) >= max_pages:
-                break
+        for artifact in all_artifacts[:max_pages]:
+            add(getattr(artifact, "page_no", None))
     return selected[:max_pages]
 
 
@@ -2867,7 +2558,7 @@ def deterministic_paper_card(
     ]
     if decision.class_label == "B":
         limitations.append(
-            "B-class paper may need targeted reread before strong value or citation claims."
+            "B-class paper may need follow-up QA verification before strong value or citation claims."
         )
     return PaperCard(
         paper_id=paper.paper_id,
@@ -3018,7 +2709,7 @@ def memory_backed_card_status(audit: dict[str, Any], evidence_refs: list[Evidenc
     status = str(audit.get("status") or "PASS_WITH_WEAKNESSES")
     if status == "PASS":
         return "PASS"
-    if status in {"PASS_WITH_WEAKNESSES", "NEED_TARGETED_REREAD"}:
+    if status == "PASS_WITH_WEAKNESSES":
         return "PASS_WITH_WEAKNESSES"
     return "NEED_HUMAN_REVIEW"
 
@@ -4632,16 +4323,6 @@ def bounded_env_int(name: str, *, default: int, minimum: int, maximum: int) -> i
     return max(minimum, min(value, maximum))
 
 
-def memory_repair_round_budget(read_mode: str = "standard") -> int:
-    default = 2
-    return bounded_env_int(
-        "PAPERLENS_MEMORY_REPAIR_ROUNDS",
-        default=default,
-        minimum=0,
-        maximum=6,
-    )
-
-
 def compact_skim_for_report(skim: SkimCard | None) -> dict[str, Any]:
     if skim is None:
         return {}
@@ -5554,7 +5235,7 @@ def user_visible_review_items(review_items: list[ReviewItem]) -> list[ReviewItem
 
 def is_internal_review_noise(item: ReviewItem) -> bool:
     reason = item.reason.strip()
-    if item.item_type == "NEED_TARGETED_REREAD":
+    if item.item_type == "WEAK_EVIDENCE_BOUNDARY":
         return True
     hidden_reasons = {
         "skim_level_or_keyword_evidence",

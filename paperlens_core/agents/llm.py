@@ -593,7 +593,7 @@ def json_retry_completion_minimum(
     schema_name: str, max_tokens: int, *, has_images: bool
 ) -> int:
     floor = 1800 if has_images else 1600
-    if schema_name in {"paperlens_rolling_memory", "paperlens_memory_repair"}:
+    if schema_name in {"paperlens_rolling_memory", "paperlens_memory_patch_set"}:
         floor = 4000
     if schema_name in {
         "paperlens_report_plan",

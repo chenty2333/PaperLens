@@ -10,10 +10,10 @@ PaperLens is a desktop paper-reading agent. It is not a PDF reader, a traditiona
 ## What It Does
 
 - Reads PDFs with text, layout, page images, figure/table hints, and deterministic paper-local tools.
-- Builds PaperMemoryV3 as the source of truth instead of treating the final report as the fact source.
-- Mutates memory through auditable MemoryPatch events.
-- Runs critic, targeted reread, and repair passes before producing user-facing output.
-- Generates a Standard knowledge capsule aimed at helping you avoid reading the original paper unless you choose to.
+- Builds the paper map once: sections, page numbers, figures/tables, and key text blocks.
+- Reads papers in chunks and updates PaperMemory as the source of truth; the reader does not write the report.
+- Runs one central verification pass that checks high-risk claims against local paper evidence and patches memory directly.
+- Writes the paper capsule section by section from memory and evidence, so no single model call has to produce the full report.
 - Answers questions from memory, evidence, local pages, and library records rather than from the rendered report.
 - Maintains a local library containing only papers PaperLens has processed.
 - Ships as a Windows Tauri desktop app with a Python `paperlens-core` sidecar.

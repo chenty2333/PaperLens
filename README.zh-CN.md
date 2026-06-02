@@ -10,10 +10,10 @@ PaperLens 是一个桌面端论文阅读 agent。它不是 PDF reader，不是�
 ## 它做什么
 
 - 读取 PDF 的文本、版面、页面图像、图表线索和论文内确定性工具结果。
-- 构建 PaperMemoryV3，把它作为事实源，而不是把最终报告当事实源。
-- 通过可审计的 MemoryPatch 事件修改 memory。
-- 在输出用户报告前执行 critic、targeted reread 和 repair。
-- 生成 Standard 知识胶囊，目标是让你不读原文也能接收论文里的有效知识。
+- 只建一次论文地图：章节、页码、图表和关键文本块。
+- 分块阅读论文并增量更新 PaperMemory；阅读阶段不写报告。
+- 只做一次集中核对：检查高风险 claim 和局部原文证据，然后直接修正 memory。
+- 按段生成知识胶囊，报告从 memory 和 evidence 写出，不让一次模型调用承担整篇长报告。
 - QA 直接从 memory、evidence、局部页面和 library record 回答，不从渲染后的报告里二次总结。
 - 维护一个只包含 PaperLens 已经处理过论文的本地 library。
 - 作为 Windows Tauri 桌面 App 发布，核心引擎是 Python `paperlens-core` sidecar。

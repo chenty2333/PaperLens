@@ -44,26 +44,24 @@ from paperlens_core.workflow.agent import (
     REPORT_PLAN_SCHEMA,
     REPORT_SECTION_SCHEMA,
     PaperLensWorkflow,
-    build_memory_critic_prompt,
-    build_memory_repair_prompt,
+    build_central_memory_verify_prompt,
     build_report_plan_prompt,
     build_report_section_audit_prompt,
     build_report_section_prompt,
     clean_model_markdown,
     compose_agentic_paper_report,
-    downgrade_exhausted_targeted_reread,
+    ensure_memory_audit_operation,
     fallback_memory_audit,
     final_report_audit_acceptable,
-    memory_repair_round_budget,
     memory_audit_acceptable,
-    memory_audit_needs_targeted_reread,
     normalize_memory_audit,
     readable_model_body,
     render_freeform_paper_report,
     render_paperlens_report,
     sanitize_reader_hostile_text,
+    select_central_verification_pages,
+    select_high_risk_memory_claims,
     select_rolling_read_pages,
-    select_targeted_reread_pages,
     user_visible_review_items,
     validate_paperlens_output,
     visual_crop_bbox_for_page,
@@ -681,12 +679,12 @@ def test_readable_model_body_splits_very_long_paragraphs():
     assert all(len(part) <= 700 for part in readable.split("\n\n"))
 
 
-def test_internal_targeted_reread_items_are_not_user_visible():
+def test_internal_weak_evidence_items_are_not_user_visible():
     items = [
         ReviewItem(
-            item_id="targeted:p_test",
+            item_id="weak_evidence:p_test",
             paper_id="p_test",
-            item_type="NEED_TARGETED_REREAD",
+            item_type="WEAK_EVIDENCE_BOUNDARY",
             reason="missing intermediate PaperCard detail",
         ),
         ReviewItem(
@@ -1025,7 +1023,7 @@ def test_paper_memory_store_materializes_patchable_v3_state(tmp_path):
         "p_store",
         {
             "operation": "upsert_claim",
-            "source": "memory_repair",
+            "source": "central_memory_verify",
             "payload": {
                 "text": "Paged allocation reduces avoidable KV cache waste.",
                 "type": "mechanism",
@@ -1478,7 +1476,7 @@ def test_chat_json_retry_expands_budget_after_truncation(monkeypatch):
 def test_large_memory_schema_retry_has_higher_completion_floor():
     assert (
         json_retry_completion_minimum(
-            "paperlens_memory_repair", max_tokens=1000, has_images=False
+            "paperlens_memory_patch_set", max_tokens=1000, has_images=False
         )
         >= 4000
     )
@@ -1578,71 +1576,61 @@ def test_library_answer_normalization_preserves_source_attribution():
     ]
 
 
-def test_memory_audit_status_controls_targeted_reread():
-    weak = normalize_memory_audit(
-        {
-            "status": "NEED_TARGETED_REREAD",
-            "unsupported_claims": [],
-            "missing_items": ["missing evaluation results"],
-            "reread_requests": [
-                {"reason": "find experiments", "page_no": None, "keyword": "evaluation"}
-            ],
-            "repair_instructions": ["add concrete results"],
-            "safe_to_generate_capsule": False,
-            "confidence": "medium",
-        }
-    )
+def test_memory_audit_status_controls_capsule_safety():
     ok = normalize_memory_audit(
         {
             "status": "PASS_WITH_WEAKNESSES",
             "unsupported_claims": [],
             "missing_items": ["minor detail"],
-            "reread_requests": [],
             "repair_instructions": [],
             "safe_to_generate_capsule": True,
             "confidence": "high",
         }
     )
-
-    assert memory_audit_needs_targeted_reread(weak)
-    assert not memory_audit_acceptable(weak)
-    assert not memory_audit_needs_targeted_reread(ok)
-    assert memory_audit_acceptable(ok)
-
-
-def test_fallback_memory_audit_is_visible_but_usable():
-    audit = fallback_memory_audit(reason="provider timeout", phase="memory_critic")
-
-    assert audit["status"] == "PASS_WITH_WEAKNESSES"
-    assert audit["safe_to_generate_capsule"] is True
-    assert memory_audit_acceptable(audit)
-    assert any("memory_critic" in item for item in audit["missing_items"])
-
-
-def test_exhausted_targeted_reread_becomes_visible_weakness():
-    audit = normalize_memory_audit(
+    weak = normalize_memory_audit(
         {
-            "status": "NEED_TARGETED_REREAD",
-            "unsupported_claims": [],
-            "missing_items": ["missing evaluation details"],
-            "reread_requests": [
-                {"reason": "find evaluation", "page_no": None, "keyword": "evaluation"}
-            ],
-            "repair_instructions": ["add evidence model"],
+            "status": "NEED_HUMAN_REVIEW",
+            "unsupported_claims": ["unsupported throughput claim"],
+            "missing_items": ["missing evaluation results"],
+            "repair_instructions": ["downgrade the claim"],
             "safe_to_generate_capsule": False,
             "confidence": "medium",
         }
     )
 
-    downgraded = downgrade_exhausted_targeted_reread(audit)
-
-    assert downgraded["status"] == "PASS_WITH_WEAKNESSES"
-    assert downgraded["safe_to_generate_capsule"] is True
-    assert memory_audit_acceptable(downgraded)
-    assert any("exhausted" in item for item in downgraded["repair_instructions"])
+    assert not memory_audit_acceptable(weak)
+    assert memory_audit_acceptable(ok)
 
 
-def test_targeted_reread_selects_requested_pages_and_keywords():
+def test_fallback_memory_audit_is_visible_but_usable():
+    audit = fallback_memory_audit(reason="provider timeout", phase="central_memory_verify")
+
+    assert audit["status"] == "PASS_WITH_WEAKNESSES"
+    assert audit["safe_to_generate_capsule"] is True
+    assert memory_audit_acceptable(audit)
+    assert any("central_memory_verify" in item for item in audit["missing_items"])
+
+
+def test_missing_memory_audit_operation_gets_conservative_default():
+    patch_set = ensure_memory_audit_operation(
+        {
+            "paper_id": "p_test",
+            "operations": [
+                {"op": "upsert_claim", "payload": {"id": "C001", "text": "claim"}}
+            ],
+        },
+        paper_id="p_test",
+        phase="central_memory_verify",
+    )
+
+    audit_ops = [op for op in patch_set["operations"] if op["op"] == "set_memory_audit"]
+    assert len(audit_ops) == 1
+    assert audit_ops[0]["payload"]["status"] == "PASS_WITH_WEAKNESSES"
+    assert "central_memory_verify" in audit_ops[0]["payload"]["missing_items"][0]
+
+
+def test_central_verification_selects_evidence_risk_and_map_pages(monkeypatch):
+    monkeypatch.delenv("PAPERLENS_MEMORY_VERIFY_MAX_PAGES", raising=False)
     pages = [
         SimpleNamespace(page_no=1, text="abstract and introduction", captions=[], visual_notes=[]),
         SimpleNamespace(
@@ -1655,24 +1643,66 @@ def test_targeted_reread_selects_requested_pages_and_keywords():
             visual_notes=[],
         ),
     ]
-    audit = normalize_memory_audit(
-        {
-            "status": "NEED_TARGETED_REREAD",
-            "unsupported_claims": [],
-            "missing_items": ["need evaluation numbers"],
-            "reread_requests": [
-                {"reason": "inspect method page", "page_no": 4, "keyword": None},
-                {"reason": "find evaluation", "page_no": None, "keyword": "throughput experiment"},
-            ],
-            "repair_instructions": [],
-            "safe_to_generate_capsule": False,
-            "confidence": "medium",
-        }
+    memory = {
+        "evidence": [{"id": "E004", "page": 4, "interpretation": "mechanism"}],
+        "claims": [
+            {
+                "id": "C001",
+                "text": "evaluation claim",
+                "type": "evaluation",
+                "confidence": "low",
+                "critic_status": "unchecked",
+                "evidence_refs": [],
+                "risk_tags": ["needs_evidence"],
+            },
+            {
+                "id": "C002",
+                "text": "mechanism claim",
+                "confidence": "high",
+                "critic_status": "checked",
+                "evidence_refs": ["E004"],
+            },
+        ],
+    }
+
+    selected = select_central_verification_pages(
+        memory=memory,
+        all_artifacts=pages,
+        read_artifacts=[pages[0]],
     )
 
-    selected = select_targeted_reread_pages(pages, audit, already_read={1})
+    selected_pages = [page.page_no for page in selected]
+    assert 4 in selected_pages
+    assert 8 in selected_pages
+    assert 1 in selected_pages
 
-    assert [page.page_no for page in selected][:2] == [4, 8]
+
+def test_high_risk_claim_selection_prioritizes_unsupported_claims():
+    memory = {
+        "evidence": [{"id": "E001", "page": 1}],
+        "claims": [
+            {
+                "id": "C_safe",
+                "text": "safe claim",
+                "confidence": "high",
+                "critic_status": "checked",
+                "evidence_refs": ["E001"],
+            },
+            {
+                "id": "C_risk",
+                "text": "unsupported evaluation claim",
+                "type": "evaluation",
+                "confidence": "low",
+                "critic_status": "unchecked",
+                "evidence_refs": [],
+                "risk_tags": ["needs_evidence"],
+            },
+        ],
+    }
+
+    selected = select_high_risk_memory_claims(memory)
+
+    assert selected[0]["id"] == "C_risk"
 
 
 def test_paperlens_runtime_searches_and_reads_pages():
@@ -1719,38 +1749,6 @@ def test_paperlens_runtime_searches_and_reads_pages():
     assert context_pack["always_context"]["paper_id"] == "p_test"
     assert context_pack["budget"]["whole_paper_in_context"] is False
     assert context_pack["tool_trace"]
-
-
-def test_targeted_reread_skips_already_read_requested_pages(monkeypatch):
-    monkeypatch.delenv("PAPERLENS_TARGETED_REREAD_MAX_PAGES", raising=False)
-    pages = [
-        SimpleNamespace(
-            page_no=page_no, text=f"page {page_no} evaluation design", captions=[], visual_notes=[]
-        )
-        for page_no in range(1, 9)
-    ]
-    audit = normalize_memory_audit(
-        {
-            "status": "NEED_TARGETED_REREAD",
-            "unsupported_claims": [],
-            "missing_items": ["need method and evaluation"],
-            "reread_requests": [
-                {"reason": f"inspect page {page_no}", "page_no": page_no, "keyword": None}
-                for page_no in range(2, 8)
-            ],
-            "repair_instructions": [],
-            "safe_to_generate_capsule": False,
-            "confidence": "medium",
-        }
-    )
-
-    selected = select_targeted_reread_pages(pages, audit, already_read={2, 3})
-
-    selected_pages = [page.page_no for page in selected]
-    assert selected_pages[:4] == [4, 5, 6, 7]
-    assert 2 not in selected_pages
-    assert 3 not in selected_pages
-    assert len(selected) <= 6
 
 
 def test_rolling_page_limit_env_can_make_formal_smoke_tiny(monkeypatch):
@@ -1854,9 +1852,10 @@ def test_stage07_partial_chunk_failure_preserves_successful_memory(tmp_path, mon
         }
 
     monkeypatch.setattr(pipeline, "read_rolling_memory_chunk", fake_read_chunk)
-    monkeypatch.setattr(
-        pipeline, "audit_and_repair_paper_memory", lambda **kwargs: kwargs["memory"]
-    )
+    def fail_if_verifies_during_read(**_kwargs):
+        raise AssertionError("rolling read must not run memory verification")
+
+    monkeypatch.setattr(pipeline, "central_verify_paper_memory", fail_if_verifies_during_read)
 
     result = pipeline.run_rolling_paper_read(
         client=SimpleNamespace(),
@@ -1882,7 +1881,7 @@ def test_stage07_partial_chunk_failure_preserves_successful_memory(tmp_path, mon
     pipeline.db.close()
 
 
-def test_memory_prompts_include_audit_and_targeted_pages():
+def test_memory_prompts_split_reading_from_single_verification():
     paper = PaperRecord(
         paper_id="p_test", file_path="paper.pdf", file_hash="hash", canonical_title="Test Paper"
     )
@@ -1912,53 +1911,23 @@ def test_memory_prompts_include_audit_and_targeted_pages():
             low_confidence_flags=[],
         )
     ]
-    audit = normalize_memory_audit(
-        {
-            "status": "NEED_TARGETED_REREAD",
-            "unsupported_claims": [],
-            "missing_items": ["missing evaluation"],
-            "reread_requests": [
-                {"reason": "find evaluation", "page_no": 2, "keyword": "evaluation"}
-            ],
-            "repair_instructions": ["add evidence model"],
-            "safe_to_generate_capsule": False,
-            "confidence": "medium",
-        }
-    )
-
-    critic_prompt = build_memory_critic_prompt(
+    verify_prompt = build_central_memory_verify_prompt(
         paper=paper,
         skim=skim,
         decision=decision,
         memory=memory,
-        artifacts=pages,
-    )
-    repair_prompt = build_memory_repair_prompt(
-        paper=paper,
-        skim=skim,
-        decision=decision,
-        memory=memory,
-        audit=audit,
+        high_risk_claims=select_high_risk_memory_claims(memory),
         artifacts=pages,
     )
 
-    assert "paper_memory_to_audit" in critic_prompt
-    assert "agent_context_pack" in critic_prompt
-    assert "memory_audit" in repair_prompt
-    assert "targeted_reread_pages" in repair_prompt
-    assert "MemoryPatchSet" in repair_prompt
-    assert "memory_patch_protocol" in repair_prompt
+    assert "current_paper_memory_v3" in verify_prompt
+    assert "high_risk_claims_to_verify" in verify_prompt
+    assert "verification_pages" in verify_prompt
+    assert "set_memory_audit" in verify_prompt
+    assert "MemoryPatchSet" in verify_prompt
 
 
-def test_read_mode_controls_memory_repair_round_budget(monkeypatch):
-    monkeypatch.delenv("PAPERLENS_MEMORY_REPAIR_ROUNDS", raising=False)
-    assert memory_repair_round_budget("standard") == 2
-    monkeypatch.setenv("PAPERLENS_MEMORY_REPAIR_ROUNDS", "1")
-    assert memory_repair_round_budget("standard") == 1
-
-
-def test_zero_repair_budget_disables_targeted_reread_without_repair_call(tmp_path, monkeypatch):
-    monkeypatch.setenv("PAPERLENS_MEMORY_REPAIR_ROUNDS", "0")
+def test_central_memory_verification_applies_one_patch_set(tmp_path, monkeypatch):
     output_dir = tmp_path / "out"
     pipeline = PaperLensWorkflow(
         input_dir=tmp_path,
@@ -2013,26 +1982,46 @@ def test_zero_repair_budget_disables_targeted_reread_without_repair_call(tmp_pat
             page_no=2, text="evaluation page", captions=[], figures=[], tables=[]
         ),
     ]
-    audit = normalize_memory_audit(
-        {
-            "status": "NEED_TARGETED_REREAD",
-            "missing_items": ["missing evaluation detail"],
-            "reread_requests": [{"reason": "check evaluation", "page_no": 2}],
-            "repair_instructions": ["repair evaluation"],
-            "safe_to_generate_capsule": False,
-            "confidence": "medium",
+    calls = {"verify": 0}
+
+    def fake_verify(**_kwargs):
+        calls["verify"] += 1
+        return {
+            "paper_id": "p_test",
+            "operations": [
+                {
+                    "op": "upsert_evidence",
+                    "payload": {"id": "E002", "page": 2, "interpretation": "evaluation support"},
+                },
+                {
+                    "op": "upsert_claim",
+                    "payload": {
+                        "id": "C002",
+                        "text": "verified evaluation claim",
+                        "type": "evaluation",
+                        "confidence": "medium",
+                        "evidence_refs": ["E002"],
+                        "critic_status": "checked",
+                    },
+                },
+                {
+                    "op": "set_memory_audit",
+                    "payload": {
+                        "status": "PASS_WITH_WEAKNESSES",
+                        "unsupported_claims": [],
+                        "missing_items": ["exact numbers still need care"],
+                        "repair_instructions": [],
+                        "safe_to_generate_capsule": True,
+                        "confidence": "medium",
+                    },
+                },
+            ],
         }
-    )
-    monkeypatch.setattr(pipeline, "audit_paper_memory", lambda **_kwargs: audit)
 
-    def fail_if_called(**_kwargs):
-        raise AssertionError("standard mode should not auto repair")
-
-    monkeypatch.setattr(pipeline, "repair_paper_memory_with_targeted_reread", fail_if_called)
-
-    result = pipeline.audit_and_repair_paper_memory(
+    monkeypatch.setattr(pipeline, "verify_paper_memory_once", fake_verify)
+    result = pipeline.central_verify_paper_memory(
         client=SimpleNamespace(),
-        stage="stage_07_normal_read",
+        stage="stage_08_evidence_verify",
         paper=paper,
         skim=skim,
         decision=decision,
@@ -2041,14 +2030,13 @@ def test_zero_repair_budget_disables_targeted_reread_without_repair_call(tmp_pat
         read_artifacts=[pages[0]],
     )
 
+    assert calls == {"verify": 1}
+    assert "verified evaluation claim" in json.dumps(result["claims"], ensure_ascii=False)
     assert result["audit_trail"]["memory_audit"]["status"] == "PASS_WITH_WEAKNESSES"
-    assert pipeline.db.list_review_items()[0].reason.startswith("Targeted reread was disabled")
     pipeline.db.close()
 
 
-def test_memory_repair_failure_keeps_existing_memory_under_strict_mode(
-    tmp_path, monkeypatch
-):
+def test_central_memory_verification_failure_keeps_existing_memory(tmp_path, monkeypatch):
     monkeypatch.delenv("PAPERLENS_ALLOW_LLM_FALLBACK", raising=False)
     output_dir = tmp_path / "out"
     pipeline = PaperLensWorkflow(
@@ -2118,27 +2106,15 @@ def test_memory_repair_failure_keeps_existing_memory_under_strict_mode(
         SimpleNamespace(page_no=1, text="page 1", captions=[]),
         SimpleNamespace(page_no=2, text="evaluation page", captions=[]),
     ]
-    audit = normalize_memory_audit(
-        {
-            "status": "NEED_TARGETED_REREAD",
-            "missing_items": ["missing evaluation detail"],
-            "reread_requests": [{"reason": "check evaluation", "page_no": 2}],
-            "repair_instructions": ["repair evaluation"],
-            "safe_to_generate_capsule": False,
-            "confidence": "medium",
-        }
-    )
 
-    monkeypatch.setattr(pipeline, "audit_paper_memory", lambda **_kwargs: audit)
-
-    def fail_repair(**_kwargs):
+    def fail_verify(**_kwargs):
         raise RuntimeError("Model response was truncated before JSON completed")
 
-    monkeypatch.setattr(pipeline, "repair_paper_memory_with_targeted_reread", fail_repair)
+    monkeypatch.setattr(pipeline, "verify_paper_memory_once", fail_verify)
 
-    result = pipeline.audit_and_repair_paper_memory(
+    result = pipeline.central_verify_paper_memory(
         client=SimpleNamespace(),
-        stage="stage_07_normal_read",
+        stage="stage_08_evidence_verify",
         paper=paper,
         skim=skim,
         decision=decision,
@@ -2150,8 +2126,7 @@ def test_memory_repair_failure_keeps_existing_memory_under_strict_mode(
     assert result["problem_frame"]["problem"] == "usable audited memory"
     audit_result = result["audit_trail"]["memory_audit"]
     assert audit_result["status"] == "PASS_WITH_WEAKNESSES"
-    assert "memory_repair did not complete" in audit_result["missing_items"]
-    assert pipeline.db.list_review_items()[0].item_type == "MEMORY_REPAIR_FAILED"
+    assert "central_memory_verify did not complete" in audit_result["missing_items"]
     pipeline.db.close()
 
 
