@@ -122,6 +122,33 @@ jobs:
           python -m pip install --upgrade pip uv
           npm ci
 
+      - name: Configure updater for signed releases
+        shell: pwsh
+        env:
+          PAPERLENS_UPDATER_ENDPOINT: ${{ vars.PAPERLENS_UPDATER_ENDPOINT }}
+          PAPERLENS_UPDATER_PUBKEY: ${{ secrets.PAPERLENS_UPDATER_PUBKEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          $pubkey = $env:PAPERLENS_UPDATER_PUBKEY.Trim()
+          $privateKeyAvailable = -not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)
+          if (-not $pubkey -or -not $privateKeyAvailable) {
+            Write-Host "Updater signing is not fully configured; building installer without updater artifacts."
+            exit 0
+          }
+
+          $endpoint = $env:PAPERLENS_UPDATER_ENDPOINT.Trim()
+          if (-not $endpoint) {
+            $endpoint = "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download/latest.json"
+          }
+
+          $configPath = "src-tauri/tauri.conf.json"
+          $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+          $config.plugins.updater.pubkey = $pubkey
+          $config.plugins.updater.endpoints = @($endpoint)
+          $config.bundle.createUpdaterArtifacts = $true
+          $config | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $configPath -Encoding utf8
+          Write-Host "Updater artifacts enabled for $endpoint"
+
       - name: Guard against committed secrets
         shell: pwsh
         run: |
@@ -181,10 +208,15 @@ jobs:
 
       - name: Build NSIS installer
         shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri:build
 
       - name: Verify installer output
         shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           $installer = Get-ChildItem "src-tauri/target/release/bundle/nsis" -Filter "*.exe" | Select-Object -First 1
           if (-not $installer) {
@@ -197,12 +229,37 @@ jobs:
             throw "Installer is unexpectedly small: $($installer.FullName)"
           }
           "Installer: $($installer.FullName)"
+          $signature = Get-ChildItem "src-tauri/target/release/bundle/nsis" -Filter "*.sig" | Select-Object -First 1
+          if (-not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY) -and -not $signature) {
+            throw "Updater signing key was provided, but no updater signature was produced."
+          }
+          if ($signature) {
+            "Updater signature: $($signature.FullName)"
+          }
+
+      - name: Generate updater manifest
+        shell: pwsh
+        run: |
+          $artifactDir = "src-tauri/target/release/bundle/nsis"
+          $signature = Get-ChildItem $artifactDir -Filter "*.sig" | Select-Object -First 1
+          if (-not $signature) {
+            Write-Host "No updater signature found; skipping latest.json."
+            exit 0
+          }
+          $version = (Get-Content -LiteralPath "package.json" -Raw | ConvertFrom-Json).version
+          uv run python scripts/generate_tauri_latest.py `
+            --version $version `
+            --tag "${{ steps.release-meta.outputs.release_tag }}" `
+            --repo "$env:GITHUB_REPOSITORY" `
+            --artifact-dir $artifactDir `
+            --output "$artifactDir/latest.json" `
+            --notes "PaperLens ${{ steps.release-meta.outputs.release_tag }}"
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v6
         with:
           name: PaperLens-Windows-NSIS
-          path: src-tauri/target/release/bundle/nsis/*.exe
+          path: src-tauri/target/release/bundle/nsis/*
           if-no-files-found: error
           retention-days: 14
 
@@ -230,8 +287,13 @@ jobs:
           tag="${{ needs.build-windows.outputs.release_tag }}"
           repo="${GITHUB_REPOSITORY:?}"
           installer="$(find release -maxdepth 1 -name '*.exe' -print -quit)"
+          mapfile -t assets < <(find release -maxdepth 1 -type f \( -name '*.exe' -o -name '*.sig' -o -name 'latest.json' \) | sort)
           if [ -z "$installer" ]; then
             echo "No installer found in artifact."
+            exit 1
+          fi
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "No release assets found in artifact."
             exit 1
           fi
           if [ -z "$tag" ]; then
@@ -239,7 +301,7 @@ jobs:
             exit 1
           fi
           if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
-            gh release upload "$tag" "$installer" --repo "$repo" --clobber
+            gh release upload "$tag" "${assets[@]}" --repo "$repo" --clobber
           else
-            gh release create "$tag" "$installer" --repo "$repo" --target "$GITHUB_SHA" --title "$tag" --notes "PaperLens $tag"
+            gh release create "$tag" "${assets[@]}" --repo "$repo" --target "$GITHUB_SHA" --title "$tag" --notes "PaperLens $tag"
           fi

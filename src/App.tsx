@@ -502,6 +502,29 @@ function clearPaperLensLocalStorage() {
   }
 }
 
+function truncateText(value: string, maxLength: number) {
+  if (value.length <= maxLength) return value
+  return `${value.slice(0, maxLength - 1)}…`
+}
+
+function formatUpdateError(err: unknown) {
+  const text = String(err)
+  const lower = text.toLowerCase()
+  if (lower.includes('endpoints') || lower.includes('endpoint') || lower.includes('configured') || lower.includes('pubkey')) {
+    return '当前构建没有配置自动更新源。正式 GitHub Release 构建会使用签名的 latest.json 自动升级；开发版可从 Releases 手动下载安装包。'
+  }
+  if (lower.includes('signature')) {
+    return '更新包签名验证失败。为避免安装被篡改的版本，PaperLens 已停止升级。'
+  }
+  if (lower.includes('timeout') || lower.includes('timed out')) {
+    return '检查或下载更新超时。请稍后重试，或从 GitHub Releases 手动下载安装包。'
+  }
+  if (lower.includes('network') || lower.includes('failed to fetch') || lower.includes('dns')) {
+    return '无法连接更新源。请检查网络后重试，或从 GitHub Releases 手动下载安装包。'
+  }
+  return `检查更新失败：${text}`
+}
+
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value))
 }
@@ -841,8 +864,11 @@ function App() {
         setUpdateStatus('当前已经是最新版本。')
         return
       }
+      const notes = update.body?.trim()
+      const date = update.date ? `\n发布时间：${update.date}` : ''
+      const noteBlock = notes ? `\n\n更新说明：\n${truncateText(notes, 1000)}` : ''
       const shouldInstall = await confirm(
-        `发现 PaperLens ${update.version}。是否现在下载并安装？\n\n当前版本：${update.currentVersion}`,
+        `发现 PaperLens ${update.version}。是否现在下载并安装？\n\n当前版本：${update.currentVersion}${date}${noteBlock}`,
         { title: 'PaperLens 更新', kind: 'info' },
       )
       if (!shouldInstall) {
@@ -862,17 +888,12 @@ function App() {
           setUpdateStatus(total ? `正在下载更新 ${Math.min(100, Math.round((downloaded / total) * 100))}%` : '正在下载更新...')
         }
         if (event.event === 'Finished') setUpdateStatus('更新已下载，正在安装...')
-      })
+      }, { timeout: 15 * 60 * 1000 })
       setUpdateStatus('更新已安装，正在重启 PaperLens...')
       await message('更新安装完成，PaperLens 将重启。', { title: 'PaperLens 更新', kind: 'info' })
       await relaunch()
     } catch (err) {
-      const text = String(err)
-      const friendly =
-        text.includes('endpoints') || text.includes('endpoint') || text.includes('configured')
-          ? '更新功能已经接入，但当前版本还没有配置发布更新源。正式发布时补上 updater endpoint 和公钥即可。'
-          : text
-      setUpdateStatus(friendly)
+      setUpdateStatus(formatUpdateError(err))
     } finally {
       setUpdateBusy(false)
     }

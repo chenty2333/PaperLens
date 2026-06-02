@@ -116,9 +116,18 @@ Windows 安装包 workflow 在 [.github/workflows/windows-installer.yml](.github
 - Python sidecar 构建；
 - Tauri NSIS 安装包构建；
 - 安装包 artifact 上传；
-- 推送 `v*` tag、`main` 上 `package.json` 版本号变化，或手动运行并选择 `publish_release=true` 时发布 GitHub Release。
+- 推送 `v*` tag、`main` 上 `package.json` 版本号变化，或手动运行并选择 `publish_release=true` 时发布 GitHub Release；
+- 配置 updater 签名 secret 后，同时发布应用内自动升级所需的签名元数据。
 
 CI 不需要模型 API key。
+
+应用内自动升级只在签名 release 构建里启用。发布自更新版本前，需要配置这些 repository secrets：
+
+- `PAPERLENS_UPDATER_PUBKEY`：Tauri signer 生成的公钥；
+- `TAURI_SIGNING_PRIVATE_KEY`：只在 GitHub Actions 中使用的私钥；
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`：可选的私钥密码。
+
+workflow 会把 NSIS 安装包、签名文件和 `latest.json` 一起上传到 GitHub Release。默认检查地址是 `https://github.com/<owner>/<repo>/releases/latest/download/latest.json`；如需使用自己的更新源，可以设置 repository variable `PAPERLENS_UPDATER_ENDPOINT`。
 
 ## 安全和隐私默认值
 
