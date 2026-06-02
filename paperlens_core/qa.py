@@ -709,6 +709,11 @@ def sanitize_qa_text(text: str) -> str:
     cleaned = text
     for pattern, replacement in replacements:
         cleaned = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"\[\[?([^\[\]]{1,24})\]\(#user_content_([A-Za-z0-9_.:-]+)\)\]?",
+        r"证据 \2",
+        cleaned,
+    )
     return cleaned
 
 

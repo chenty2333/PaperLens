@@ -1147,6 +1147,18 @@ def test_paper_qa_normalization_removes_reader_hostile_wording():
     assert "自动读取到的证据" in payload
 
 
+def test_paper_qa_normalization_removes_internal_evidence_anchors():
+    answer = normalize_answer(
+        {
+            "answer_markdown": "论文支持这个判断 [[4](#user_content_E005)]，但类比是背景解释。",
+            "confidence": "medium",
+        }
+    )
+
+    assert "#user_content" not in answer["answer_markdown"]
+    assert "证据 E005" in answer["answer_markdown"]
+
+
 def test_paper_qa_low_confidence_adds_evidence_limit_for_minimal_shape():
     answer = normalize_answer(
         {
