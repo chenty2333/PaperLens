@@ -992,14 +992,18 @@ def parse_json_text_for_schema(
     schema: dict[str, Any],
 ) -> dict[str, Any]:
     data = parse_json_text(text)
-    apply_schema_compatible_defaults(data, schema)
+    apply_schema_compatible_defaults(data, schema, schema_name=schema_name)
     missing = missing_required_schema_keys(data, schema)
     if missing:
         raise LlmError(f"Provider JSON did not match schema {schema_name}; missing keys: {', '.join(missing)}")
     return data
 
 
-def apply_schema_compatible_defaults(data: dict[str, Any], schema: dict[str, Any]) -> None:
+def apply_schema_compatible_defaults(
+    data: dict[str, Any], schema: dict[str, Any], *, schema_name: str = ""
+) -> None:
+    if schema_name == "paperlens_paper_question":
+        apply_paper_question_defaults(data)
     properties = schema.get("properties") or {}
     if not isinstance(properties, dict):
         return
@@ -1013,6 +1017,13 @@ def apply_schema_compatible_defaults(data: dict[str, Any], schema: dict[str, Any
             data[key] = []
         elif prop.get("type") == "object":
             data[key] = {}
+
+
+def apply_paper_question_defaults(data: dict[str, Any]) -> None:
+    if "answer_markdown" not in data:
+        data["answer_markdown"] = ""
+    if "confidence" not in data or data.get("confidence") not in {"high", "medium", "low"}:
+        data["confidence"] = "low"
 
 
 def schema_property_allows_null(prop: dict[str, Any]) -> bool:

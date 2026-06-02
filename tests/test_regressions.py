@@ -73,6 +73,7 @@ from paperlens_core.workflow.stages import resolve_workflow_stages
 from paperlens_core.runtime import PaperLensRuntime
 from paperlens_core.quality import evaluate_capsule_quality
 from paperlens_core.qa import (
+    ASK_SCHEMA,
     ASK_SYSTEM_PROMPT,
     answer_question,
     build_ask_prompt,
@@ -1155,6 +1156,31 @@ def test_paper_qa_low_confidence_adds_evidence_limit_for_minimal_shape():
     )
 
     assert answer["source_attribution"]["evidence_limits"]
+
+
+def test_paper_qa_schema_parser_accepts_provider_alias_fields():
+    data = parse_json_text_for_schema(
+        json.dumps(
+            {
+                "content": "HybridGS 主要压缩 3DGS 表示生成后的数据表示阶段，而不是训练阶段。",
+                "cited_pages": [3],
+                "source_attribution": {
+                    "paper_claims": ["The paper frames HybridGS as a 3DGS data compression method."],
+                    "paperlens_inferences": [],
+                    "background_context": [],
+                    "evidence_limits": [],
+                },
+            },
+            ensure_ascii=False,
+        ),
+        "paperlens_paper_question",
+        ASK_SCHEMA,
+    )
+    answer = normalize_answer(data)
+
+    assert answer["answer_markdown"].startswith("HybridGS 主要压缩")
+    assert answer["confidence"] == "low"
+    assert answer["cited_pages"] == [3]
 
 
 def test_paperlens_library_writes_single_memory_asset_and_searches(tmp_path):
