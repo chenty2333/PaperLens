@@ -350,11 +350,10 @@ function stageLabel(stage?: string | null) {
     stage_01_parse: '解析论文',
     stage_02_parse_verify: '检查解析质量',
     stage_03_skim: '建立论文地图',
-    stage_07_normal_read: '阅读并构建 Memory',
-    stage_08_evidence_verify: '验证 Memory 证据',
+    stage_07_normal_read: '阅读论文',
+    stage_08_evidence_verify: '核对证据',
     stage_15_export: '生成报告',
     stage_17_manifest: '收尾保存',
-    idle: '空闲',
   }
   return labels[String(stage ?? '')] ?? String(stage ?? '')
 }
@@ -721,7 +720,7 @@ function App() {
         id: `${messageId}_assistant`,
         role: 'assistant',
         scope: chatScope,
-        content: '正在回到 paper memory 和原文证据里核对...',
+        content: '正在回到原文和已读内容里核对...',
         pending: true,
       },
     ])
@@ -865,7 +864,7 @@ function App() {
                 <div className="mark">PL</div>
                 <div>
                   <h1>PaperLens</h1>
-                  <span>{service ? 'Core connected' : 'Starting core'}</span>
+                  <span>{service ? '已连接' : '启动中'}</span>
                 </div>
               </div>
               <div className="workspace-tools">
@@ -926,7 +925,7 @@ function App() {
             <section className="library-section">
               <div className="section-title">
                 <Library size={16} />
-                <span>Library</span>
+                <span>论文库</span>
                 <small>{workspace?.paper_count ?? 0}</small>
               </div>
               <div className="paper-list">
@@ -969,15 +968,15 @@ function App() {
       <section className="main-stage">
         <header className="paper-toolbar">
           <div className="paper-heading">
-            <p className="eyebrow">Capsule</p>
+            <p className="eyebrow">知识胶囊</p>
             <h2>{selectedPaper?.title ?? '选择一篇已经读过的论文'}</h2>
             {selectedPaper && (
               <div className="metadata-row">
                 <span>{selectedPaper.grade || '未分级'}</span>
                 {selectedPaper.recommendation ? <span>{selectedPaper.recommendation}</span> : null}
-                {selectedPaper.memory?.claim_count ? <span>{selectedPaper.memory.claim_count} claims</span> : null}
+                {selectedPaper.memory?.claim_count ? <span>{selectedPaper.memory.claim_count} 个要点</span> : null}
                 {selectedPaper.memory?.evidence_count ? (
-                  <span>{selectedPaper.memory.evidence_count} evidence</span>
+                  <span>{selectedPaper.memory.evidence_count} 条证据</span>
                 ) : null}
               </div>
             )}
@@ -990,11 +989,11 @@ function App() {
             )}
             {selectedPaper?.report_file && (
               <button type="button" className="icon-text-button" onClick={() => openPath(selectedPaper.report_file!)}>
-                <FileText size={16} /> Markdown
+                <FileText size={16} /> 打开文档
               </button>
             )}
             <button type="button" className={evidenceOpen ? 'active-button' : ''} onClick={() => setEvidenceOpen((value) => !value)}>
-              <PanelRightOpen size={16} /> Evidence
+              <PanelRightOpen size={16} /> 证据
             </button>
             {!effectiveRightSidebarOpen && (
               <button type="button" className="icon-button" title="展开右侧栏" onClick={() => setRightSidebarOpen(true)}>
@@ -1061,7 +1060,7 @@ function App() {
         ) : (
           <>
             <div className="side-panel-titlebar">
-              <span>Workbench</span>
+              <span>问答</span>
               <button
                 type="button"
                 className="icon-button small"
@@ -1072,31 +1071,31 @@ function App() {
                 <PanelRightClose size={15} />
               </button>
             </div>
-            <section className={`job-panel ${activeJob || jobEvents.length ? 'has-activity' : 'is-idle'}`}>
-              <div className="panel-head">
-                <div>
-                  <p className="eyebrow">Activity</p>
-                  <h3>{activeJob ? statusLabel(activeJob.status) : '无任务'}</h3>
-                  {activeJob && <span>{stageLabel(activeJob.current_stage)}</span>}
-                </div>
-                {activeJob && (
-                  <div className="job-controls">
-                    <button type="button" className="icon-button small" aria-label="Retry" onClick={() => controlJob(activeJob.job_id, 'retry')}>
-                      <RotateCcw size={14} />
-                    </button>
-                    <button
-                      type="button"
-                      className="icon-button small"
-                      aria-label="Stop"
-                      disabled={activeJob.status !== 'running'}
-                      onClick={() => controlJob(activeJob.job_id, 'cancel')}
-                    >
-                      <Square size={14} />
-                    </button>
+            {Boolean(activeJob || jobEvents.length) && (
+              <section className="job-panel has-activity">
+                <div className="panel-head">
+                  <div>
+                    <p className="eyebrow">任务</p>
+                    <h3>{activeJob ? statusLabel(activeJob.status) : '最近任务'}</h3>
+                    {activeJob && <span>{stageLabel(activeJob.current_stage)}</span>}
                   </div>
-                )}
-              </div>
-              {Boolean(activeJob || jobEvents.length) && (
+                  {activeJob && (
+                    <div className="job-controls">
+                      <button type="button" className="icon-button small" aria-label="Retry" onClick={() => controlJob(activeJob.job_id, 'retry')}>
+                        <RotateCcw size={14} />
+                      </button>
+                      <button
+                        type="button"
+                        className="icon-button small"
+                        aria-label="Stop"
+                        disabled={activeJob.status !== 'running'}
+                        onClick={() => controlJob(activeJob.job_id, 'cancel')}
+                      >
+                        <Square size={14} />
+                      </button>
+                    </div>
+                  )}
+                </div>
                 <div className="job-timeline">
                   {jobEvents.slice(-6).map((event, index) => (
                     <div key={`${event.seq ?? index}-${event.type}`} className={`timeline-event ${event.level ?? 'info'}`}>
@@ -1105,21 +1104,21 @@ function App() {
                     </div>
                   ))}
                 </div>
-              )}
-            </section>
+              </section>
+            )}
 
             <section className="chat-panel">
               <div className="chat-head">
                 <div>
-                  <p className="eyebrow">Chat</p>
-                  <h3>{chatScope === 'library' ? '问整个 Library' : '问当前论文'}</h3>
+                  <p className="eyebrow">问答</p>
+                  <h3>{chatScope === 'library' ? '问整个论文库' : '问当前论文'}</h3>
                 </div>
                 <div className="segmented">
                   <button type="button" className={chatScope === 'paper' ? 'active' : ''} onClick={() => setChatScope('paper')}>
-                    Paper
+                    当前论文
                   </button>
                   <button type="button" className={chatScope === 'library' ? 'active' : ''} onClick={() => setChatScope('library')}>
-                    Library
+                    论文库
                   </button>
                 </div>
               </div>
@@ -1424,11 +1423,11 @@ function EvidenceSummary({ paper, service, outputDir }: { paper: PaperSummary | 
     <div>
       <div className="drawer-head">
         <BookOpen size={16} />
-        <strong>Memory / Evidence</strong>
+        <strong>证据</strong>
       </div>
       <div className="memory-stats">
-        <span>{claims.length} claims</span>
-        <span>{evidence.length} evidence</span>
+        <span>{claims.length} 个要点</span>
+        <span>{evidence.length} 条证据</span>
       </div>
       <button type="button" onClick={() => setOpen((value) => !value)}>
         {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />} 查看前 8 条证据

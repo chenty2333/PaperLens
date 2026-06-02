@@ -687,12 +687,8 @@ button:focus-visible {
   display: block;
 }
 
-.job-panel.is-idle {
-  background: var(--surface);
-}
-
 .job-panel.has-activity {
-  max-height: 220px;
+  max-height: 190px;
 }
 
 .panel-head,
@@ -706,11 +702,6 @@ button:focus-visible {
   gap: 10px;
 }
 
-.job-panel.is-idle .panel-head {
-  min-height: 48px;
-  border-bottom: 0;
-}
-
 .panel-head > div,
 .chat-head > div:first-child {
   min-width: 0;
@@ -719,12 +710,6 @@ button:focus-visible {
 .panel-head h3,
 .chat-head h3 {
   font-size: 16px;
-}
-
-.job-panel.is-idle .panel-head h3 {
-  font-size: 13px;
-  color: var(--muted);
-  font-weight: 650;
 }
 
 .panel-head span {
