@@ -579,6 +579,7 @@ button:focus-visible {
   background: var(--code);
   border-radius: 3px;
   padding: 1px 5px;
+  font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
 }
 
 .markdown-body pre {
@@ -587,6 +588,18 @@ button:focus-visible {
   color: #eef5f5;
   border-radius: 0;
   padding: 14px;
+  max-width: 100%;
+  line-height: 1.55;
+}
+
+.markdown-body pre code {
+  display: block;
+  overflow: visible;
+  background: transparent;
+  color: inherit;
+  border-radius: 0;
+  padding: 0;
+  white-space: pre;
 }
 
 .markdown-body table {
@@ -654,10 +667,12 @@ button:focus-visible {
 
 .workbench-panel {
   grid-column: 5;
+  container-type: inline-size;
   border-left: 1px solid var(--border);
   background: var(--surface);
   display: flex;
   flex-direction: column;
+  height: 100vh;
   overflow: hidden;
 }
 
@@ -670,6 +685,10 @@ button:focus-visible {
   font-weight: 700;
   font-size: 12px;
   text-transform: uppercase;
+}
+
+.side-panel-titlebar.compact {
+  justify-content: flex-end;
 }
 
 .job-panel,
@@ -694,22 +713,51 @@ button:focus-visible {
 .panel-head,
 .chat-head {
   min-height: 56px;
-  padding: 10px 12px;
+  padding: 9px 12px;
   border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
+}
+
+.chat-head-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.thread-select {
+  flex: 1 1 116px;
+  width: auto;
+  max-width: 150px;
+  min-height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--text);
+  padding: 0 8px;
+  font: inherit;
+  font-size: 12px;
 }
 
 .panel-head > div,
-.chat-head > div:first-child {
+.chat-title {
+  flex: 0 1 auto;
   min-width: 0;
+  max-width: 42%;
 }
 
 .panel-head h3,
 .chat-head h3 {
   font-size: 16px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .panel-head span {
@@ -759,9 +807,68 @@ button:focus-visible {
 
 .chat-panel {
   flex: 1 1 auto;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  display: flex;
+  flex-direction: column;
   border-bottom: 0;
+}
+
+@container (max-width: 520px) {
+  .chat-title {
+    display: none;
+  }
+
+  .chat-head {
+    justify-content: flex-end;
+  }
+
+  .chat-head-actions {
+    width: 100%;
+  }
+
+  .thread-select {
+    flex: 1 1 120px;
+    width: auto;
+  }
+}
+
+@container (max-width: 360px) {
+  .clear-chat-button {
+    display: none;
+  }
+}
+
+.activity-strip {
+  flex: 0 0 auto;
+  min-height: 34px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface) 72%, var(--panel));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.activity-strip > div:first-child {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.activity-strip strong {
+  flex: 0 0 auto;
+  color: var(--text-strong);
+  font-size: 12px;
+}
+
+.activity-strip span {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .segmented {
@@ -782,6 +889,7 @@ button:focus-visible {
 }
 
 .chat-log {
+  flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
   padding: 12px;
@@ -840,21 +948,27 @@ button:focus-visible {
 
 .ask-box {
   border-top: 1px solid var(--border);
-  padding: 12px;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
-  align-items: end;
+  padding: 10px 12px 12px;
+  position: relative;
+  flex: 0 0 auto;
 }
 
 .ask-box textarea {
   min-height: 72px;
   max-height: 160px;
+  resize: none;
+  padding: 10px 48px 10px 12px;
 }
 
-.ask-box button {
-  height: 42px;
-  padding: 0 13px;
+.ask-box .send-button {
+  position: absolute;
+  right: 22px;
+  bottom: 22px;
+  width: 30px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0;
+  border-radius: 999px;
 }
 
 .evidence-details {
@@ -970,10 +1084,6 @@ button:focus-visible {
 
   .markdown-body {
     font-size: 15px;
-  }
-
-  .ask-box {
-    grid-template-columns: 1fr;
   }
 
   .ask-box textarea {

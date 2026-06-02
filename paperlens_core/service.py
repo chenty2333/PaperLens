@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import json
 import mimetypes
+import re
 import secrets
 import threading
 import time
@@ -22,6 +24,8 @@ from paperlens_core.protocol import LibraryQuestionRequest, PaperQuestionRequest
 
 SERVER_VERSION = "paperlens-core-service.v1"
 INTERNAL_DIR = ".paperlens"
+INLINE_IMAGE_MAX_BYTES = 3_000_000
+INLINE_IMAGE_EXTENSIONS = {".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"}
 
 
 def utc_now() -> str:
@@ -103,6 +107,22 @@ def string_or_none(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def chat_history_from_payload(payload: dict[str, Any]) -> list[dict[str, str]]:
+    raw = payload.get("chat_history")
+    if not isinstance(raw, list):
+        return []
+    history: list[dict[str, str]] = []
+    for item in raw[-12:]:
+        if not isinstance(item, dict):
+            continue
+        role = string_or_none(item.get("role"))
+        content = string_or_none(item.get("content"))
+        if role not in {"user", "assistant"} or not content:
+            continue
+        history.append({"role": role, "content": content[:2000]})
+    return history[-8:]
 
 
 def int_or_default(value: Any, default: int) -> int:
@@ -271,12 +291,82 @@ def load_report(output_dir: Path, paper_id: str) -> dict[str, Any]:
     path = (output_dir / report_path).resolve()
     if not path.exists():
         raise FileNotFoundError(f"Report file missing: {path}")
+    markdown = path.read_text(encoding="utf-8")
     return {
         "paper": paper,
         "path": str(path),
         "base_dir": str(path.parent),
-        "markdown": path.read_text(encoding="utf-8"),
+        "markdown": inline_report_local_images(
+            markdown=markdown,
+            output_dir=output_dir,
+            report_path=path,
+        ),
     }
+
+
+def inline_report_local_images(*, markdown: str, output_dir: Path, report_path: Path) -> str:
+    """Inline local report images for the UI while leaving files on disk unchanged."""
+
+    def replace_html(match: re.Match[str]) -> str:
+        src = match.group("src")
+        data_uri = local_image_data_uri(output_dir=output_dir, report_path=report_path, src=src)
+        if not data_uri:
+            return match.group(0)
+        return f"{match.group('prefix')}{match.group('quote')}{data_uri}{match.group('quote')}"
+
+    def replace_markdown(match: re.Match[str]) -> str:
+        src = match.group("src").strip()
+        data_uri = local_image_data_uri(output_dir=output_dir, report_path=report_path, src=src)
+        if not data_uri:
+            return match.group(0)
+        return f"{match.group('prefix')}{data_uri}{match.group('suffix')}"
+
+    markdown = re.sub(
+        r"(?P<prefix><img\b[^>]*?\bsrc=)(?P<quote>[\"'])(?P<src>[^\"']+)(?P=quote)",
+        replace_html,
+        markdown,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(
+        r"(?P<prefix>!\[[^\]]*\]\()(?P<src>[^)\s]+)(?P<suffix>\))",
+        replace_markdown,
+        markdown,
+    )
+
+
+def local_image_data_uri(*, output_dir: Path, report_path: Path, src: str) -> str | None:
+    if not src or re.match(r"^(?:https?:|data:|blob:)", src, flags=re.IGNORECASE):
+        return None
+    target = resolve_report_local_image(output_dir=output_dir, report_path=report_path, src=src)
+    if not target:
+        return None
+    try:
+        if target.stat().st_size > INLINE_IMAGE_MAX_BYTES:
+            return None
+        mime_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        encoded = base64.b64encode(target.read_bytes()).decode("ascii")
+    except OSError:
+        return None
+    return f"data:{mime_type};base64,{encoded}"
+
+
+def resolve_report_local_image(*, output_dir: Path, report_path: Path, src: str) -> Path | None:
+    if "\x00" in src:
+        return None
+    normalized_src = unquote(src).replace("\\", "/")
+    if Path(normalized_src).is_absolute():
+        return None
+    target = (report_path.parent / normalized_src).resolve()
+    output_dir = output_dir.expanduser().resolve()
+    try:
+        target.relative_to(output_dir)
+    except ValueError:
+        return None
+    if target.suffix.lower() not in INLINE_IMAGE_EXTENSIONS:
+        return None
+    if not target.exists() or not target.is_file():
+        return None
+    return target
 
 
 def load_evidence(output_dir: Path, paper_id: str) -> dict[str, Any]:
@@ -603,6 +693,7 @@ class PaperLensServiceState:
                         config_overrides=overrides,
                         question=answer.question,
                         limit=int_or_default(payload.get("limit"), 8),
+                        chat_history=chat_history_from_payload(payload),
                     )
                 )
             else:
@@ -615,6 +706,7 @@ class PaperLensServiceState:
                         config_overrides=overrides,
                         paper_id=answer.paper_id,
                         question=answer.question,
+                        chat_history=chat_history_from_payload(payload),
                     )
                 )
             answer.answer = result

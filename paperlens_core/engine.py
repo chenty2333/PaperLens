@@ -99,6 +99,7 @@ class PaperLensEngine:
             config=config,
             paper_id=request.paper_id,
             question=request.question,
+            chat_history=request.chat_history,
         )
 
     def build_library(self, request: LibraryBuildRequest) -> dict[str, Any]:
@@ -129,5 +130,6 @@ class PaperLensEngine:
             config=config,
             question=request.question,
             limit=request.limit,
+            chat_history=request.chat_history,
         )
 

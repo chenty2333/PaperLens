@@ -12,6 +12,7 @@ from paperlens_core.service import (
     PaperLensHttpServer,
     PaperLensRequestHandler,
     PaperLensServiceState,
+    load_report,
     load_public_workspace,
 )
 from paperlens_core.library import LIBRARY_RECORD_FILENAME, LIBRARY_RECORD_SCHEMA_VERSION
@@ -135,6 +136,22 @@ def test_service_serves_only_workspace_assets(tmp_path: Path) -> None:
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_load_report_inlines_local_images_for_ui(tmp_path: Path) -> None:
+    write_sample_library(tmp_path)
+    image_path = tmp_path / ".paperlens" / "figures" / "p_test" / "figure.png"
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    (tmp_path / "papers" / "p_test.md").write_text(
+        '# A Useful Paper\n\n<figure>\n  <img src="../.paperlens/figures/p_test/figure.png" alt="figure">\n</figure>',
+        encoding="utf-8",
+    )
+
+    report = load_report(tmp_path, "p_test")
+
+    assert 'src="data:image/png;base64,' in report["markdown"]
+    assert "../.paperlens/figures/p_test/figure.png" not in report["markdown"]
 
 
 def test_event_stream_assigns_sequence_numbers() -> None:

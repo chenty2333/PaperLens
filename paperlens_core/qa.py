@@ -23,19 +23,24 @@ You answer questions about one paper for PaperLens.
 Use the available PaperMemoryV3 claim/evidence IR first when present, then the library record,
 parsed page excerpts, and attached page images if present. Reports are orientation material, not
 primary facts.
-Use PaperMemoryV3 conceptual_bridge as the preferred source for short background explanations of
-terms the user needs before the paper's idea makes sense.
+Use PaperMemoryV3 conceptual_bridge when present, but do not let paper evidence over-constrain
+prerequisite explanations. If the user asks for basic concepts, notation intuition, analogies,
+or implementation-style examples, act as an expert tutor: explain the background knowledge needed
+to understand the paper, then connect it back to the paper. Mark that material as background,
+not as a paper claim.
 Always separate paper claims, PaperLens inferences, background knowledge, and evidence limits in
 source_attribution. If you explain background knowledge that is not a paper claim, clearly label it
 as background. If the evidence is not enough, say so, set confidence low, and record the limitation.
-Answer naturally and concisely. Cite page numbers when you rely on page excerpts.
+Answer naturally at the depth needed by the user's question. For implementation, notation, formula,
+or code questions, include complete and readable snippets/examples instead of compressing them away.
+Cite page numbers when you rely on page excerpts.
 Use user-facing wording for limits, such as "automatic reading evidence" or "the indexed paper
 evidence"; never expose internal wording about excerpts being supplied by the system or user.
 Return JSON only.
 """.strip()
 
 
-ASK_PROMPT_VERSION = "ask-v8-context"
+ASK_PROMPT_VERSION = "ask-v10-background-thread"
 
 
 ASK_SCHEMA: dict[str, Any] = {
@@ -43,7 +48,7 @@ ASK_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["answer_markdown", "cited_pages", "confidence", "source_attribution"],
     "properties": {
-        "answer_markdown": {"type": "string", "maxLength": 1800},
+        "answer_markdown": {"type": "string", "maxLength": 6000},
         "cited_pages": {"type": "array", "maxItems": 8, "items": {"type": "integer", "minimum": 1}},
         "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
         "source_attribution": {
@@ -72,6 +77,7 @@ def answer_question(
     config: CoreConfig,
     paper_id: str | None,
     question: str,
+    chat_history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     report_path = resolve_report_path(output_dir, paper_id)
     resolved_paper_id = paper_id_from_report(report_path)
@@ -146,6 +152,7 @@ def answer_question(
         report_path=report_path,
         paper_id=resolved_paper_id,
         question=question,
+        chat_history=chat_history or [],
         paper_memory_v3=paper_memory_v3,
         library_record=library_record,
         pages=pages,
@@ -162,6 +169,7 @@ def answer_question(
             "visual_detail": config.visual_detail,
             "paper_id": resolved_paper_id,
             "question": question,
+            "chat_history_hash": hash_json_payload(normalize_chat_history(chat_history or [])),
             "prompt_hash": hash_text(ASK_SYSTEM_PROMPT + "\n" + user_prompt),
             "schema_hash": hash_json_payload(ASK_SCHEMA),
             "images": [image_cache_fingerprint(path) for path in image_paths],
@@ -226,7 +234,9 @@ def invoke_ask_model(
     last_error: Exception | None = None
     for attempt in range(attempts):
         prompt = user_prompt if attempt == 0 else user_prompt + ask_retry_suffix(attempt)
-        max_tokens = 900 if attempt == 0 else 1400 + attempt * 300
+        max_tokens = bounded_env_int("PAPERLENS_ASK_MAX_TOKENS", default=2600, minimum=1200, maximum=8000)
+        if attempt:
+            max_tokens = min(8000, max_tokens + attempt * 800)
         try:
             if image_paths and attempt == 0:
                 return client.invoke_json_with_images(
@@ -457,6 +467,25 @@ def classify_question(question: str) -> str:
         return "implementation"
     if any(token in normalized for token in ["复现", "reproduce", "artifact"]):
         return "reproduction"
+    if any(
+        token in normalized
+        for token in [
+            "基础",
+            "常识",
+            "背景知识",
+            "前置",
+            "我不会",
+            "不懂",
+            "补充常识",
+            "直觉",
+            "类比",
+            "比喻",
+            "intuition",
+            "background",
+            "prerequisite",
+        ]
+    ):
+        return "background_explanation"
     if any(token in normalized for token in ["术语", "是什么意思", "解释", "clarify", "什么是"]):
         return "clarification"
     if any(token in normalized for token in ["怎么做", "机制", "原理", "how", "mechanism"]):
@@ -466,11 +495,27 @@ def classify_question(question: str) -> str:
     return "orientation"
 
 
+def normalize_chat_history(history: list[dict[str, Any]]) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    for item in history[-10:]:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = normalize_text(str(item.get("content") or ""), limit=1200)
+        if not content:
+            continue
+        normalized.append({"role": role, "content": content})
+    return normalized[-8:]
+
+
 def build_ask_prompt(
     *,
     report_path: Path,
     paper_id: str,
     question: str,
+    chat_history: list[dict[str, Any]] | None = None,
     paper_memory_v3: dict[str, Any] | None = None,
     pages: list[dict[str, Any]],
     question_type: str = "orientation",
@@ -492,6 +537,10 @@ def build_ask_prompt(
             f"paper_id: {paper_id}",
             f"report_path: {report_path.as_posix()}",
             f"question_type: {question_type}",
+            "answer_mode:",
+            qa_answer_mode_instruction(question_type),
+            "recent_chat_history:",
+            json.dumps(normalize_chat_history(chat_history or []), ensure_ascii=False),
             "question:",
             question,
             "paper_memory_v3_ir:",
@@ -508,6 +557,8 @@ def build_ask_prompt(
                 "supported by PaperMemoryV3 evidence/claims or relevant page excerpts. "
                 "Use agent_context_pack as the active tool/context trace for this question. "
                 "Do not use the rendered report as a source; it is only a user-facing view. "
+                "Use recent_chat_history only to resolve follow-up references and the user's intent; "
+                "do not treat previous assistant answers as facts unless supported by memory/evidence. "
                 "source_attribution.paperlens_inferences should contain PaperLens synthesis or cautious "
                 "interpretation. source_attribution.background_context should contain general field "
                 "knowledge that is not asserted by the paper. source_attribution.evidence_limits should "
@@ -516,6 +567,25 @@ def build_ask_prompt(
                 "by the system or user."
             ),
         ]
+    )
+
+
+def qa_answer_mode_instruction(question_type: str) -> str:
+    if question_type in {"background_explanation", "clarification"}:
+        return (
+            "Teach the prerequisite concept first in plain language, using general background knowledge "
+            "when useful. Then explain how the paper uses that concept. Keep paper claims and background "
+            "knowledge explicitly separate."
+        )
+    if question_type == "implementation":
+        return (
+            "Use readable implementation-style examples or pseudocode when the user asks for code. "
+            "The code can be an explanatory analogy, but label it as such unless the paper provides "
+            "actual implementation details."
+        )
+    return (
+        "Answer the paper question directly, using paper memory/evidence for factual claims and "
+        "background knowledge only when it helps understanding."
     )
 
 

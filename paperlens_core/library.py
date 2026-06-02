@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,7 +52,11 @@ Use the supplied library records first, especially PaperMemoryV3 claim/evidence 
 Distinguish paper facts from cross-paper synthesis,
 PaperLens inferences, and background knowledge in source_attribution. If the local library does not
 contain enough evidence, say so plainly and record the limitation.
-Mention the most relevant papers by title and report path. Return JSON only.
+Mention the most relevant papers by title and report path. Use recent chat history only to resolve
+follow-up references and the user's intent; do not treat earlier assistant answers as facts.
+For prerequisite/background questions, explain the general concept clearly, then connect it to the
+local papers. Label background knowledge separately from paper claims.
+Return JSON only.
 """.strip()
 
 
@@ -60,7 +65,7 @@ LIBRARY_ASK_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["answer_markdown", "related_papers", "confidence", "source_attribution"],
     "properties": {
-        "answer_markdown": {"type": "string", "maxLength": 3200},
+        "answer_markdown": {"type": "string", "maxLength": 6000},
         "related_papers": {
             "type": "array",
             "maxItems": 8,
@@ -446,6 +451,7 @@ def answer_library_question(
     config: CoreConfig,
     question: str,
     limit: int = 8,
+    chat_history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     records = ensure_library_records(output_dir)
     matches = search_library_records(records, query=question, limit=limit, public=False)
@@ -458,13 +464,16 @@ def answer_library_question(
         }
     config.validate_agentic_run()
     client = JsonLlmClient(config.provider)
-    user_prompt = build_library_ask_prompt(question=question, matches=matches)
+    user_prompt = build_library_ask_prompt(
+        question=question, matches=matches, chat_history=chat_history or []
+    )
     cache_path = library_answer_cache_path(
         output_dir,
         {
             "version": LIBRARY_ASK_PROMPT_VERSION,
             "model": config.provider.model,
             "question": question,
+            "chat_history_hash": hash_json_payload(normalize_chat_history(chat_history or [])),
             "prompt_hash": hash_text(LIBRARY_ASK_SYSTEM_PROMPT + "\n" + user_prompt),
             "schema_hash": hash_json_payload(LIBRARY_ASK_SCHEMA),
             "record_hashes": [hit["paper"].get("record_hash") for hit in matches],
@@ -481,7 +490,7 @@ def answer_library_question(
         user_prompt=user_prompt,
         schema_name="paperlens_library_question",
         schema=LIBRARY_ASK_SCHEMA,
-        max_tokens=1400,
+        max_tokens=bounded_env_int("PAPERLENS_LIBRARY_ASK_MAX_TOKENS", default=2600, minimum=1200, maximum=8000),
     )
     answer = normalize_library_answer(raw.data)
     answer["cache_hit"] = False
@@ -498,7 +507,9 @@ def answer_library_question(
     return answer
 
 
-def build_library_ask_prompt(*, question: str, matches: list[dict[str, Any]]) -> str:
+def build_library_ask_prompt(
+    *, question: str, matches: list[dict[str, Any]], chat_history: list[dict[str, Any]] | None = None
+) -> str:
     compact_records = []
     for hit in matches:
         record = hit["paper"]
@@ -518,6 +529,8 @@ def build_library_ask_prompt(*, question: str, matches: list[dict[str, Any]]) ->
         [
             "question:",
             question,
+            "recent_chat_history:",
+            json.dumps(normalize_chat_history(chat_history or []), ensure_ascii=False),
             "retrieved_library_records:",
             json.dumps(compact_records, ensure_ascii=False),
             (
@@ -680,7 +693,7 @@ def normalize_library_answer(data: dict[str, Any]) -> dict[str, Any]:
     confidence = string_or_empty(data.get("confidence")) or "low"
     if confidence not in {"high", "medium", "low"}:
         confidence = "low"
-    answer_markdown = string_or_empty(data.get("answer_markdown"))[:3200]
+    answer_markdown = string_or_empty(data.get("answer_markdown"))[:6000]
     return {
         "answer_markdown": answer_markdown,
         "related_papers": related[:8],
@@ -1053,6 +1066,28 @@ def hash_json_payload(payload: Any) -> str:
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()
+
+
+def normalize_chat_history(history: list[dict[str, Any]]) -> list[dict[str, str]]:
+    normalized: list[dict[str, str]] = []
+    for item in history[-10:]:
+        if not isinstance(item, dict):
+            continue
+        role = string_or_empty(item.get("role")).lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = compact_text(item.get("content"), max_chars=1200)
+        if content:
+            normalized.append({"role": role, "content": content})
+    return normalized[-8:]
+
+
+def bounded_env_int(name: str, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        value = default
+    return max(minimum, min(value, maximum))
 
 
 def string_or_none(value: Any) -> str | None:

@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from 'react'
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { confirm, message, open } from '@tauri-apps/plugin-dialog'
@@ -13,6 +20,7 @@ import remarkMath from 'remark-math'
 import 'katex/dist/katex.min.css'
 import {
   AlertTriangle,
+  ArrowUp,
   BookOpen,
   ChevronDown,
   ChevronRight,
@@ -27,10 +35,12 @@ import {
   PanelRightClose,
   PanelRightOpen,
   Play,
+  Plus,
   RefreshCw,
   RotateCcw,
   Settings2,
   Square,
+  Trash2,
   XCircle,
 } from 'lucide-react'
 import './App.css'
@@ -170,6 +180,23 @@ type ChatMessage = {
   error?: string | null
 }
 
+type ChatThread = {
+  id: string
+  subjectKey: string
+  scope: AskScope
+  title: string
+  createdAt: string
+  updatedAt: string
+  messages: ChatMessage[]
+}
+
+type ChatStore = {
+  threads: Record<string, ChatThread>
+  activeBySubject: Record<string, string>
+}
+
+const EMPTY_CHAT_MESSAGES: ChatMessage[] = []
+
 type CleanupReport = {
   removed: string[]
   missing: string[]
@@ -249,6 +276,76 @@ function normalizeLocalPath(path: string) {
     return `${parts[0]}\\${parts.slice(1).join('\\')}`
   }
   return parts.join(slash)
+}
+
+const CHAT_STORE_KEY = 'paperLens.chatStore.v2'
+
+function loadChatStore(): ChatStore {
+  const raw = localStorage.getItem(CHAT_STORE_KEY)
+  if (!raw) return { threads: {}, activeBySubject: {} }
+  try {
+    const value = JSON.parse(raw) as unknown
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return { threads: {}, activeBySubject: {} }
+    const rawStore = value as Partial<ChatStore>
+    const threads: Record<string, ChatThread> = {}
+    const rawThreads = rawStore.threads && typeof rawStore.threads === 'object' ? rawStore.threads : {}
+    for (const [id, thread] of Object.entries(rawThreads)) {
+      if (!thread || typeof thread !== 'object') continue
+      const candidate = thread as Partial<ChatThread>
+      if (!candidate.subjectKey || !candidate.title || !Array.isArray(candidate.messages)) continue
+      const messages = candidate.messages
+        .filter((message): message is ChatMessage => {
+          if (!message || typeof message !== 'object') return false
+          const item = message as ChatMessage
+          return ['user', 'assistant'].includes(String(item.role)) && typeof item.content === 'string'
+        })
+        .slice(-80)
+      threads[id] = {
+        id,
+        subjectKey: String(candidate.subjectKey),
+        scope: candidate.scope === 'library' ? 'library' : 'paper',
+        title: String(candidate.title),
+        createdAt: String(candidate.createdAt || new Date().toISOString()),
+        updatedAt: String(candidate.updatedAt || candidate.createdAt || new Date().toISOString()),
+        messages,
+      }
+    }
+    const activeBySubject = rawStore.activeBySubject && typeof rawStore.activeBySubject === 'object'
+      ? Object.fromEntries(
+          Object.entries(rawStore.activeBySubject).filter(([, threadId]) => typeof threadId === 'string' && threads[threadId]),
+        ) as Record<string, string>
+      : {}
+    return { threads, activeBySubject }
+  } catch {
+    return { threads: {}, activeBySubject: {} }
+  }
+}
+
+function pruneChatStore(store: ChatStore): ChatStore {
+  const threads = Object.fromEntries(
+    Object.values(store.threads)
+      .map((thread) => ({
+        ...thread,
+        messages: thread.messages.filter((message) => !message.pending).slice(-80),
+      }))
+      .filter((thread) => thread.messages.length)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .slice(0, 80)
+      .map((thread) => [thread.id, thread]),
+  )
+  const activeBySubject = Object.fromEntries(
+    Object.entries(store.activeBySubject).filter(([, threadId]) => Boolean(threads[threadId])),
+  )
+  return { threads, activeBySubject }
+}
+
+function newChatThreadId() {
+  return `thread_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`
+}
+
+function chatTitleFromQuestion(question: string) {
+  const text = question.replace(/\s+/g, ' ').trim()
+  return text.length > 24 ? `${text.slice(0, 24)}...` : text || '新对话'
 }
 
 function dirname(path: string) {
@@ -402,7 +499,7 @@ function App() {
   const [jobEvents, setJobEvents] = useState<PaperLensEvent[]>([])
   const [chatScope, setChatScope] = useState<AskScope>('paper')
   const [question, setQuestion] = useState('')
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
+  const [chatStore, setChatStore] = useState<ChatStore>(loadChatStore)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [evidenceOpen, setEvidenceOpen] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -422,7 +519,23 @@ function App() {
     [workspace, selectedPaperId],
   )
   const activeJob = jobs.find((job) => job.job_id === activeJobId) ?? jobs[0] ?? null
+  const latestJobEvent = jobEvents[jobEvents.length - 1] ?? null
   const currentOutputDir = workspace?.output_dir || settings.outputDir
+  const chatSubjectKey = useMemo(() => {
+    const root = currentOutputDir || 'no-output'
+    return chatScope === 'library'
+      ? `${root}::library`
+      : `${root}::paper::${selectedPaper?.paper_id || 'none'}`
+  }, [chatScope, currentOutputDir, selectedPaper?.paper_id])
+  const subjectThreads = useMemo(
+    () => Object.values(chatStore.threads)
+      .filter((thread) => thread.subjectKey === chatSubjectKey)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+    [chatStore.threads, chatSubjectKey],
+  )
+  const activeChatThreadId = chatStore.activeBySubject[chatSubjectKey] || subjectThreads[0]?.id || ''
+  const activeChatThread = activeChatThreadId ? chatStore.threads[activeChatThreadId] ?? null : null
+  const chatMessages = activeChatThread?.messages ?? EMPTY_CHAT_MESSAGES
   const effectiveLeftSidebarOpen = leftSidebarOpen && viewportWidth >= 760
   const effectiveRightSidebarOpen = rightSidebarOpen && viewportWidth >= 1040
   const layoutLeftWidth = effectiveLeftSidebarOpen
@@ -441,6 +554,56 @@ function App() {
         settings.providerKind === 'anthropic' ||
         settings.baseUrl.trim()),
   )
+  const canAsk = Boolean(question.trim() && service && currentOutputDir && settings.apiKey.trim() && settings.model.trim())
+
+  function setChatThreadMessages(threadId: string, update: (current: ChatMessage[]) => ChatMessage[]) {
+    setChatStore((current) => {
+      const thread = current.threads[threadId]
+      if (!thread) return current
+      return {
+        ...current,
+        threads: {
+          ...current.threads,
+          [threadId]: {
+            ...thread,
+            updatedAt: new Date().toISOString(),
+            messages: update(thread.messages).slice(-80),
+          },
+        },
+      }
+    })
+  }
+
+  function setCurrentChatMessages(update: (current: ChatMessage[]) => ChatMessage[]) {
+    if (activeChatThreadId) setChatThreadMessages(activeChatThreadId, update)
+  }
+
+  function createChatThread(initialQuestion?: string) {
+    const id = newChatThreadId()
+    const now = new Date().toISOString()
+    const thread: ChatThread = {
+      id,
+      subjectKey: chatSubjectKey,
+      scope: chatScope,
+      title: chatTitleFromQuestion(initialQuestion || '新对话'),
+      createdAt: now,
+      updatedAt: now,
+      messages: [],
+    }
+    setChatStore((current) => ({
+      threads: { ...current.threads, [id]: thread },
+      activeBySubject: { ...current.activeBySubject, [chatSubjectKey]: id },
+    }))
+    return id
+  }
+
+  function selectChatThread(threadId: string) {
+    if (!chatStore.threads[threadId]) return
+    setChatStore((current) => ({
+      ...current,
+      activeBySubject: { ...current.activeBySubject, [chatSubjectKey]: threadId },
+    }))
+  }
 
   useEffect(() => {
     localStorage.setItem('paperLens.settings', JSON.stringify({ ...settings, apiKey: '' }))
@@ -461,6 +624,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem('paperLens.layout.rightOpen', rightSidebarOpen ? '1' : '0')
   }, [rightSidebarOpen])
+
+  useEffect(() => {
+    localStorage.setItem(CHAT_STORE_KEY, JSON.stringify(pruneChatStore(chatStore)))
+  }, [chatStore])
 
   useEffect(() => {
     function onResize() {
@@ -686,7 +853,7 @@ function App() {
     clearPaperLensLocalStorage()
     const report = await invoke<CleanupReport>('clear_local_app_data')
     setSettings(defaultSettings)
-    setChatMessages([])
+    setChatStore({ threads: {}, activeBySubject: {} })
     setMaintenanceStatus(cleanupSummary(report))
     if (report.errors.length) setError(report.errors.join('\n'))
   }
@@ -702,7 +869,17 @@ function App() {
     setWorkspace(null)
     setSelectedPaperId('')
     setReport(null)
-    setChatMessages([])
+    setChatStore((current) => {
+      const threads = Object.fromEntries(
+        Object.entries(current.threads).filter(([, thread]) => !thread.subjectKey.startsWith(`${currentOutputDir}::`)),
+      )
+      const activeBySubject = Object.fromEntries(
+        Object.entries(current.activeBySubject).filter(([subjectKey, threadId]) =>
+          !subjectKey.startsWith(`${currentOutputDir}::`) && Boolean(threads[threadId]),
+        ),
+      )
+      return { threads, activeBySubject }
+    })
     setJobEvents([])
     setMaintenanceStatus(cleanupSummary(report))
     if (report.errors.length) setError(report.errors.join('\n'))
@@ -712,8 +889,24 @@ function App() {
     if (!service || !currentOutputDir || !question.trim()) return
     const text = question.trim()
     const messageId = `msg_${Date.now()}`
+    const threadId = activeChatThreadId || createChatThread(text)
+    const history = chatMessages
+      .filter((message) => !message.pending && !message.error)
+      .slice(-8)
+      .map((message) => ({ role: message.role, content: message.content }))
     setQuestion('')
-    setChatMessages((current) => [
+    setChatStore((current) => {
+      const thread = current.threads[threadId]
+      if (!thread || thread.messages.length || thread.title !== '新对话') return current
+      return {
+        ...current,
+        threads: {
+          ...current.threads,
+          [threadId]: { ...thread, title: chatTitleFromQuestion(text), updatedAt: new Date().toISOString() },
+        },
+      }
+    })
+    setChatThreadMessages(threadId, (current) => [
       ...current,
       { id: `${messageId}_user`, role: 'user', scope: chatScope, content: text },
       {
@@ -735,10 +928,11 @@ function App() {
         api_key: settings.apiKey,
         model: settings.model || null,
         limit: 8,
+        chat_history: history,
       })
-      subscribeAnswer(answer.answer_id, `${messageId}_assistant`)
+      subscribeAnswer(answer.answer_id, `${messageId}_assistant`, threadId)
     } catch (err) {
-      setChatMessages((current) =>
+      setChatThreadMessages(threadId, (current) =>
         current.map((message) =>
           message.id === `${messageId}_assistant`
             ? { ...message, pending: false, content: String(err), error: String(err) }
@@ -748,7 +942,13 @@ function App() {
     }
   }
 
-  function subscribeAnswer(answerId: string, assistantMessageId: string) {
+  function handleQuestionKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return
+    event.preventDefault()
+    if (canAsk) void ask()
+  }
+
+  function subscribeAnswer(answerId: string, assistantMessageId: string, threadKey: string) {
     if (!service) return
     const source = new EventSource(
       serviceUrl(service, `/ask/${encodeURIComponent(answerId)}/events?token=${encodeURIComponent(service.token)}`),
@@ -756,7 +956,7 @@ function App() {
     source.addEventListener('paperlens', (event) => {
       const parsed = JSON.parse((event as MessageEvent).data) as PaperLensEvent
       if (parsed.type === 'answer_started') {
-        setChatMessages((current) =>
+        setChatThreadMessages(threadKey, (current) =>
           current.map((message) =>
             message.id === assistantMessageId
               ? { ...message, content: parsed.message ?? '正在核对证据...' }
@@ -766,7 +966,7 @@ function App() {
       }
       if (parsed.type === 'answer_completed') {
         const answer = (parsed.data?.answer ?? null) as AnswerPayload | null
-        setChatMessages((current) =>
+        setChatThreadMessages(threadKey, (current) =>
           current.map((message) =>
             message.id === assistantMessageId
               ? {
@@ -784,7 +984,7 @@ function App() {
       }
       if (parsed.type === 'answer_failed') {
         const text = parsed.message ?? '回答失败'
-        setChatMessages((current) =>
+        setChatThreadMessages(threadKey, (current) =>
           current.map((message) =>
             message.id === assistantMessageId
               ? { ...message, pending: false, content: text, error: text }
@@ -797,6 +997,14 @@ function App() {
     source.onerror = () => {
       source.close()
     }
+  }
+
+  function clearCurrentChat() {
+    setCurrentChatMessages(() => [])
+  }
+
+  function startNewChat() {
+    createChatThread()
   }
 
   function beginResize(pane: ResizePane, event: ReactPointerEvent<HTMLDivElement>) {
@@ -1041,8 +1249,8 @@ function App() {
             <button
               type="button"
               className="icon-button"
-              title="展开 Chat"
-              aria-label="展开 Chat"
+              title="展开右侧栏"
+              aria-label="展开右侧栏"
               onClick={() => setRightSidebarOpen(true)}
             >
               <PanelRightOpen size={17} />
@@ -1050,8 +1258,8 @@ function App() {
             <button
               type="button"
               className="icon-button"
-              title="问答"
-              aria-label="问答"
+              title="打开对话"
+              aria-label="打开对话"
               onClick={() => setRightSidebarOpen(true)}
             >
               <MessageSquareText size={17} />
@@ -1059,25 +1267,74 @@ function App() {
           </div>
         ) : (
           <>
-            <div className="side-panel-titlebar">
-              <span>问答</span>
-              <button
-                type="button"
-                className="icon-button small"
-                title="折叠右侧栏"
-                aria-label="折叠右侧栏"
-                onClick={() => setRightSidebarOpen(false)}
-              >
-                <PanelRightClose size={15} />
-              </button>
-            </div>
-            {Boolean(activeJob || jobEvents.length) && (
-              <section className="job-panel has-activity">
-                <div className="panel-head">
+            <section className="chat-panel">
+              <div className="chat-head">
+                <div className="chat-title">
+                  <h3>{chatScope === 'library' ? '问整个论文库' : '问当前论文'}</h3>
+                </div>
+                <div className="chat-head-actions">
+                  <select
+                    className="thread-select"
+                    value={activeChatThreadId}
+                    onChange={(event) => selectChatThread(event.target.value)}
+                    disabled={!subjectThreads.length}
+                    aria-label="选择对话"
+                  >
+                    {!subjectThreads.length && <option value="">新对话</option>}
+                    {subjectThreads.map((thread) => (
+                      <option key={thread.id} value={thread.id}>
+                        {thread.title}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="icon-button small"
+                    title="新建对话"
+                    aria-label="新建对话"
+                    onClick={startNewChat}
+                  >
+                    <Plus size={14} />
+                  </button>
+                  <div className="segmented">
+                    <button type="button" className={chatScope === 'paper' ? 'active' : ''} onClick={() => setChatScope('paper')}>
+                      当前论文
+                    </button>
+                    <button type="button" className={chatScope === 'library' ? 'active' : ''} onClick={() => setChatScope('library')}>
+                      论文库
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    className="icon-button small clear-chat-button"
+                    title="清空当前对话"
+                    aria-label="清空当前对话"
+                    disabled={!chatMessages.length}
+                    onClick={clearCurrentChat}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-button small"
+                    title="折叠右侧栏"
+                    aria-label="折叠右侧栏"
+                    onClick={() => setRightSidebarOpen(false)}
+                  >
+                    <PanelRightClose size={14} />
+                  </button>
+                </div>
+              </div>
+
+              {Boolean(activeJob || latestJobEvent) && (
+                <div className="activity-strip">
                   <div>
-                    <p className="eyebrow">任务</p>
-                    <h3>{activeJob ? statusLabel(activeJob.status) : '最近任务'}</h3>
-                    {activeJob && <span>{stageLabel(activeJob.current_stage)}</span>}
+                    <strong>{activeJob ? statusLabel(activeJob.status) : '最近任务'}</strong>
+                    <span>
+                      {activeJob
+                        ? stageLabel(activeJob.current_stage)
+                        : latestJobEvent?.message ?? latestJobEvent?.type ?? ''}
+                    </span>
                   </div>
                   {activeJob && (
                     <div className="job-controls">
@@ -1096,32 +1353,7 @@ function App() {
                     </div>
                   )}
                 </div>
-                <div className="job-timeline">
-                  {jobEvents.slice(-6).map((event, index) => (
-                    <div key={`${event.seq ?? index}-${event.type}`} className={`timeline-event ${event.level ?? 'info'}`}>
-                      <span>{stageLabel(event.stage)}</span>
-                      <p>{event.message ?? event.type}</p>
-                    </div>
-                  ))}
-                </div>
-              </section>
-            )}
-
-            <section className="chat-panel">
-              <div className="chat-head">
-                <div>
-                  <p className="eyebrow">问答</p>
-                  <h3>{chatScope === 'library' ? '问整个论文库' : '问当前论文'}</h3>
-                </div>
-                <div className="segmented">
-                  <button type="button" className={chatScope === 'paper' ? 'active' : ''} onClick={() => setChatScope('paper')}>
-                    当前论文
-                  </button>
-                  <button type="button" className={chatScope === 'library' ? 'active' : ''} onClick={() => setChatScope('library')}>
-                    论文库
-                  </button>
-                </div>
-              </div>
+              )}
 
               <div className="chat-log">
                 {!chatMessages.length && (
@@ -1139,15 +1371,18 @@ function App() {
                 <textarea
                   value={question}
                   onChange={(event) => setQuestion(event.target.value)}
+                  onKeyDown={handleQuestionKeyDown}
                   placeholder={chatScope === 'library' ? '问本地已读论文库...' : '问当前论文...'}
                 />
                 <button
                   type="button"
-                  className="primary"
-                  disabled={!question.trim() || !service || !settings.apiKey || !settings.model}
+                  className="primary send-button"
+                  disabled={!canAsk}
                   onClick={ask}
+                  aria-label="发送"
+                  title="发送，Shift+Enter 换行"
                 >
-                  <MessageSquareText size={16} /> 发送
+                  <ArrowUp size={18} />
                 </button>
               </div>
             </section>
@@ -1344,7 +1579,7 @@ function ChatBubble({
 }) {
   return (
     <div className={`chat-message ${message.role} ${message.pending ? 'pending' : ''}`}>
-      <strong>{message.role === 'user' ? '你' : 'PaperLens'}</strong>
+      {message.role === 'assistant' && <strong>PaperLens</strong>}
       {message.pending ? (
         <div className="thinking-line">
           <Loader2 className="spinning" size={15} /> 正在核对证据...

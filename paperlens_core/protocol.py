@@ -36,6 +36,7 @@ class PaperQuestionRequest(CoreRequest):
     output_dir: Path
     question: str
     paper_id: str | None = None
+    chat_history: list[JsonObject] = Field(default_factory=list)
 
 
 class LibraryBuildRequest(BaseModel):
@@ -60,4 +61,5 @@ class LibraryQuestionRequest(CoreRequest):
     output_dir: Path
     question: str
     limit: int = 8
+    chat_history: list[JsonObject] = Field(default_factory=list)
 
