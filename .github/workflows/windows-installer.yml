@@ -53,6 +53,7 @@ jobs:
         env:
           DISPATCH_PUBLISH: ${{ inputs.publish_release || 'false' }}
           DISPATCH_TAG: ${{ inputs.release_tag || '' }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           $version = (Get-Content -LiteralPath "package.json" -Raw | ConvertFrom-Json).version
           $releaseTag = if ($env:DISPATCH_TAG.Trim()) { $env:DISPATCH_TAG.Trim() } elseif ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME } else { "v$version" }
@@ -72,6 +73,13 @@ jobs:
                 }
               } catch {
                 Write-Host "Could not read previous package.json version; leaving release publish disabled for this push."
+              }
+            }
+            if ($shouldPublish -ne "true") {
+              gh release view $releaseTag *> $null
+              if ($LASTEXITCODE -ne 0) {
+                Write-Host "Release $releaseTag does not exist yet; enabling publish for this main push."
+                $shouldPublish = "true"
               }
             }
           }
@@ -108,9 +116,9 @@ jobs:
         shell: pwsh
         run: |
           $patterns = @(
-            'sk-[A-Za-z0-9_-]{16,}',
-            'tp-[A-Za-z0-9_-]{16,}',
-            'ghp_[0-9A-Za-z_]{36}',
+            '(^|[^A-Za-z0-9_])sk-[A-Za-z0-9_-]{16,}',
+            '(^|[^A-Za-z0-9_])tp-[A-Za-z0-9_-]{16,}',
+            '(^|[^A-Za-z0-9_])ghp_[0-9A-Za-z_]{36}',
             'github_pat_[0-9A-Za-z_]+',
             'AIza[0-9A-Za-z_-]{35}',
             'BEGIN\s+(RSA\s+|OPENSSH\s+|EC\s+|DSA\s+)?PRIVATE\s+KEY'
