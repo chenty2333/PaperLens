@@ -2069,6 +2069,76 @@ def test_memory_prompts_split_reading_from_single_verification():
     assert "MemoryPatchSet" in verify_prompt
 
 
+def test_rolling_memory_default_completion_budget_is_not_tiny(tmp_path, monkeypatch):
+    monkeypatch.delenv("PAPERLENS_ROLLING_MEMORY_MAX_TOKENS", raising=False)
+    output_dir = tmp_path / "out"
+    pipeline = PaperLensWorkflow(
+        input_dir=tmp_path,
+        output_dir=output_dir,
+        config=CoreConfig(
+            read_mode="standard",
+            provider=ProviderConfig(
+                kind="openai-compatible",
+                base_url="https://example.invalid",
+                api_key="test-key",
+                model="fake-model",
+            ),
+        ),
+        events=EventWriter(
+            "run_test",
+            output_dir / ".paperlens" / "data" / "events.jsonl",
+            output_dir / ".paperlens" / "data" / "errors.jsonl",
+        ),
+        control=ControlState(),
+    )
+    pipeline.prepare_output()
+    captured: dict[str, int] = {}
+
+    class FakeClient:
+        config = SimpleNamespace(kind="openai-compatible", model="fake-model")
+
+        def invoke_json(self, **kwargs):
+            captured["max_tokens"] = kwargs["max_tokens"]
+            return SimpleNamespace(
+                data={"paper_id": "p_test", "operations": []},
+                usage={"prompt_tokens": 10, "completion_tokens": 10},
+                endpoint="fake",
+                request_id="req",
+            )
+
+    paper = PaperRecord(
+        paper_id="p_test", file_path="paper.pdf", file_hash="hash", canonical_title="Test Paper"
+    )
+    skim = SkimCard(paper_id="p_test", problem="problem")
+    decision = ClassificationDecision(
+        paper_id="p_test", class_label="A", confidence=0.9, false_negative_risk=0.1
+    )
+    page = SimpleNamespace(
+        page_no=1,
+        text="design evaluation " * 80,
+        captions=[],
+        visual_notes=[],
+        figures=[],
+        tables=[],
+        low_confidence_flags=[],
+    )
+
+    pipeline.read_rolling_memory_chunk(
+        client=FakeClient(),
+        stage="stage_07_normal_read",
+        paper=paper,
+        skim=skim,
+        decision=decision,
+        memory={"schema_version": "paper_memory.v3", "paper_id": "p_test"},
+        artifacts=[page],
+        chunk_index=0,
+        total_chunks=1,
+    )
+
+    assert captured["max_tokens"] >= 4000
+    pipeline.db.close()
+
+
 def test_central_memory_verification_applies_one_patch_set(tmp_path, monkeypatch):
     output_dir = tmp_path / "out"
     pipeline = PaperLensWorkflow(

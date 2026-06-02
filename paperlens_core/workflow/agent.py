@@ -1320,9 +1320,9 @@ class PaperLensWorkflow:
             schema=MEMORY_PATCH_SET_SCHEMA,
             max_tokens=bounded_env_int(
                 "PAPERLENS_ROLLING_MEMORY_MAX_TOKENS",
-                default=1400,
-                minimum=500,
-                maximum=4000,
+                default=4000,
+                minimum=1200,
+                maximum=8000,
             ),
             retry_message=f"Rolling memory retrying for {paper.paper_id}",
             retry_data={"pages": pages},
