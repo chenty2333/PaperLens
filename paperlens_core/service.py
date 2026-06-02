@@ -819,7 +819,7 @@ class PaperLensRequestHandler(BaseHTTPRequestHandler):
         if parts == [] or parts == ["health"]:
             return {"status": "ok", "service": SERVER_VERSION}
         if parts == ["version"]:
-            return {"version": "paperlens-core 0.1.1", "service": SERVER_VERSION}
+            return {"version": "paperlens-core 0.1.2", "service": SERVER_VERSION}
         if parts == ["workspaces", "current"]:
             output_dir = output_dir_from_query(query, self.state.current_output_dir)
             return load_public_workspace(output_dir)
