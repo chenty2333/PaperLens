@@ -15,6 +15,7 @@ import { check, type DownloadEvent } from '@tauri-apps/plugin-updater'
 import ReactMarkdown from 'react-markdown'
 import rehypeKatex from 'rehype-katex'
 import rehypeRaw from 'rehype-raw'
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import 'katex/dist/katex.min.css'
@@ -196,6 +197,7 @@ type ChatStore = {
 }
 
 const EMPTY_CHAT_MESSAGES: ChatMessage[] = []
+const ACTIVE_JOB_STATUSES = new Set(['queued', 'running', 'paused', 'cancelling'])
 
 type CleanupReport = {
   removed: string[]
@@ -215,6 +217,35 @@ const defaultSettings: RunSettings = {
   concurrency: '1',
   outputLanguage: 'zh',
   readMode: 'standard',
+}
+
+const markdownSanitizeSchema = {
+  ...defaultSchema,
+  tagNames: [...new Set([...(defaultSchema.tagNames ?? []), 'figure', 'figcaption'])],
+  attributes: {
+    ...defaultSchema.attributes,
+    '*': [...(defaultSchema.attributes?.['*'] ?? []), 'className'],
+    a: [...(defaultSchema.attributes?.a ?? []), 'href', 'title'],
+    code: [...(defaultSchema.attributes?.code ?? []), 'className'],
+    div: [...(defaultSchema.attributes?.div ?? []), 'className'],
+    figcaption: ['className'],
+    figure: ['className'],
+    img: [
+      ...(defaultSchema.attributes?.img ?? []),
+      'src',
+      'alt',
+      'title',
+      'width',
+      'height',
+      'loading',
+    ],
+    span: [...(defaultSchema.attributes?.span ?? []), 'className', 'aria-hidden'],
+  },
+  protocols: {
+    ...defaultSchema.protocols,
+    href: ['http', 'https', 'mailto'],
+    src: ['http', 'https', 'data'],
+  },
 }
 
 function loadSettings(): RunSettings {
@@ -518,8 +549,11 @@ function App() {
     () => workspace?.papers.find((paper) => paper.paper_id === selectedPaperId) ?? workspace?.papers[0] ?? null,
     [workspace, selectedPaperId],
   )
-  const activeJob = jobs.find((job) => job.job_id === activeJobId) ?? jobs[0] ?? null
-  const latestJobEvent = jobEvents[jobEvents.length - 1] ?? null
+  const selectedActiveJob = jobs.find(
+    (job) => job.job_id === activeJobId && ACTIVE_JOB_STATUSES.has(job.status),
+  )
+  const activeJob = selectedActiveJob ?? jobs.find((job) => ACTIVE_JOB_STATUSES.has(job.status)) ?? null
+  const latestJobEvent = activeJob ? jobEvents[jobEvents.length - 1] ?? null : null
   const currentOutputDir = workspace?.output_dir || settings.outputDir
   const chatSubjectKey = useMemo(() => {
     const root = currentOutputDir || 'no-output'
@@ -1510,7 +1544,7 @@ function MarkdownBlock({
     <div className="markdown-body">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkMath]}
-        rehypePlugins={[rehypeRaw, rehypeKatex]}
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, markdownSanitizeSchema], rehypeKatex]}
         components={{
           img: ({ src, alt }) => (
             <MarkdownImage src={src} alt={alt ?? ''} report={report} outputDir={outputDir} service={service} />
@@ -1550,6 +1584,7 @@ function MarkdownImage({
   const [loadState, setLoadState] = useState({ key: '', index: 0 })
   const candidateIndex = loadState.key === candidateKey ? loadState.index : 0
   const currentSrc = candidates[candidateIndex] ?? ''
+  if (!currentSrc) return null
   return (
     <img
       src={currentSrc}

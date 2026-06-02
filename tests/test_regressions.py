@@ -16,6 +16,7 @@ from paperlens_core.engine import PaperLensEngine
 from paperlens_core.events import EventWriter
 from paperlens_core.agents.llm import (
     JsonLlmClient,
+    LlmError,
     json_retry_completion_minimum,
     parse_json_text_for_schema,
 )
@@ -62,6 +63,7 @@ from paperlens_core.workflow.agent import (
     select_central_verification_pages,
     select_high_risk_memory_claims,
     select_rolling_read_pages,
+    summarize_model_calls,
     user_visible_review_items,
     validate_paperlens_output,
     visual_crop_bbox_for_page,
@@ -181,12 +183,20 @@ def test_output_validation_counts_only_canonical_paper_reports(tmp_path):
         "[]", encoding="utf-8"
     )
     (memory_v3_dir / "p_test.paper_memory.v3.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "papers" / "stale_old.md").write_text(
+        "# Old\n\nreport_generation_failed: from another run\n", encoding="utf-8"
+    )
+    (memory_v3_dir / "stale_old.paper_memory.v3.json").write_text("{}", encoding="utf-8")
 
-    result = validate_paperlens_output(tmp_path)
+    result = validate_paperlens_output(
+        tmp_path,
+        expected_report_names={"p_test.md"},
+        expected_paper_ids={"p_test"},
+    )
 
     assert result["status"] == "PASS"
     assert result["paper_reports"] == 1
-    assert result["paper_report_files"] == 1
+    assert result["paper_report_files"] == 2
     assert result["paper_memory_v3"] == 1
 
 
@@ -1325,9 +1335,10 @@ def test_openai_compatible_base_url_is_not_modified():
     assert client._base_url("https://api.openai.com/v1") == "https://gateway.example"
 
 
-def test_mimo_compatible_payload_disables_thinking(monkeypatch):
+def test_mimo_compatible_payload_omits_thinking_by_default(monkeypatch):
     monkeypatch.delenv("PAPERLENS_MIMO_THINKING", raising=False)
     monkeypatch.delenv("PAPERLENS_MIMO_THINKING_SCHEMAS", raising=False)
+    monkeypatch.delenv("PAPERLENS_MIMO_USE_MAX_COMPLETION_TOKENS", raising=False)
     captured: list[dict[str, object]] = []
 
     def fake_post_json(self, endpoint, payload, headers):  # noqa: ANN001
@@ -1370,9 +1381,9 @@ def test_mimo_compatible_payload_disables_thinking(monkeypatch):
 
     assert result.data == {"ok": True}
     assert captured[0]["model"] == "mimo-v2.5"
-    assert captured[0]["thinking"] == {"type": "disabled"}
-    assert captured[0]["max_completion_tokens"] == 123
-    assert "max_tokens" not in captured[0]
+    assert "thinking" not in captured[0]
+    assert captured[0]["max_tokens"] == 123
+    assert "max_completion_tokens" not in captured[0]
 
 
 def test_mimo_thinking_can_be_enabled_for_selected_schema(monkeypatch):
@@ -1414,10 +1425,56 @@ def test_mimo_thinking_can_be_enabled_for_selected_schema(monkeypatch):
 
     assert result.data == {"ok": True}
     assert captured[0]["thinking"] == {"type": "enabled"}
-    assert captured[0]["max_completion_tokens"] == 123
+    assert captured[0]["max_tokens"] == 123
 
 
-def test_chat_json_retry_expands_budget_after_truncation(monkeypatch):
+def test_chat_json_retry_is_opt_in_after_truncation(monkeypatch):
+    monkeypatch.delenv("PAPERLENS_ALLOW_JSON_RETRY", raising=False)
+    captured: list[dict[str, object]] = []
+
+    def fake_post_json(self, endpoint, payload, headers):  # noqa: ANN001
+        captured.append(payload)
+        return (
+            {
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"content": '{"ok":'},
+                    }
+                ],
+                "usage": {},
+            },
+            {},
+        )
+
+    monkeypatch.setattr(JsonLlmClient, "_post_json", fake_post_json)
+    client = JsonLlmClient(
+        ProviderConfig(
+            kind="openai-compatible",
+            base_url="https://gateway.example/v1",
+            model="mimo-v2.5",
+            api_key="fake-key",
+        )
+    )
+
+    with pytest.raises(LlmError, match="truncated"):
+        client.invoke_json(
+            system_prompt="Return JSON.",
+            user_prompt="Return ok.",
+            schema_name="mimo_test",
+            schema={
+                "type": "object",
+                "required": ["ok"],
+                "properties": {"ok": {"type": "boolean"}},
+            },
+            max_tokens=123,
+        )
+
+    assert len(captured) == 1
+
+
+def test_chat_json_retry_expands_budget_after_truncation_when_enabled(monkeypatch):
+    monkeypatch.setenv("PAPERLENS_ALLOW_JSON_RETRY", "1")
     captured: list[dict[str, object]] = []
     responses = [
         {
@@ -1468,9 +1525,68 @@ def test_chat_json_retry_expands_budget_after_truncation(monkeypatch):
 
     assert result.data == {"ok": True}
     assert len(captured) == 2
-    assert captured[0]["max_completion_tokens"] == 123
+    assert captured[0]["max_tokens"] == 123
     assert captured[1]["response_format"] == {"type": "json_object"}
-    assert captured[1]["max_completion_tokens"] >= 1600
+    assert captured[1]["max_tokens"] >= 1600
+
+
+def test_post_json_writes_attempt_ledger(tmp_path, monkeypatch):
+    ledger_path = tmp_path / "model_calls.jsonl"
+    monkeypatch.delenv("PAPERLENS_LLM_LEDGER", raising=False)
+    monkeypatch.setenv("PAPERLENS_MIN_SECONDS_BETWEEN_CALLS", "0")
+    monkeypatch.delenv("PAPERLENS_MAX_MODEL_CALLS", raising=False)
+
+    class FakeResponse:
+        headers = {"x-request-id": "req_123"}
+
+        def __enter__(self):  # noqa: ANN001
+            return self
+
+        def __exit__(self, *_args):  # noqa: ANN001
+            return False
+
+        def read(self) -> bytes:
+            return json.dumps(
+                {
+                    "choices": [{"message": {"content": "{\"ok\": true}"}}],
+                    "usage": {"prompt_tokens": 12, "completion_tokens": 3},
+                }
+            ).encode("utf-8")
+
+    def fake_urlopen(_request, timeout):  # noqa: ANN001
+        assert timeout >= 10
+        return FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = JsonLlmClient(
+        ProviderConfig(
+            kind="openai-compatible",
+            base_url="https://gateway.example/v1",
+            model="fake-model",
+            api_key="fake-key",
+        ),
+        ledger_path=ledger_path,
+        run_id="run_unit",
+    )
+
+    response, headers = client._post_json(
+        "https://gateway.example/v1/chat/completions",
+        {
+            "model": "fake-model",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 8,
+            "response_format": {"type": "json_schema", "json_schema": {"name": "unit_schema"}},
+        },
+        {"Authorization": "Bearer fake-key"},
+    )
+
+    rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
+    assert response["usage"]["prompt_tokens"] == 12
+    assert headers["x-request-id"] == "req_123"
+    assert rows[0]["status"] == "ok"
+    assert rows[0]["schema_name"] == "unit_schema"
+    assert rows[0]["context"]["run_id"] == "run_unit"
+    assert rows[0]["usage"]["completion_tokens"] == 3
 
 
 def test_large_memory_schema_retry_has_higher_completion_floor():
@@ -2370,7 +2486,7 @@ def test_report_composer_repairs_only_the_failed_section(tmp_path):
     assert not any("final_paper_report_repair" in str(run) for run in agent_runs)
 
 
-def test_export_reuses_existing_paper_report_on_resume(tmp_path):
+def test_export_overwrites_existing_paper_report(tmp_path):
     output_dir = tmp_path / "out"
     data_dir = output_dir / ".paperlens" / "data"
     for relative in [
@@ -2393,18 +2509,12 @@ def test_export_reuses_existing_paper_report_on_resume(tmp_path):
         false_negative_risk=0.1,
     )
 
-    class FakeClient:
-        config = SimpleNamespace(kind="openai-compatible", model="fake-model")
-
-        def invoke_json(self, **_kwargs):
-            raise AssertionError("existing reports must not be regenerated during resume")
-
     agent_runs: list[dict[str, object]] = []
     written = write_final_report_bundle(
         output_dir=output_dir,
         data_dir=data_dir,
         evidence_dir=output_dir / ".paperlens",
-        client=FakeClient(),
+        client=None,
         record_usage=lambda _stage, _usage: None,
         record_agent_run=agent_runs.append,
         stage="stage_15_export",
@@ -2414,7 +2524,7 @@ def test_export_reuses_existing_paper_report_on_resume(tmp_path):
         paper_cards=[],
         review_items=[],
         budget={},
-        config={"offline_debug": False},
+        config={"offline_debug": True},
         topic=None,
         idea=None,
         cache_dir=output_dir / ".paperlens" / "cache",
@@ -2422,7 +2532,8 @@ def test_export_reuses_existing_paper_report_on_resume(tmp_path):
 
     assert existing_report in written
     assert (output_dir / "PaperLens.md").exists()
-    assert existing_report.read_text(encoding="utf-8") == "# Test Paper\n\n已经完成的报告。"
+    assert existing_report.read_text(encoding="utf-8") != "# Test Paper\n\n已经完成的报告。"
+    assert "Test Paper" in existing_report.read_text(encoding="utf-8")
     assert agent_runs == []
 
 
@@ -2435,7 +2546,7 @@ def test_paper_question_answer_uses_cache(tmp_path, monkeypatch):
     calls = {"count": 0}
 
     class FakeClient:
-        def __init__(self, provider):
+        def __init__(self, provider, **_kwargs):
             self.config = provider
 
         def invoke_json(self, **_kwargs):
@@ -2656,6 +2767,7 @@ def test_resume_from_stage03_loads_partial_skim_state(tmp_path):
             false_negative_risk=0.2,
         )
     )
+    pipeline.db.set_state("active_paper_ids", ["p_test"])
 
     pipeline.load_completed_state_for_stage("stage_03_skim")
 
@@ -2663,6 +2775,149 @@ def test_resume_from_stage03_loads_partial_skim_state(tmp_path):
     assert pipeline.skim_cards[0].problem == "existing skim"
     assert pipeline.classifications[0].class_label == "B"
     pipeline.db.close()
+
+
+def test_resume_requires_active_paper_ids(tmp_path):
+    output_dir = tmp_path / "out"
+    pipeline = PaperLensWorkflow(
+        input_dir=tmp_path / "in",
+        output_dir=output_dir,
+        config=CoreConfig(offline_debug=True),
+        events=EventWriter(
+            "run_test",
+            output_dir / ".paperlens" / "data" / "events.jsonl",
+            output_dir / ".paperlens" / "data" / "errors.jsonl",
+        ),
+        control=ControlState(),
+    )
+    pipeline.prepare_output()
+    pipeline.db.upsert_paper(
+        PaperRecord(
+            paper_id="p_old", file_path="old.pdf", file_hash="hash", canonical_title="Old"
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="missing active_paper_ids"):
+        pipeline.load_completed_state_for_stage("stage_03_skim")
+    pipeline.db.close()
+
+
+def test_resume_state_filters_to_active_papers(tmp_path):
+    output_dir = tmp_path / "out"
+    pipeline = PaperLensWorkflow(
+        input_dir=tmp_path / "in",
+        output_dir=output_dir,
+        config=CoreConfig(offline_debug=True),
+        events=EventWriter(
+            "run_test",
+            output_dir / ".paperlens" / "data" / "events.jsonl",
+            output_dir / ".paperlens" / "data" / "errors.jsonl",
+        ),
+        control=ControlState(),
+    )
+    pipeline.prepare_output()
+    active = PaperRecord(
+        paper_id="p_active", file_path="active.pdf", file_hash="hash1", canonical_title="Active"
+    )
+    stale = PaperRecord(
+        paper_id="p_stale", file_path="stale.pdf", file_hash="hash2", canonical_title="Stale"
+    )
+    pipeline.db.upsert_paper(active)
+    pipeline.db.upsert_paper(stale)
+    pipeline.db.upsert_skim(SkimCard(paper_id="p_active", problem="current"))
+    pipeline.db.upsert_skim(SkimCard(paper_id="p_stale", problem="old"))
+    pipeline.db.upsert_classification(
+        ClassificationDecision(
+            paper_id="p_active",
+            class_label="A",
+            confidence=0.9,
+            false_negative_risk=0.1,
+        )
+    )
+    pipeline.db.upsert_classification(
+        ClassificationDecision(
+            paper_id="p_stale",
+            class_label="C",
+            confidence=0.9,
+            false_negative_risk=0.1,
+        )
+    )
+    pipeline.db.set_state("active_paper_ids", ["p_active"])
+
+    pipeline.load_completed_state_for_stage("stage_03_skim")
+
+    assert [paper.paper_id for paper in pipeline.papers] == ["p_active"]
+    assert [skim.paper_id for skim in pipeline.skim_cards] == ["p_active"]
+    assert [decision.paper_id for decision in pipeline.classifications] == ["p_active"]
+    pipeline.db.close()
+
+
+def test_agent_run_records_are_written(tmp_path):
+    output_dir = tmp_path / "out"
+    pipeline = PaperLensWorkflow(
+        input_dir=tmp_path / "in",
+        output_dir=output_dir,
+        config=CoreConfig(offline_debug=True),
+        events=EventWriter(
+            "run_test",
+            output_dir / ".paperlens" / "data" / "events.jsonl",
+            output_dir / ".paperlens" / "data" / "errors.jsonl",
+        ),
+        control=ControlState(),
+    )
+    pipeline.prepare_output()
+
+    pipeline.write_agent_run({"agent_run_id": "unit", "status": "PASS", "usage": {"prompt_tokens": 1}})
+
+    path = output_dir / ".paperlens" / "data" / "agent_runs.jsonl"
+    row = json.loads(path.read_text(encoding="utf-8").strip())
+    assert row["run_id"] == "run_test"
+    assert row["agent_run_id"] == "unit"
+    assert row["usage"]["prompt_tokens"] == 1
+    pipeline.db.close()
+
+
+def test_model_call_summary_groups_attempts(tmp_path):
+    path = tmp_path / "model_calls.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "schema_name": "paperlens_report_section",
+                        "context": {"stage": "stage_15_export"},
+                        "payload_bytes": 100,
+                        "prompt_chars": 200,
+                        "duration_seconds": 1.5,
+                        "completion_limit": 1200,
+                        "image_count": 0,
+                        "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "status": "http_error",
+                        "schema_name": "paperlens_report_section",
+                        "context": {"stage": "stage_15_export"},
+                        "payload_bytes": 110,
+                        "prompt_chars": 210,
+                        "duration_seconds": 0.5,
+                        "usage": {},
+                    }
+                ),
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    summary = summarize_model_calls(path)
+
+    assert summary["calls"] == 2
+    assert summary["by_status"] == {"ok": 1, "http_error": 1}
+    assert summary["by_stage"]["stage_15_export"]["calls"] == 2
+    assert summary["by_schema"]["paperlens_report_section"]["input_tokens"] == 10
+    assert summary["maxima"]["payload_bytes"] == 110
 
 
 def test_event_writer_survives_closed_stdout(tmp_path, monkeypatch):

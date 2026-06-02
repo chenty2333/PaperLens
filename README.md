@@ -124,13 +124,7 @@ The workflow intentionally does not require model API keys.
 
 PaperLens is designed to keep keys out of the repository and output artifacts.
 
-```text
-OPENAI_AGENTS_DONT_LOG_MODEL_DATA=1
-OPENAI_AGENTS_DONT_LOG_TOOL_DATA=1
-OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA=0
-```
-
-The UI does not persist API keys to `localStorage`. Generated paper libraries, reports, sidecars, local caches, virtual environments, build output, and `.env` files are ignored by Git.
+The UI does not persist API keys to `localStorage`. Generated paper libraries, reports, sidecars, local caches, virtual environments, build output, and `.env` files are ignored by Git. Local model-call accounting stores request sizes, stage names, status, and provider usage metadata, not prompt bodies or API keys.
 
 ## Documentation
 

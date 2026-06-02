@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import base64
+import contextvars
 import http.client
 import json
 import mimetypes
 import os
+import random
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -29,9 +33,37 @@ class LlmJsonResult:
     endpoint: str
 
 
+_CALL_GUARD_LOCK = threading.Lock()
+_CALL_GUARD_COUNTS: dict[str, int] = {}
+_LAST_CALL_TIME = 0.0
+_LEDGER_LOCK = threading.Lock()
+_LLM_CONTEXT: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
+    "paperlens_llm_context", default={}
+)
+
+
+@contextmanager
+def llm_call_context(**context: Any) -> Any:
+    parent = dict(_LLM_CONTEXT.get({}))
+    parent.update({key: value for key, value in context.items() if value is not None})
+    token = _LLM_CONTEXT.set(parent)
+    try:
+        yield
+    finally:
+        _LLM_CONTEXT.reset(token)
+
+
 class JsonLlmClient:
-    def __init__(self, config: ProviderConfig) -> None:
+    def __init__(
+        self,
+        config: ProviderConfig,
+        *,
+        ledger_path: Path | str | None = None,
+        run_id: str | None = None,
+    ) -> None:
         self.config = config
+        self.ledger_path = Path(ledger_path) if ledger_path else None
+        self.run_id = run_id
 
     def invoke_json(
         self,
@@ -44,23 +76,6 @@ class JsonLlmClient:
     ) -> LlmJsonResult:
         api_key = self._validate_request_config()
         if self.config.kind in {"openai", "openai-compatible"}:
-            sdk_default = "1" if self.config.kind == "openai" else "0"
-            if os.getenv("PAPERLENS_USE_AGENTS_SDK", sdk_default) != "0":
-                try:
-                    from paperlens_core.agents.sdk_runner import invoke_openai_agents_sdk_json
-
-                    return invoke_openai_agents_sdk_json(
-                        config=self.config,
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt
-                        + "\n\nJSON schema contract:\n"
-                        + json.dumps(schema, ensure_ascii=False),
-                        schema_name=schema_name,
-                        max_tokens=max_tokens,
-                    )
-                except LlmError:
-                    if os.getenv("PAPERLENS_REQUIRE_AGENTS_SDK", "0") == "1":
-                        raise
             if self.config.kind == "openai-compatible":
                 return self._openai_chat_completions(
                     api_key=api_key,
@@ -99,6 +114,11 @@ class JsonLlmClient:
         max_tokens: int = 1800,
         detail: str = "high",
     ) -> LlmJsonResult:
+        if not env_flag("PAPERLENS_ALLOW_IMAGE_INPUTS", default=False):
+            raise LlmError(
+                "Model image inputs are disabled by PAPERLENS_ALLOW_IMAGE_INPUTS. "
+                "PaperLens will not send page images unless this is explicitly enabled."
+            )
         api_key = self._validate_request_config()
         image_payloads = [image_data_url(path) for path in image_paths if path.exists()]
         if not image_payloads:
@@ -261,26 +281,29 @@ class JsonLlmClient:
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-        fallback_payload = dict(payload)
-        fallback_payload["response_format"] = {"type": "json_object"}
-        fallback_payload["messages"] = [
-            {"role": "system", "content": system_prompt + "\nReturn only valid JSON matching the schema."},
-            {
-                "role": "user",
-                "content": user_prompt
-                + "\n\nJSON schema to follow exactly:\n"
-                + json.dumps(schema, ensure_ascii=False),
-            },
-        ]
         try:
             response, response_headers = self._post_json(endpoint, payload, headers)
         except LlmError as exc:
-            if "400" not in str(exc):
+            if "400" not in str(exc) or not env_flag("PAPERLENS_ALLOW_SCHEMA_FALLBACK"):
                 raise
+            fallback_payload = chat_json_schema_fallback_payload(
+                payload=payload,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                schema=schema,
+            )
             response, response_headers = self._post_json(endpoint, fallback_payload, headers)
         try:
             text, data = parse_chat_completion_json(response, schema_name, schema)
         except LlmError:
+            if not env_flag("PAPERLENS_ALLOW_JSON_RETRY"):
+                raise
+            fallback_payload = chat_json_schema_fallback_payload(
+                payload=payload,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                schema=schema,
+            )
             retry_payload = expand_completion_budget(
                 fallback_payload,
                 minimum=json_retry_completion_minimum(schema_name, max_tokens, has_images=False),
@@ -338,23 +361,18 @@ class JsonLlmClient:
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-        fallback_content = list(user_content)
-        fallback_content.append(
-            {
-                "type": "text",
-                "text": "\n\nJSON schema to follow exactly:\n" + json.dumps(schema, ensure_ascii=False),
-            }
-        )
-        fallback_payload = dict(payload)
-        fallback_payload["response_format"] = {"type": "json_object"}
-        fallback_payload["messages"] = [
-            {"role": "system", "content": system_prompt + "\nReturn only valid JSON matching the schema."},
-            {"role": "user", "content": fallback_content},
-        ]
         response, response_headers = self._post_json(endpoint, payload, headers)
         try:
             text, data = parse_chat_completion_json(response, schema_name, schema)
         except LlmError:
+            if not env_flag("PAPERLENS_ALLOW_JSON_RETRY"):
+                raise
+            fallback_payload = chat_json_schema_fallback_payload_with_images(
+                payload=payload,
+                system_prompt=system_prompt,
+                user_content=user_content,
+                schema=schema,
+            )
             retry_payload = expand_completion_budget(
                 fallback_payload,
                 minimum=json_retry_completion_minimum(schema_name, max_tokens, has_images=True),
@@ -420,8 +438,9 @@ class JsonLlmClient:
         if self.config.kind != "openai-compatible" or not self._is_mimo_provider():
             return payload
         payload = dict(payload)
-        max_tokens = payload.pop("max_tokens", None)
-        if max_tokens is not None:
+        max_tokens = payload.get("max_tokens")
+        if max_tokens is not None and env_flag("PAPERLENS_MIMO_USE_MAX_COMPLETION_TOKENS"):
+            payload.pop("max_tokens", None)
             payload["max_completion_tokens"] = max_tokens
         thinking = self._mimo_thinking_option(payload)
         if thinking is not None:
@@ -439,15 +458,17 @@ class JsonLlmClient:
         return model.startswith("mimo-")
 
     def _mimo_thinking_option(self, payload: dict[str, Any]) -> dict[str, str] | None:
-        mode = os.getenv("PAPERLENS_MIMO_THINKING", "disabled").strip().lower()
+        mode = os.getenv("PAPERLENS_MIMO_THINKING", "omit").strip().lower()
         schema_name = compatible_payload_schema_name(payload)
         schema_filter = normalized_csv_env("PAPERLENS_MIMO_THINKING_SCHEMAS")
         if schema_filter and schema_name not in schema_filter:
-            mode = "disabled"
+            mode = "omit"
         if mode in {"1", "true", "yes", "on", "enabled", "enable"}:
             return {"type": "enabled"}
         if mode in {"default", "provider", "omit"}:
             return None
+        if mode in {"0", "false", "no", "off", "disabled", "disable"}:
+            return {"type": "disabled"}
         return {"type": "disabled"}
 
     def _post_json(
@@ -457,12 +478,13 @@ class JsonLlmClient:
         headers: dict[str, str],
     ) -> tuple[dict[str, Any], dict[str, str]]:
         body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        enforce_request_safety(endpoint, payload, body_bytes)
         retry_codes = {429, 500, 502, 503, 504}
         try:
             attempts = int(os.getenv("PAPERLENS_LLM_RETRIES", str(self.config.max_retries)))
         except ValueError:
             attempts = self.config.max_retries
-        attempts = max(1, min(10, attempts))
+        attempts = max(1, min(3, attempts))
         last_error: Exception | None = None
         try:
             timeout_seconds = int(os.getenv("PAPERLENS_LLM_TIMEOUT_SECONDS", str(self.config.timeout_seconds)))
@@ -470,40 +492,117 @@ class JsonLlmClient:
             timeout_seconds = self.config.timeout_seconds
         timeout_seconds = max(10, min(timeout_seconds, 1800))
         for attempt in range(attempts):
+            before_model_attempt(run_id=self.run_id)
             request = urllib.request.Request(
                 endpoint,
                 data=body_bytes,
                 headers=headers,
                 method="POST",
             )
+            started = time.time()
             try:
                 with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
                     body = response.read().decode("utf-8")
-                    return json.loads(body), {
+                    parsed = json.loads(body)
+                    response_headers = {
                         key.lower(): value for key, value in response.headers.items()
                     }
+                    write_llm_ledger(
+                        endpoint=endpoint,
+                        payload=payload,
+                        payload_bytes=len(body_bytes),
+                        attempt=attempt + 1,
+                        attempts=attempts,
+                        status="ok",
+                        duration_seconds=time.time() - started,
+                        response_usage=parsed.get("usage") if isinstance(parsed, dict) else None,
+                        request_id=response_headers.get("x-request-id"),
+                        ledger_path=self.ledger_path,
+                        run_id=self.run_id,
+                    )
+                    return parsed, response_headers
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode("utf-8", errors="replace")
                 last_error = LlmError(f"HTTP {exc.code} from {endpoint}: {body[:1000]}")
+                write_llm_ledger(
+                    endpoint=endpoint,
+                    payload=payload,
+                    payload_bytes=len(body_bytes),
+                    attempt=attempt + 1,
+                    attempts=attempts,
+                    status="http_error",
+                    duration_seconds=time.time() - started,
+                    error=f"HTTP {exc.code}: {body[:300]}",
+                    ledger_path=self.ledger_path,
+                    run_id=self.run_id,
+                )
                 if exc.code not in retry_codes or attempt == attempts - 1:
                     raise last_error from exc
                 retry_delay = self._retry_delay(attempt, exc.headers)
             except urllib.error.URLError as exc:
                 last_error = LlmError(f"Network error calling {endpoint}: {exc}")
+                write_llm_ledger(
+                    endpoint=endpoint,
+                    payload=payload,
+                    payload_bytes=len(body_bytes),
+                    attempt=attempt + 1,
+                    attempts=attempts,
+                    status="network_error",
+                    duration_seconds=time.time() - started,
+                    error=str(exc),
+                    ledger_path=self.ledger_path,
+                    run_id=self.run_id,
+                )
                 if attempt == attempts - 1:
                     raise last_error from exc
                 retry_delay = self._retry_delay(attempt)
             except (http.client.RemoteDisconnected, ConnectionError, OSError) as exc:
                 last_error = LlmError(f"Network connection closed calling {endpoint}: {exc}")
+                write_llm_ledger(
+                    endpoint=endpoint,
+                    payload=payload,
+                    payload_bytes=len(body_bytes),
+                    attempt=attempt + 1,
+                    attempts=attempts,
+                    status="connection_error",
+                    duration_seconds=time.time() - started,
+                    error=str(exc),
+                    ledger_path=self.ledger_path,
+                    run_id=self.run_id,
+                )
                 if attempt == attempts - 1:
                     raise last_error from exc
                 retry_delay = self._retry_delay(attempt)
             except TimeoutError as exc:
                 last_error = LlmError(f"Timeout calling {endpoint}")
+                write_llm_ledger(
+                    endpoint=endpoint,
+                    payload=payload,
+                    payload_bytes=len(body_bytes),
+                    attempt=attempt + 1,
+                    attempts=attempts,
+                    status="timeout",
+                    duration_seconds=time.time() - started,
+                    error="timeout",
+                    ledger_path=self.ledger_path,
+                    run_id=self.run_id,
+                )
                 if attempt == attempts - 1:
                     raise last_error from exc
                 retry_delay = self._retry_delay(attempt)
             except json.JSONDecodeError as exc:
+                write_llm_ledger(
+                    endpoint=endpoint,
+                    payload=payload,
+                    payload_bytes=len(body_bytes),
+                    attempt=attempt + 1,
+                    attempts=attempts,
+                    status="invalid_provider_json",
+                    duration_seconds=time.time() - started,
+                    error=str(exc),
+                    ledger_path=self.ledger_path,
+                    run_id=self.run_id,
+                )
                 raise LlmError(f"Provider returned non-JSON response from {endpoint}") from exc
             time.sleep(retry_delay)
         if last_error:
@@ -523,6 +622,231 @@ class JsonLlmClient:
             except ValueError:
                 pass
         return min(10.0 * (2**attempt), 90.0)
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on", "enabled", "enable"}
+
+
+def bounded_int_env(name: str, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def enforce_request_safety(endpoint: str, payload: dict[str, Any], body_bytes: bytes) -> None:
+    max_payload_bytes = bounded_int_env(
+        "PAPERLENS_MAX_REQUEST_BYTES", default=1_000_000, minimum=20_000, maximum=20_000_000
+    )
+    if len(body_bytes) > max_payload_bytes:
+        raise LlmError(
+            f"Refusing oversized model request: {len(body_bytes)} bytes exceeds "
+            f"PAPERLENS_MAX_REQUEST_BYTES={max_payload_bytes} for {endpoint}"
+        )
+
+    prompt_chars = payload_text_chars(payload)
+    max_prompt_chars = bounded_int_env(
+        "PAPERLENS_MAX_PROMPT_CHARS", default=260_000, minimum=20_000, maximum=5_000_000
+    )
+    if prompt_chars > max_prompt_chars:
+        raise LlmError(
+            f"Refusing oversized model prompt: {prompt_chars} text chars exceeds "
+            f"PAPERLENS_MAX_PROMPT_CHARS={max_prompt_chars}"
+        )
+
+    image_count = payload_image_count(payload)
+    if image_count and not env_flag("PAPERLENS_ALLOW_IMAGE_INPUTS", default=False):
+        raise LlmError("Refusing model request with image inputs; set PAPERLENS_ALLOW_IMAGE_INPUTS=1 to allow it")
+    max_images = bounded_int_env("PAPERLENS_MAX_IMAGES_PER_REQUEST", default=1, minimum=0, maximum=20)
+    if image_count > max_images:
+        raise LlmError(
+            f"Refusing model request with {image_count} images; "
+            f"PAPERLENS_MAX_IMAGES_PER_REQUEST={max_images}"
+        )
+
+    output_limit = payload_completion_limit(payload)
+    max_output_limit = bounded_int_env(
+        "PAPERLENS_MAX_COMPLETION_TOKENS", default=12_000, minimum=512, maximum=200_000
+    )
+    if output_limit is not None and output_limit > max_output_limit:
+        raise LlmError(
+            f"Refusing model request with completion limit {output_limit}; "
+            f"PAPERLENS_MAX_COMPLETION_TOKENS={max_output_limit}"
+        )
+
+
+def before_model_attempt(*, run_id: str | None = None) -> None:
+    global _LAST_CALL_TIME
+    with _CALL_GUARD_LOCK:
+        max_calls = bounded_int_env("PAPERLENS_MAX_MODEL_CALLS", default=0, minimum=0, maximum=100_000)
+        context = dict(_LLM_CONTEXT.get({}))
+        guard_key = str(run_id or context.get("run_id") or "__process__")
+        guard_count = _CALL_GUARD_COUNTS.get(guard_key, 0)
+        if max_calls and guard_count >= max_calls:
+            raise LlmError(
+                f"Refusing model request: run has reached PAPERLENS_MAX_MODEL_CALLS={max_calls}"
+            )
+        min_interval = float_env("PAPERLENS_MIN_SECONDS_BETWEEN_CALLS", default=0.25, minimum=0.0, maximum=60.0)
+        now = time.time()
+        wait_seconds = min_interval - (now - _LAST_CALL_TIME)
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+            now = time.time()
+        _CALL_GUARD_COUNTS[guard_key] = guard_count + 1
+        _LAST_CALL_TIME = now
+
+
+def float_env(name: str, *, default: float, minimum: float, maximum: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except ValueError:
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def payload_text_chars(value: Any) -> int:
+    if isinstance(value, str):
+        if value.startswith("data:image/"):
+            return 0
+        return len(value)
+    if isinstance(value, dict):
+        return sum(payload_text_chars(item) for item in value.values())
+    if isinstance(value, list):
+        return sum(payload_text_chars(item) for item in value)
+    return 0
+
+
+def payload_image_count(value: Any) -> int:
+    if isinstance(value, str):
+        return 1 if value.startswith("data:image/") else 0
+    if isinstance(value, dict):
+        return sum(payload_image_count(item) for item in value.values())
+    if isinstance(value, list):
+        return sum(payload_image_count(item) for item in value)
+    return 0
+
+
+def payload_completion_limit(payload: dict[str, Any]) -> int | None:
+    for key in ("max_output_tokens", "max_completion_tokens", "max_tokens"):
+        value = payload.get(key)
+        if isinstance(value, int):
+            return value
+    return None
+
+
+def payload_schema_name(payload: dict[str, Any]) -> str:
+    response_format = payload.get("response_format")
+    if isinstance(response_format, dict):
+        json_schema = response_format.get("json_schema")
+        if isinstance(json_schema, dict):
+            return str(json_schema.get("name") or "")
+    text = payload.get("text")
+    if isinstance(text, dict):
+        fmt = text.get("format")
+        if isinstance(fmt, dict):
+            return str(fmt.get("name") or "")
+    return ""
+
+
+def write_llm_ledger(
+    *,
+    endpoint: str,
+    payload: dict[str, Any],
+    payload_bytes: int,
+    attempt: int,
+    attempts: int,
+    status: str,
+    duration_seconds: float,
+    response_usage: Any | None = None,
+    request_id: str | None = None,
+    error: str | None = None,
+    ledger_path: Path | str | None = None,
+    run_id: str | None = None,
+) -> None:
+    context = dict(_LLM_CONTEXT.get({}))
+    resolved_ledger_path = ledger_path or context.get("ledger_path") or os.getenv("PAPERLENS_LLM_LEDGER")
+    if not resolved_ledger_path:
+        return
+    sample_rate = float_env(
+        "PAPERLENS_LLM_LEDGER_SAMPLE_RATE", default=1.0, minimum=0.0, maximum=1.0
+    )
+    if status == "ok" and sample_rate < 1.0 and random.random() > sample_rate:
+        return
+    if run_id and "run_id" not in context:
+        context["run_id"] = run_id
+    record = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "endpoint": endpoint,
+        "model": payload.get("model"),
+        "schema_name": payload_schema_name(payload),
+        "context": context,
+        "payload_bytes": payload_bytes,
+        "prompt_chars": payload_text_chars(payload),
+        "image_count": payload_image_count(payload),
+        "completion_limit": payload_completion_limit(payload),
+        "attempt": attempt,
+        "attempts": attempts,
+        "status": status,
+        "duration_seconds": round(duration_seconds, 3),
+        "request_id": request_id,
+        "usage": response_usage if isinstance(response_usage, dict) else {},
+    }
+    if error:
+        record["error"] = error[:500]
+    path = Path(resolved_ledger_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _LEDGER_LOCK:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def chat_json_schema_fallback_payload(
+    *,
+    payload: dict[str, Any],
+    system_prompt: str,
+    user_prompt: str,
+    schema: dict[str, Any],
+) -> dict[str, Any]:
+    fallback_payload = dict(payload)
+    fallback_payload["response_format"] = {"type": "json_object"}
+    fallback_payload["messages"] = [
+        {"role": "system", "content": system_prompt + "\nReturn only valid JSON matching the schema."},
+        {
+            "role": "user",
+            "content": user_prompt
+            + "\n\nJSON schema to follow exactly:\n"
+            + json.dumps(schema, ensure_ascii=False),
+        },
+    ]
+    return fallback_payload
+
+
+def chat_json_schema_fallback_payload_with_images(
+    *,
+    payload: dict[str, Any],
+    system_prompt: str,
+    user_content: list[dict[str, Any]],
+    schema: dict[str, Any],
+) -> dict[str, Any]:
+    fallback_content = list(user_content)
+    fallback_content.append(
+        {
+            "type": "text",
+            "text": "\n\nJSON schema to follow exactly:\n" + json.dumps(schema, ensure_ascii=False),
+        }
+    )
+    fallback_payload = dict(payload)
+    fallback_payload["response_format"] = {"type": "json_object"}
+    fallback_payload["messages"] = [
+        {"role": "system", "content": system_prompt + "\nReturn only valid JSON matching the schema."},
+        {"role": "user", "content": fallback_content},
+    ]
+    return fallback_payload
 
 
 def extract_openai_response_text(response: dict[str, Any]) -> str:

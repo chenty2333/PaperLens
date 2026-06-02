@@ -4,7 +4,7 @@ use std::{
     net::TcpStream,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{mpsc, Arc, Mutex},
     thread,
     time::Duration,
 };
@@ -260,12 +260,7 @@ fn start_core_service(app: tauri::AppHandle) -> Result<CoreService, String> {
         find_config_path(),
     ];
     let mut command = build_core_command(&app, &args);
-    command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .env("OPENAI_AGENTS_DONT_LOG_MODEL_DATA", "1")
-        .env("OPENAI_AGENTS_DONT_LOG_TOOL_DATA", "1")
-        .env("OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA", "0");
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = command.spawn().map_err(|err| err.to_string())?;
     let stdout = child
@@ -273,19 +268,6 @@ fn start_core_service(app: tauri::AppHandle) -> Result<CoreService, String> {
         .take()
         .ok_or_else(|| "Core service stdout is unavailable".to_string())?;
     let stderr = child.stderr.take();
-    let mut stdout_reader = BufReader::new(stdout);
-    let mut first_line = String::new();
-    stdout_reader
-        .read_line(&mut first_line)
-        .map_err(|err| err.to_string())?;
-    let info = parse_server_started(first_line.trim())?;
-
-    let app_stdout = app.clone();
-    thread::spawn(move || {
-        for line in stdout_reader.lines().map_while(Result::ok) {
-            let _ = app_stdout.emit("core-service-log", line);
-        }
-    });
 
     if let Some(stderr) = stderr {
         let app_stderr = app.clone();
@@ -296,6 +278,37 @@ fn start_core_service(app: tauri::AppHandle) -> Result<CoreService, String> {
             }
         });
     }
+
+    let (startup_tx, startup_rx) = mpsc::channel();
+    let app_stdout = app.clone();
+    thread::spawn(move || {
+        let mut stdout_reader = BufReader::new(stdout);
+        let mut first_line = String::new();
+        let startup = match stdout_reader.read_line(&mut first_line) {
+            Ok(0) => Err("Core service exited before reporting startup".to_string()),
+            Ok(_) => parse_server_started(first_line.trim()),
+            Err(err) => Err(err.to_string()),
+        };
+        if startup.is_err() && !first_line.trim().is_empty() {
+            let _ = app_stdout.emit("core-service-log", first_line.trim().to_string());
+        }
+        let _ = startup_tx.send(startup);
+        for line in stdout_reader.lines().map_while(Result::ok) {
+            let _ = app_stdout.emit("core-service-log", line);
+        }
+    });
+
+    let info = match startup_rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(Ok(info)) => info,
+        Ok(Err(err)) => {
+            let _ = child.kill();
+            return Err(err);
+        }
+        Err(_) => {
+            let _ = child.kill();
+            return Err("Timed out waiting for PaperLens Core service to start".to_string());
+        }
+    };
 
     Ok(CoreService {
         child: Arc::new(Mutex::new(child)),

@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-from paperlens_core.agents.llm import JsonLlmClient
+from paperlens_core.agents.llm import JsonLlmClient, llm_call_context
 from paperlens_core.agents.providers import describe_provider
 from paperlens_core.budget import BudgetExceeded, BudgetManager
 from paperlens_core.config import CoreConfig
@@ -81,6 +81,13 @@ class PaperLensWorkflow:
         self.memory_store = PaperMemoryStore(self.data_dir)
         self._llm_missing_key_warned = False
         self.budget = BudgetManager(config.budget)
+
+    def new_llm_client(self) -> JsonLlmClient:
+        return JsonLlmClient(
+            self.config.provider,
+            ledger_path=self.data_dir / "model_calls.jsonl",
+            run_id=self.events.run_id,
+        )
 
     def run(
         self,
@@ -153,14 +160,22 @@ class PaperLensWorkflow:
     def load_completed_state_for_stage(self, stage: str) -> None:
         stage = normalize_workflow_stage(stage) or stage
         index = WORKFLOW_STAGE_ORDER.index(stage)
+        active_ids = self.active_paper_ids_from_state()
+        if index >= WORKFLOW_STAGE_ORDER.index("stage_01_parse") and not active_ids:
+            raise RuntimeError(
+                "Cannot resume PaperLens workflow: missing active_paper_ids in run_state. "
+                "Rerun from stage_00_ingest or use a clean output directory."
+            )
         if index >= WORKFLOW_STAGE_ORDER.index("stage_01_parse"):
-            self.papers = self.db.list_papers()
+            self.papers = self.filter_current_papers(self.db.list_papers(), active_ids)
         if index >= WORKFLOW_STAGE_ORDER.index("stage_03_skim"):
-            self.skim_cards = self.db.list_skim_cards()
+            self.skim_cards = self.filter_current_items(self.db.list_skim_cards(), active_ids)
         if index >= WORKFLOW_STAGE_ORDER.index("stage_03_skim"):
-            self.classifications = self.db.list_classifications()
+            self.classifications = self.filter_current_items(
+                self.db.list_classifications(), active_ids
+            )
         if index >= WORKFLOW_STAGE_ORDER.index("stage_07_normal_read"):
-            self.paper_cards = self.db.list_paper_cards()
+            self.paper_cards = self.filter_current_items(self.db.list_paper_cards(), active_ids)
         self.validate_loaded_state_for_stage(stage)
         self.events.emit(
             "resume_state_loaded",
@@ -173,6 +188,24 @@ class PaperLensWorkflow:
                 "paper_cards": len(self.paper_cards),
             },
         )
+
+    def active_paper_ids_from_state(self) -> set[str]:
+        value = self.db.get_state("active_paper_ids", [])
+        if not isinstance(value, list):
+            return set()
+        return {str(item) for item in value if str(item).strip()}
+
+    def filter_current_papers(
+        self, papers: list[PaperRecord], active_ids: set[str]
+    ) -> list[PaperRecord]:
+        if not active_ids:
+            return papers
+        return [paper for paper in papers if paper.paper_id in active_ids]
+
+    def filter_current_items(self, items: list[Any], active_ids: set[str]) -> list[Any]:
+        if not active_ids:
+            return items
+        return [item for item in items if getattr(item, "paper_id", None) in active_ids]
 
     def validate_loaded_state_for_stage(self, stage: str) -> None:
         index = WORKFLOW_STAGE_ORDER.index(stage)
@@ -206,9 +239,6 @@ class PaperLensWorkflow:
         ]:
             (self.output_dir / relative).mkdir(parents=True, exist_ok=True)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        os.environ["PAPERLENS_AGENT_SESSION_DB"] = str(
-            self.internal_dir / "agent_sessions.sqlite"
-        )
         write_json(
             self.data_dir / "run.json",
             {"status": "running", "config": self.config.public_dict()},
@@ -274,6 +304,10 @@ class PaperLensWorkflow:
         self.checkpoint(stage)
         self.events.stage_started(stage, "Scanning PDFs")
         self.papers = scan_pdfs(self.input_dir)
+        active_ids = [paper.paper_id for paper in self.papers]
+        self.db.set_state("active_run_id", self.events.run_id)
+        self.db.set_state("active_input_dir", str(self.input_dir))
+        self.db.set_state("active_paper_ids", active_ids)
         for paper in self.papers:
             paper.status = "INGESTED"
             self.db.upsert_paper(paper)
@@ -414,7 +448,7 @@ class PaperLensWorkflow:
         if not self.papers:
             self.events.stage_completed(stage, "No PDFs to verify")
             return
-        client = JsonLlmClient(self.config.provider) if self.llm_enabled() else None
+        client = self.new_llm_client() if self.llm_enabled() else None
         visual_rows = []
         for paper in self.papers:
             artifacts = self.db.get_page_artifacts(paper.paper_id)
@@ -423,9 +457,9 @@ class PaperLensWorkflow:
                 visual_results = []
                 for batch in chunked(visual_pages, self.config.visual_pages_per_call):
                     try:
-                        attempts = int(os.getenv("PAPERLENS_VLM_PAGE_RETRIES", "3"))
+                        attempts = int(os.getenv("PAPERLENS_VLM_PAGE_RETRIES", "1"))
                     except ValueError:
-                        attempts = 3
+                        attempts = 1
                     attempts = max(1, min(attempts, 8))
                     last_error: Exception | None = None
                     for attempt in range(attempts):
@@ -569,15 +603,22 @@ class PaperLensWorkflow:
             message=f"VLM page read {paper.paper_id}",
             data={"paper_id": paper.paper_id, "agent_run_id": agent_run_id},
         )
-        raw = client.invoke_json_with_images(
-            system_prompt=VLM_PAGE_READER_SYSTEM_PROMPT,
-            user_prompt=build_vlm_page_prompt(paper=paper, artifacts=artifacts),
-            image_paths=image_paths,
+        with llm_call_context(
+            stage=stage,
+            paper_id=paper.paper_id,
+            operation="vlm_page_read",
             schema_name="paperlens_vlm_page_notes",
-            schema=VLM_PAGE_NOTES_SCHEMA,
-            max_tokens=2200,
-            detail=self.config.visual_detail,
-        )
+            pages=pages,
+        ):
+            raw = client.invoke_json_with_images(
+                system_prompt=VLM_PAGE_READER_SYSTEM_PROMPT,
+                user_prompt=build_vlm_page_prompt(paper=paper, artifacts=artifacts),
+                image_paths=image_paths,
+                schema_name="paperlens_vlm_page_notes",
+                schema=VLM_PAGE_NOTES_SCHEMA,
+                max_tokens=2200,
+                detail=self.config.visual_detail,
+            )
         self.write_agent_run(
             {
                 "agent_run_id": agent_run_id,
@@ -619,12 +660,16 @@ class PaperLensWorkflow:
         self.checkpoint(stage)
         llm_enabled = False
         self.events.stage_started(stage, "Building deterministic paper maps")
+        active_ids = {paper.paper_id for paper in self.papers}
         existing_skim_by_id = {
-            card.paper_id: card for card in (self.skim_cards or self.db.list_skim_cards())
+            card.paper_id: card
+            for card in (self.skim_cards or self.db.list_skim_cards())
+            if card.paper_id in active_ids
         }
         existing_decision_by_id = {
             decision.paper_id: decision
             for decision in (self.classifications or self.db.list_classifications())
+            if decision.paper_id in active_ids
         }
         self.skim_cards = list(existing_skim_by_id.values())
         self.classifications = list(existing_decision_by_id.values())
@@ -651,7 +696,7 @@ class PaperLensWorkflow:
             ) -> tuple[int, SkimCard, ClassificationDecision, dict[str, Any]]:
                 paper, artifacts, _card, _decision = fallbacks[index]
                 card, decision, run_info = self.run_skim_classification(
-                    client=JsonLlmClient(self.config.provider),
+                    client=self.new_llm_client(),
                     paper=paper,
                     artifacts=artifacts,
                     fallback_card=_card,
@@ -801,21 +846,27 @@ class PaperLensWorkflow:
             )
 
         try:
-            attempts = int(os.getenv("PAPERLENS_STAGE_LLM_RETRIES", "3"))
+            attempts = int(os.getenv("PAPERLENS_STAGE_LLM_RETRIES", "1"))
         except ValueError:
-            attempts = 3
+            attempts = 1
         attempts = max(1, min(attempts, 6))
         last_error: Exception | None = None
         for attempt in range(attempts):
             try:
                 agent_run_id = f"skim_{paper.paper_id}_{uuid.uuid4().hex[:8]}"
-                raw = client.invoke_json(
-                    system_prompt=SKIM_CLASSIFIER_SYSTEM_PROMPT,
-                    user_prompt=user_prompt,
-                    schema_name="paperlens_skim_classification",
-                    schema=SKIM_CLASSIFICATION_SCHEMA,
-                    max_tokens=1100,
-                )
+                with llm_call_context(
+                    stage="stage_03_skim",
+                    paper_id=paper.paper_id,
+                    operation="skim_classification",
+                    attempt=attempt + 1,
+                ):
+                    raw = client.invoke_json(
+                        system_prompt=SKIM_CLASSIFIER_SYSTEM_PROMPT,
+                        user_prompt=user_prompt,
+                        schema_name="paperlens_skim_classification",
+                        schema=SKIM_CLASSIFICATION_SCHEMA,
+                        max_tokens=1100,
+                    )
                 self.write_cache_payload(
                     cache_path,
                     {
@@ -904,14 +955,20 @@ class PaperLensWorkflow:
         explicit = os.getenv("PAPERLENS_REQUIRE_LLM")
         if explicit is not None:
             return explicit == "1"
-        if os.getenv("PAPERLENS_REQUIRE_AGENTS_SDK", "0") == "1":
-            return True
         if os.getenv("PAPERLENS_ALLOW_LLM_FALLBACK", "0") == "1":
             return False
         return not self.config.offline_debug and self.config.provider.kind != "none"
 
     def write_agent_run(self, payload: dict[str, Any]) -> None:
-        _ = payload
+        row = {
+            "time": utc_timestamp(),
+            "run_id": self.events.run_id,
+            **payload,
+        }
+        path = self.data_dir / "agent_runs.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n")
 
     def record_llm_usage(self, stage: str, usage: dict[str, Any]) -> None:
         try:
@@ -971,8 +1028,11 @@ class PaperLensWorkflow:
             if llm_enabled
             else "Building deterministic PaperCards for papers that require reading",
         )
+        active_ids = {paper.paper_id for paper in self.papers}
         existing_cards = {
-            card.paper_id: card for card in (self.paper_cards or self.db.list_paper_cards())
+            card.paper_id: card
+            for card in (self.paper_cards or self.db.list_paper_cards())
+            if card.paper_id in active_ids
         }
         self.paper_cards = list(existing_cards.values())
         candidates: list[
@@ -996,7 +1056,7 @@ class PaperLensWorkflow:
             candidates.append((paper, card, decision, artifacts, paper_card))
 
         if llm_enabled and candidates:
-            client = JsonLlmClient(self.config.provider)
+            client = self.new_llm_client()
             for paper, card, decision, artifacts, fallback in candidates:
                 self.control.wait_if_paused()
                 self.control.require_not_cancelled()
@@ -1464,21 +1524,28 @@ class PaperLensWorkflow:
         retry_data: dict[str, Any],
     ) -> Any:
         try:
-            attempts = int(os.getenv("PAPERLENS_STAGE_LLM_RETRIES", "3"))
+            attempts = int(os.getenv("PAPERLENS_STAGE_LLM_RETRIES", "1"))
         except ValueError:
-            attempts = 3
+            attempts = 1
         attempts = max(1, min(attempts, 6))
         last_error: Exception | None = None
         for attempt in range(attempts):
             agent_run_id = f"{agent_prefix}_{paper_id}_{uuid.uuid4().hex[:8]}"
             try:
-                raw = client.invoke_json(
-                    system_prompt=system_prompt,
-                    user_prompt=user_prompt,
+                with llm_call_context(
+                    stage=stage,
+                    paper_id=paper_id,
+                    operation=agent_prefix,
                     schema_name=schema_name,
-                    schema=schema,
-                    max_tokens=max_tokens,
-                )
+                    attempt=attempt + 1,
+                ):
+                    raw = client.invoke_json(
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        schema_name=schema_name,
+                        schema=schema,
+                        max_tokens=max_tokens,
+                    )
                 self.write_agent_run(
                     {
                         "agent_run_id": agent_run_id,
@@ -1518,7 +1585,7 @@ class PaperLensWorkflow:
         stage = "stage_08_evidence_verify"
         self.checkpoint(stage)
         self.events.stage_started(stage, "Verifying paper memory once against local evidence")
-        client = JsonLlmClient(self.config.provider) if self.llm_enabled() else None
+        client = self.new_llm_client() if self.llm_enabled() else None
         papers_by_id = {paper.paper_id: paper for paper in self.papers}
         skims_by_id = {skim.paper_id: skim for skim in self.skim_cards}
         decisions_by_id = {decision.paper_id: decision for decision in self.classifications}
@@ -1610,7 +1677,8 @@ class PaperLensWorkflow:
         stage = "stage_15_export"
         self.checkpoint(stage)
         self.events.stage_started(stage, "Writing final reading reports")
-        client = None if self.config.offline_debug else JsonLlmClient(self.config.provider)
+        client = None if self.config.offline_debug else self.new_llm_client()
+        active_ids = {paper.paper_id for paper in self.papers}
         report_paths = write_final_report_bundle(
             output_dir=self.output_dir,
             data_dir=self.data_dir,
@@ -1623,7 +1691,9 @@ class PaperLensWorkflow:
             skim_cards=self.skim_cards,
             decisions=self.classifications,
             paper_cards=self.paper_cards,
-            review_items=self.db.list_review_items(),
+            review_items=[
+                item for item in self.db.list_review_items() if item.paper_id in active_ids
+            ],
             budget=self.budget.public_dict(),
             budget_provider=self.budget.public_dict,
             config=self.config.public_dict(),
@@ -1642,7 +1712,13 @@ class PaperLensWorkflow:
         stage = "stage_17_manifest"
         self.checkpoint(stage)
         self.events.stage_started(stage, "Writing manifest")
-        output_validation = validate_paperlens_output(self.output_dir)
+        output_validation = validate_paperlens_output(
+            self.output_dir,
+            expected_report_names={paper_report_filename(paper) for paper in self.papers},
+            expected_paper_ids={paper.paper_id for paper in self.papers},
+        )
+        model_call_summary = summarize_model_calls(self.data_dir / "model_calls.jsonl")
+        write_json(self.data_dir / "model_call_summary.json", model_call_summary)
         manifest = {
             "run_id": self.events.run_id,
             "input_dir": str(self.input_dir),
@@ -1663,8 +1739,10 @@ class PaperLensWorkflow:
                 "paper_memory_v3": ".paperlens/data/memory/v3/",
                 "library_index": ".paperlens/library/index/search_index.json",
                 "data": ".paperlens/data/",
+                "model_call_summary": ".paperlens/data/model_call_summary.json",
                 "output_validation": output_validation,
             },
+            "model_calls": model_call_summary,
             "budget": self.budget.public_dict(),
         }
         write_json(
@@ -3415,18 +3493,24 @@ def generate_report_plan(
     if cached and isinstance(cached.get("data"), dict):
         record_agent_run(cache_agent_run(client, paper.paper_id, stage, "report_plan", cache_path))
         return normalize_report_plan(cached["data"], paper=paper, decision=decision)
-    raw = client.invoke_json(
-        system_prompt=REPORT_PLAN_SYSTEM_PROMPT,
-        user_prompt=user_prompt,
+    with llm_call_context(
+        stage=stage,
+        paper_id=paper.paper_id,
+        operation="report_plan",
         schema_name="paperlens_report_plan",
-        schema=REPORT_PLAN_SCHEMA,
-        max_tokens=bounded_env_int(
-            "PAPERLENS_REPORT_PLAN_MAX_TOKENS",
-            default=2400,
-            minimum=1000,
-            maximum=8000,
-        ),
-    )
+    ):
+        raw = client.invoke_json(
+            system_prompt=REPORT_PLAN_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            schema_name="paperlens_report_plan",
+            schema=REPORT_PLAN_SCHEMA,
+            max_tokens=bounded_env_int(
+                "PAPERLENS_REPORT_PLAN_MAX_TOKENS",
+                default=2400,
+                minimum=1000,
+                maximum=8000,
+            ),
+        )
     record_usage(stage, raw.usage)
     record_agent_run(
         model_agent_run(client, paper.paper_id, stage, "report_plan", raw, status="PASS")
@@ -3490,13 +3574,21 @@ def generate_report_section(
             cache_agent_run(client, paper.paper_id, stage, f"report_section_{section_id}", cache_path)
         )
         return normalize_report_section(cached["data"], section_plan=section_plan)
-    raw = client.invoke_json(
-        system_prompt=REPORT_SECTION_SYSTEM_PROMPT,
-        user_prompt=user_prompt,
+    with llm_call_context(
+        stage=stage,
+        paper_id=paper.paper_id,
+        operation="report_section",
+        section_id=section_id,
+        repair_round=repair_round,
         schema_name="paperlens_report_section",
-        schema=REPORT_SECTION_SCHEMA,
-        max_tokens=report_section_token_budget(section_plan),
-    )
+    ):
+        raw = client.invoke_json(
+            system_prompt=REPORT_SECTION_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            schema_name="paperlens_report_section",
+            schema=REPORT_SECTION_SCHEMA,
+            max_tokens=report_section_token_budget(section_plan),
+        )
     record_usage(stage, raw.usage)
     record_agent_run(
         model_agent_run(client, paper.paper_id, stage, f"report_section_{section_id}", raw, status="PASS")
@@ -3557,18 +3649,26 @@ def audit_report_section(
             cache_agent_run(client, paper.paper_id, stage, f"report_section_audit_{section_id}", cache_path)
         )
         return normalize_report_section_audit(cached["data"])
-    raw = client.invoke_json(
-        system_prompt=REPORT_SECTION_AUDITOR_SYSTEM_PROMPT,
-        user_prompt=user_prompt,
+    with llm_call_context(
+        stage=stage,
+        paper_id=paper.paper_id,
+        operation="report_section_audit",
+        section_id=section_id,
+        repair_round=repair_round,
         schema_name="paperlens_report_section_audit",
-        schema=REPORT_SECTION_AUDIT_SCHEMA,
-        max_tokens=bounded_env_int(
-            "PAPERLENS_REPORT_SECTION_AUDIT_MAX_TOKENS",
-            default=1800,
-            minimum=700,
-            maximum=6000,
-        ),
-    )
+    ):
+        raw = client.invoke_json(
+            system_prompt=REPORT_SECTION_AUDITOR_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            schema_name="paperlens_report_section_audit",
+            schema=REPORT_SECTION_AUDIT_SCHEMA,
+            max_tokens=bounded_env_int(
+                "PAPERLENS_REPORT_SECTION_AUDIT_MAX_TOKENS",
+                default=1800,
+                minimum=700,
+                maximum=6000,
+            ),
+        )
     record_usage(stage, raw.usage)
     record_agent_run(
         model_agent_run(
@@ -4813,23 +4913,6 @@ def write_final_report_bundle(
             source="export_prepare",
             prefer_existing=True,
         )
-        if should_reuse_existing_report(report_path):
-            existing_markdown = report_path.read_text(encoding="utf-8")
-            written.append(report_path)
-            paper_report_rows.append(
-                {
-                    "paper": paper,
-                    "skim": skim,
-                    "decision": decision,
-                    "card": card,
-                    "report_name": report_name,
-                    "report_title": markdown_title(existing_markdown) or paper.canonical_title,
-                    "paper_memory_v3": paper_memory_v3,
-                    "model_report": None,
-                    "report_audit": None,
-                }
-            )
-            continue
         paper_memory_for_prompt = memory_v3_prompt_view(paper_memory_v3)
         model_report = None
         report_audit = None
@@ -4966,10 +5049,8 @@ def report_generation_must_succeed() -> bool:
     return os.getenv("PAPERLENS_ALLOW_LLM_FALLBACK", "0") != "1"
 
 
-def should_reuse_existing_report(report_path: Path) -> bool:
-    if os.getenv("PAPERLENS_OVERWRITE_REPORTS", "0") == "1":
-        return False
-    return report_path.exists() and report_path.stat().st_size > 0
+def utc_timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 def final_report_audit_acceptable(report_audit: dict[str, Any] | None) -> bool:
@@ -5058,7 +5139,12 @@ def render_paperlens_report(
     return "\n".join(lines) + "\n"
 
 
-def validate_paperlens_output(output_dir: Path) -> dict[str, Any]:
+def validate_paperlens_output(
+    output_dir: Path,
+    *,
+    expected_report_names: set[str] | None = None,
+    expected_paper_ids: set[str] | None = None,
+) -> dict[str, Any]:
     main_report = output_dir / "PaperLens.md"
     library_records_path = output_dir / ".paperlens" / "library" / "library_records.jsonl"
     memory_v3_dir = output_dir / ".paperlens" / "data" / "memory" / "v3"
@@ -5111,17 +5197,25 @@ def validate_paperlens_output(output_dir: Path) -> dict[str, Any]:
         issues.append(".paperlens/library/index/search_index.json is missing")
     papers_dir = output_dir / "papers"
     all_paper_report_files = sorted(papers_dir.glob("*.md")) if papers_dir.exists() else []
-    paper_reports = list(all_paper_report_files)
+    if expected_report_names is not None:
+        existing_names = {report.name for report in all_paper_report_files}
+        for missing_name in sorted(expected_report_names - existing_names):
+            issues.append(f"Missing expected paper report: papers/{missing_name}")
+    paper_reports = (
+        [report for report in all_paper_report_files if report.name in expected_report_names]
+        if expected_report_names is not None
+        else list(all_paper_report_files)
+    )
     if not paper_reports:
         issues.append("No per-paper Markdown reports were written")
     empty_reports = [
         report.name
-        for report in all_paper_report_files
+        for report in paper_reports
         if not report.read_text(encoding="utf-8").strip()
     ]
     for report in empty_reports:
         issues.append(f"Empty paper report: papers/{report}")
-    for report in all_paper_report_files:
+    for report in paper_reports:
         text = report.read_text(encoding="utf-8")
         if ".paperlens/pages/" in text or ".paperlens\\pages\\" in text:
             issues.append(f"Full-page render embedded in papers/{report.name}")
@@ -5142,6 +5236,13 @@ def validate_paperlens_output(output_dir: Path) -> dict[str, Any]:
     memory_v3_files = (
         sorted(memory_v3_dir.glob("*.paper_memory.v3.json")) if memory_v3_dir.exists() else []
     )
+    if expected_paper_ids is not None:
+        expected_memory_names = {
+            f"{paper_id}.paper_memory.v3.json" for paper_id in expected_paper_ids
+        }
+        memory_v3_files = [
+            memory_file for memory_file in memory_v3_files if memory_file.name in expected_memory_names
+        ]
     if paper_reports and len(memory_v3_files) < len(paper_reports):
         issues.append("PaperMemoryV3 file count is lower than paper report count")
     result = {
@@ -5156,6 +5257,93 @@ def validate_paperlens_output(output_dir: Path) -> dict[str, Any]:
     if issues:
         raise RuntimeError("Output validation failed: " + "; ".join(issues[:5]))
     return result
+
+
+def summarize_model_calls(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"calls": 0, "by_status": {}, "by_stage": {}, "by_schema": {}, "maxima": {}}
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    by_status: dict[str, int] = {}
+    by_stage: dict[str, dict[str, Any]] = {}
+    by_schema: dict[str, dict[str, Any]] = {}
+    maxima = {
+        "payload_bytes": 0,
+        "prompt_chars": 0,
+        "duration_seconds": 0.0,
+        "completion_limit": 0,
+        "image_count": 0,
+    }
+    for row in rows:
+        status = str(row.get("status") or "unknown")
+        by_status[status] = by_status.get(status, 0) + 1
+        context = row.get("context") if isinstance(row.get("context"), dict) else {}
+        stage = str(context.get("stage") or "unknown")
+        schema = str(row.get("schema_name") or context.get("schema_name") or "unknown")
+        usage = row.get("usage") if isinstance(row.get("usage"), dict) else {}
+        add_model_call_summary_row(by_stage, stage, row, usage)
+        add_model_call_summary_row(by_schema, schema, row, usage)
+        for key in maxima:
+            value = row.get(key)
+            if isinstance(value, (int, float)):
+                maxima[key] = max(maxima[key], value)
+    return {
+        "calls": len(rows),
+        "by_status": by_status,
+        "by_stage": by_stage,
+        "by_schema": by_schema,
+        "maxima": maxima,
+    }
+
+
+def add_model_call_summary_row(
+    bucket: dict[str, dict[str, Any]],
+    key: str,
+    row: dict[str, Any],
+    usage: dict[str, Any],
+) -> None:
+    item = bucket.setdefault(
+        key,
+        {
+            "calls": 0,
+            "payload_bytes": 0,
+            "prompt_chars": 0,
+            "duration_seconds": 0.0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+        },
+    )
+    item["calls"] += 1
+    item["payload_bytes"] += safe_number(row.get("payload_bytes"))
+    item["prompt_chars"] += safe_number(row.get("prompt_chars"))
+    item["duration_seconds"] = round(
+        float(item["duration_seconds"]) + float(safe_number(row.get("duration_seconds"))),
+        3,
+    )
+    item["input_tokens"] += safe_number(
+        usage.get("input_tokens") or usage.get("prompt_tokens") or 0
+    )
+    item["output_tokens"] += safe_number(
+        usage.get("output_tokens") or usage.get("completion_tokens") or 0
+    )
+
+
+def safe_number(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return 0
 
 
 def local_markdown_link_targets(markdown: str) -> list[str]:

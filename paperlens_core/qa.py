@@ -7,7 +7,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from paperlens_core.agents.llm import JsonLlmClient
+from paperlens_core.agents.llm import JsonLlmClient, LlmError, llm_call_context
 from paperlens_core.config import CoreConfig
 from paperlens_core.library import read_library_records
 from paperlens_core.memory_v3 import (
@@ -40,7 +40,7 @@ Return JSON only.
 """.strip()
 
 
-ASK_PROMPT_VERSION = "ask-v10-background-thread"
+ASK_PROMPT_VERSION = "qa-v10-background-thread"
 
 
 ASK_SCHEMA: dict[str, Any] = {
@@ -147,7 +147,11 @@ def answer_question(
         )
         return answer
     config.validate_agentic_run()
-    client = JsonLlmClient(config.provider)
+    client = JsonLlmClient(
+        config.provider,
+        ledger_path=output_dir / ".paperlens" / "data" / "model_calls.jsonl",
+        run_id=f"qa_{hash_text(resolved_paper_id + ':' + question)[:12]}",
+    )
     user_prompt = build_ask_prompt(
         report_path=report_path,
         paper_id=resolved_paper_id,
@@ -230,7 +234,7 @@ def invoke_ask_model(
     image_paths: list[Path],
     visual_detail: str,
 ) -> Any:
-    attempts = bounded_env_int("PAPERLENS_ASK_RETRIES", default=3, minimum=1, maximum=5)
+    attempts = bounded_env_int("PAPERLENS_ASK_RETRIES", default=1, minimum=1, maximum=5)
     last_error: Exception | None = None
     for attempt in range(attempts):
         prompt = user_prompt if attempt == 0 else user_prompt + ask_retry_suffix(attempt)
@@ -239,22 +243,28 @@ def invoke_ask_model(
             max_tokens = min(8000, max_tokens + attempt * 800)
         try:
             if image_paths and attempt == 0:
-                return client.invoke_json_with_images(
+                try:
+                    with llm_call_context(stage="qa", operation="paper_question_with_images", attempt=attempt + 1):
+                        return client.invoke_json_with_images(
+                            system_prompt=ASK_SYSTEM_PROMPT,
+                            user_prompt=prompt,
+                            image_paths=image_paths,
+                            schema_name="paperlens_paper_question",
+                            schema=ASK_SCHEMA,
+                            max_tokens=max_tokens,
+                            detail=visual_detail,
+                        )
+                except LlmError as exc:
+                    if "image inputs are disabled" not in str(exc):
+                        raise
+            with llm_call_context(stage="qa", operation="paper_question", attempt=attempt + 1):
+                return client.invoke_json(
                     system_prompt=ASK_SYSTEM_PROMPT,
                     user_prompt=prompt,
-                    image_paths=image_paths,
                     schema_name="paperlens_paper_question",
                     schema=ASK_SCHEMA,
                     max_tokens=max_tokens,
-                    detail=visual_detail,
                 )
-            return client.invoke_json(
-                system_prompt=ASK_SYSTEM_PROMPT,
-                user_prompt=prompt,
-                schema_name="paperlens_paper_question",
-                schema=ASK_SCHEMA,
-                max_tokens=max_tokens,
-            )
         except Exception as exc:
             last_error = exc
             continue

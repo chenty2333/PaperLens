@@ -3,7 +3,7 @@
     "kind": "none",
     "api_key_env": "PAPERLENS_API_KEY",
     "timeout_seconds": 120,
-    "max_retries": 5
+    "max_retries": 1
   },
   "budget": {
     "max_usd": 10.0,
@@ -22,7 +22,6 @@
   "output_language": "zh",
   "topic": null,
   "idea": null,
-  "trace_include_sensitive_data": false,
   "keyword_pool": [
     "novel",
     "state-of-the-art",

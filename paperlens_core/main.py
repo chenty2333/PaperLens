@@ -229,7 +229,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "version":
-        print("paperlens-core 0.1.2")
+        print("paperlens-core 0.1.3")
         return 0
     try:
         if args.command == "library":

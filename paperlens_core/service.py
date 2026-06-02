@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import base64
 import json
 import mimetypes
-import re
 import secrets
 import threading
 import time
@@ -20,12 +18,12 @@ from paperlens_core.control import ControlState
 from paperlens_core.engine import PaperLensEngine
 from paperlens_core.library import read_library_records, search_library
 from paperlens_core.protocol import LibraryQuestionRequest, PaperQuestionRequest, RunRequest
+from paperlens_core.workflow.stages import normalize_workflow_stage
 
 
 SERVER_VERSION = "paperlens-core-service.v1"
 INTERNAL_DIR = ".paperlens"
-INLINE_IMAGE_MAX_BYTES = 3_000_000
-INLINE_IMAGE_EXTENSIONS = {".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"}
+MAX_JSON_REQUEST_BYTES = 2_000_000
 
 
 def utc_now() -> str:
@@ -89,9 +87,16 @@ def write_common_headers(handler: BaseHTTPRequestHandler) -> None:
 
 
 def read_request_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
-    length = int(handler.headers.get("Content-Length") or "0")
+    try:
+        length = int(handler.headers.get("Content-Length") or "0")
+    except ValueError as exc:
+        raise ValueError("Invalid Content-Length") from exc
     if length <= 0:
         return {}
+    if length > MAX_JSON_REQUEST_BYTES:
+        raise ValueError(
+            f"JSON request body is too large: {length} bytes exceeds {MAX_JSON_REQUEST_BYTES}"
+        )
     raw = handler.rfile.read(length)
     try:
         value = json.loads(raw.decode("utf-8"))
@@ -144,6 +149,13 @@ def path_from_payload(payload: dict[str, Any], key: str) -> Path:
     if not value:
         raise ValueError(f"Missing required path: {key}")
     return Path(value).expanduser().resolve()
+
+
+def safe_workflow_stage(value: str | None) -> str | None:
+    try:
+        return normalize_workflow_stage(value)
+    except ValueError:
+        return None
 
 
 def output_dir_from_query(query: dict[str, list[str]], current: Path | None) -> Path:
@@ -199,11 +211,47 @@ def public_report_path(output_dir: Path, record: dict[str, Any]) -> str:
     outputs = record.get("outputs") if isinstance(record.get("outputs"), dict) else {}
     report = string_or_none(outputs.get("briefing_md"))
     if report:
-        return report.replace("\\", "/")
+        safe_report = safe_public_report_path(output_dir, report)
+        if safe_report:
+            return safe_report
     paper_id = string_or_none(record.get("paper_id")) or ""
     for path in sorted((output_dir / "papers").glob(f"{paper_id}_*.md")):
         return str(path.relative_to(output_dir)).replace("\\", "/")
     return ""
+
+
+def resolve_output_relative_path(output_dir: Path, relative_path: str) -> Path:
+    if not relative_path:
+        raise ValueError("Missing output-relative path")
+    if "\x00" in relative_path:
+        raise ValueError("Invalid output-relative path")
+    output_dir = output_dir.expanduser().resolve()
+    requested = Path(relative_path)
+    if requested.is_absolute():
+        raise ValueError("Path must be relative to output_dir")
+    target = (output_dir / requested).resolve()
+    try:
+        target.relative_to(output_dir)
+    except ValueError as exc:
+        raise ValueError("Path escapes output_dir") from exc
+    return target
+
+
+def safe_public_report_path(output_dir: Path, report_path: str) -> str:
+    try:
+        target = resolve_output_relative_path(output_dir, report_path)
+    except ValueError:
+        return ""
+    if target.suffix.lower() != ".md":
+        return ""
+    output_dir = output_dir.expanduser().resolve()
+    try:
+        relative = target.relative_to(output_dir)
+    except ValueError:
+        return ""
+    if not relative.parts or relative.parts[0] != "papers":
+        return ""
+    return str(relative).replace("\\", "/")
 
 
 def latest_qa_by_paper(output_dir: Path) -> dict[str, dict[str, Any]]:
@@ -281,6 +329,7 @@ def load_public_workspace(output_dir: Path) -> dict[str, Any]:
 
 
 def load_report(output_dir: Path, paper_id: str) -> dict[str, Any]:
+    output_dir = output_dir.expanduser().resolve()
     workspace = load_public_workspace(output_dir)
     paper = next((item for item in workspace["papers"] if item.get("paper_id") == paper_id), None)
     if not paper:
@@ -288,7 +337,9 @@ def load_report(output_dir: Path, paper_id: str) -> dict[str, Any]:
     report_path = string_or_none(paper.get("report_path"))
     if not report_path:
         raise FileNotFoundError(f"No report for paper_id: {paper_id}")
-    path = (output_dir / report_path).resolve()
+    path = resolve_output_relative_path(output_dir, report_path)
+    if path.suffix.lower() != ".md":
+        raise ValueError("Report path must point to a Markdown file")
     if not path.exists():
         raise FileNotFoundError(f"Report file missing: {path}")
     markdown = path.read_text(encoding="utf-8")
@@ -296,77 +347,8 @@ def load_report(output_dir: Path, paper_id: str) -> dict[str, Any]:
         "paper": paper,
         "path": str(path),
         "base_dir": str(path.parent),
-        "markdown": inline_report_local_images(
-            markdown=markdown,
-            output_dir=output_dir,
-            report_path=path,
-        ),
+        "markdown": markdown,
     }
-
-
-def inline_report_local_images(*, markdown: str, output_dir: Path, report_path: Path) -> str:
-    """Inline local report images for the UI while leaving files on disk unchanged."""
-
-    def replace_html(match: re.Match[str]) -> str:
-        src = match.group("src")
-        data_uri = local_image_data_uri(output_dir=output_dir, report_path=report_path, src=src)
-        if not data_uri:
-            return match.group(0)
-        return f"{match.group('prefix')}{match.group('quote')}{data_uri}{match.group('quote')}"
-
-    def replace_markdown(match: re.Match[str]) -> str:
-        src = match.group("src").strip()
-        data_uri = local_image_data_uri(output_dir=output_dir, report_path=report_path, src=src)
-        if not data_uri:
-            return match.group(0)
-        return f"{match.group('prefix')}{data_uri}{match.group('suffix')}"
-
-    markdown = re.sub(
-        r"(?P<prefix><img\b[^>]*?\bsrc=)(?P<quote>[\"'])(?P<src>[^\"']+)(?P=quote)",
-        replace_html,
-        markdown,
-        flags=re.IGNORECASE,
-    )
-    return re.sub(
-        r"(?P<prefix>!\[[^\]]*\]\()(?P<src>[^)\s]+)(?P<suffix>\))",
-        replace_markdown,
-        markdown,
-    )
-
-
-def local_image_data_uri(*, output_dir: Path, report_path: Path, src: str) -> str | None:
-    if not src or re.match(r"^(?:https?:|data:|blob:)", src, flags=re.IGNORECASE):
-        return None
-    target = resolve_report_local_image(output_dir=output_dir, report_path=report_path, src=src)
-    if not target:
-        return None
-    try:
-        if target.stat().st_size > INLINE_IMAGE_MAX_BYTES:
-            return None
-        mime_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
-        encoded = base64.b64encode(target.read_bytes()).decode("ascii")
-    except OSError:
-        return None
-    return f"data:{mime_type};base64,{encoded}"
-
-
-def resolve_report_local_image(*, output_dir: Path, report_path: Path, src: str) -> Path | None:
-    if "\x00" in src:
-        return None
-    normalized_src = unquote(src).replace("\\", "/")
-    if Path(normalized_src).is_absolute():
-        return None
-    target = (report_path.parent / normalized_src).resolve()
-    output_dir = output_dir.expanduser().resolve()
-    try:
-        target.relative_to(output_dir)
-    except ValueError:
-        return None
-    if target.suffix.lower() not in INLINE_IMAGE_EXTENSIONS:
-        return None
-    if not target.exists() or not target.is_file():
-        return None
-    return target
 
 
 def load_evidence(output_dir: Path, paper_id: str) -> dict[str, Any]:
@@ -384,17 +366,8 @@ def load_evidence(output_dir: Path, paper_id: str) -> dict[str, Any]:
 def resolve_output_asset(output_dir: Path, asset_path: str) -> Path:
     if not asset_path:
         raise ValueError("Missing asset path")
-    if "\x00" in asset_path:
-        raise ValueError("Invalid asset path")
     output_dir = output_dir.expanduser().resolve()
-    requested = Path(asset_path)
-    if requested.is_absolute():
-        raise ValueError("Asset path must be relative to output_dir")
-    target = (output_dir / requested).resolve()
-    try:
-        target.relative_to(output_dir)
-    except ValueError as exc:
-        raise ValueError("Asset path escapes output_dir") from exc
+    target = resolve_output_relative_path(output_dir, asset_path)
     if not target.exists() or not target.is_file():
         raise FileNotFoundError(f"Asset file missing: {asset_path}")
     return target
@@ -516,6 +489,11 @@ class PaperLensServiceState:
             output_dir=output_dir,
         )
         with self._lock:
+            active_job = self.active_job_for_output_dir(output_dir)
+            if active_job:
+                raise ValueError(
+                    f"Output directory is already being processed by job {active_job.job_id}"
+                )
             self.jobs[job_id] = job
         job.events.append(
             {
@@ -606,10 +584,26 @@ class PaperLensServiceState:
         if not original:
             raise KeyError(f"Unknown job: {job_id}")
         retry_payload = dict(original.request_payload)
-        from_stage = string_or_none(payload.get("from_stage")) or original.current_stage
-        if from_stage and from_stage != "queued":
+        from_stage = safe_workflow_stage(
+            string_or_none(payload.get("from_stage")) or original.current_stage
+        )
+        if from_stage:
             retry_payload["from_stage"] = from_stage
+        else:
+            retry_payload.pop("from_stage", None)
         return self.start_read_job(retry_payload)
+
+    def active_job_for_output_dir(self, output_dir: Path) -> ManagedJob | None:
+        resolved = output_dir.expanduser().resolve()
+        for job in self.jobs.values():
+            if job.output_dir == resolved and job.status in {
+                "queued",
+                "running",
+                "paused",
+                "cancelling",
+            }:
+                return job
+        return None
 
     def control_job(self, job_id: str, command: str) -> dict[str, Any]:
         job = self.jobs.get(job_id)
@@ -819,7 +813,7 @@ class PaperLensRequestHandler(BaseHTTPRequestHandler):
         if parts == [] or parts == ["health"]:
             return {"status": "ok", "service": SERVER_VERSION}
         if parts == ["version"]:
-            return {"version": "paperlens-core 0.1.2", "service": SERVER_VERSION}
+            return {"version": "paperlens-core 0.1.3", "service": SERVER_VERSION}
         if parts == ["workspaces", "current"]:
             output_dir = output_dir_from_query(query, self.state.current_output_dir)
             return load_public_workspace(output_dir)

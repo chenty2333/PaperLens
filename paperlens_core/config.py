@@ -27,7 +27,7 @@ class ProviderConfig(BaseModel):
     model: str | None = None
     reasoning_model: str | None = None
     timeout_seconds: int = 120
-    max_retries: int = 5
+    max_retries: int = 1
 
     @field_validator("api_key", "base_url", "model", "reasoning_model")
     @classmethod
@@ -91,7 +91,6 @@ class CoreConfig(BaseModel):
     read_mode: ReadMode = "standard"
     topic: str | None = None
     idea: str | None = None
-    trace_include_sensitive_data: bool = False
 
     @field_validator("concurrency")
     @classmethod
@@ -209,12 +208,3 @@ def load_config(config_path: Path | None, overrides: dict[str, Any]) -> CoreConf
     if not data.get("keyword_pool"):
         data["keyword_pool"] = DEFAULT_KEYWORDS
     return CoreConfig.model_validate(data)
-
-
-def apply_agent_privacy_env(config: CoreConfig) -> None:
-    os.environ.setdefault("OPENAI_AGENTS_DONT_LOG_MODEL_DATA", "1")
-    os.environ.setdefault("OPENAI_AGENTS_DONT_LOG_TOOL_DATA", "1")
-    os.environ.setdefault(
-        "OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA",
-        "1" if config.trace_include_sensitive_data else "0",
-    )

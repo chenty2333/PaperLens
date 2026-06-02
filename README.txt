@@ -28,8 +28,7 @@ Open PaperLens.md first when using raw files. The desktop app reads the same
 output directory and presents the library, capsule, evidence, and chat views.
 
 Security defaults:
-  OPENAI_AGENTS_DONT_LOG_MODEL_DATA=1
-  OPENAI_AGENTS_DONT_LOG_TOOL_DATA=1
-  OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA=0
-
-API keys are not written to config, SQLite, JSONL, or CLI args.
+  - API keys are accepted at runtime and redacted from run config snapshots.
+  - Model-call diagnostics record stage, payload size, usage, status, and request id.
+  - Model prompts and responses are not written to the call ledger.
+  - Local app settings do not persist the API key.

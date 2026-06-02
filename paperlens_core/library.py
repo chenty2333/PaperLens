@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from paperlens_core.agents.llm import JsonLlmClient
+from paperlens_core.agents.llm import JsonLlmClient, llm_call_context
 from paperlens_core.config import CoreConfig
 from paperlens_core.memory_v3 import read_paper_memory_v3
 
@@ -463,7 +463,11 @@ def answer_library_question(
             "cache_hit": False,
         }
     config.validate_agentic_run()
-    client = JsonLlmClient(config.provider)
+    client = JsonLlmClient(
+        config.provider,
+        ledger_path=output_dir / ".paperlens" / "data" / "model_calls.jsonl",
+        run_id=f"library_qa_{hash_text(question)[:12]}",
+    )
     user_prompt = build_library_ask_prompt(
         question=question, matches=matches, chat_history=chat_history or []
     )
@@ -485,13 +489,16 @@ def answer_library_question(
         answer["cache_hit"] = True
         answer["usage"] = {}
         return answer
-    raw = client.invoke_json(
-        system_prompt=LIBRARY_ASK_SYSTEM_PROMPT,
-        user_prompt=user_prompt,
-        schema_name="paperlens_library_question",
-        schema=LIBRARY_ASK_SCHEMA,
-        max_tokens=bounded_env_int("PAPERLENS_LIBRARY_ASK_MAX_TOKENS", default=2600, minimum=1200, maximum=8000),
-    )
+    with llm_call_context(stage="library_qa", operation="library_question"):
+        raw = client.invoke_json(
+            system_prompt=LIBRARY_ASK_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            schema_name="paperlens_library_question",
+            schema=LIBRARY_ASK_SCHEMA,
+            max_tokens=bounded_env_int(
+                "PAPERLENS_LIBRARY_ASK_MAX_TOKENS", default=2600, minimum=1200, maximum=8000
+            ),
+        )
     answer = normalize_library_answer(raw.data)
     answer["cache_hit"] = False
     answer["usage"] = raw.usage

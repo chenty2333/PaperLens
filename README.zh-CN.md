@@ -124,13 +124,7 @@ CI 不需要模型 API key。
 
 PaperLens 的默认设计是避免把 key 写进仓库和输出产物。
 
-```text
-OPENAI_AGENTS_DONT_LOG_MODEL_DATA=1
-OPENAI_AGENTS_DONT_LOG_TOOL_DATA=1
-OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA=0
-```
-
-UI 不会把 API key 写入 `localStorage`。Git 会忽略生成的论文库、报告、sidecar、本地缓存、虚拟环境、构建产物和 `.env` 文件。
+UI 不会把 API key 写入 `localStorage`。Git 会忽略生成的论文库、报告、sidecar、本地缓存、虚拟环境、构建产物和 `.env` 文件。本地模型调用账本只记录请求大小、阶段名、状态和 provider usage metadata，不记录 prompt 正文或 API key。
 
 ## 文档
 

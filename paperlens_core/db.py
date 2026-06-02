@@ -312,3 +312,15 @@ class ArtifactDb:
             (key, json.dumps(value, ensure_ascii=False, default=str)),
         )
         self.conn.commit()
+
+    def get_state(self, key: str, default: Any = None) -> Any:
+        row = self.conn.execute(
+            "SELECT value_json FROM run_state WHERE key=?",
+            (key,),
+        ).fetchone()
+        if not row:
+            return default
+        try:
+            return json.loads(row["value_json"])
+        except json.JSONDecodeError:
+            return default

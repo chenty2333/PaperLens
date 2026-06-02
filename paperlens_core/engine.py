@@ -4,7 +4,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable
 
-from paperlens_core.config import CoreConfig, apply_agent_privacy_env, load_config
+from paperlens_core.config import CoreConfig, load_config
 from paperlens_core.control import ControlState, start_control_listener
 from paperlens_core.events import EventWriter
 from paperlens_core.library import (
@@ -38,9 +38,7 @@ class PaperLensEngine:
     def load_core_config(
         self, *, config_path: Path | None, overrides: dict[str, Any]
     ) -> CoreConfig:
-        config = load_config(config_path, overrides)
-        apply_agent_privacy_env(config)
-        return config
+        return load_config(config_path, overrides)
 
     def run_job(
         self,

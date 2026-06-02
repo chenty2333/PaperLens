@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import json
+import io
 import threading
+import time
 import urllib.error
 import urllib.request
 from urllib.parse import quote
 from pathlib import Path
 
+import pytest
+
+from paperlens_core.protocol import RunResult
 from paperlens_core.service import (
     EventStream,
     PaperLensHttpServer,
@@ -14,6 +19,7 @@ from paperlens_core.service import (
     PaperLensServiceState,
     load_report,
     load_public_workspace,
+    read_request_json,
 )
 from paperlens_core.library import LIBRARY_RECORD_FILENAME, LIBRARY_RECORD_SCHEMA_VERSION
 
@@ -138,20 +144,46 @@ def test_service_serves_only_workspace_assets(tmp_path: Path) -> None:
         server.server_close()
 
 
-def test_load_report_inlines_local_images_for_ui(tmp_path: Path) -> None:
+def test_load_report_preserves_local_images_for_frontend_asset_resolver(tmp_path: Path) -> None:
     write_sample_library(tmp_path)
     image_path = tmp_path / ".paperlens" / "figures" / "p_test" / "figure.png"
     image_path.parent.mkdir(parents=True)
     image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    image_src = "../.paperlens/figures/p_test/figure.png"
     (tmp_path / "papers" / "p_test.md").write_text(
-        '# A Useful Paper\n\n<figure>\n  <img src="../.paperlens/figures/p_test/figure.png" alt="figure">\n</figure>',
+        f'# A Useful Paper\n\n<figure>\n  <img src="{image_src}" alt="figure">\n</figure>',
         encoding="utf-8",
     )
 
     report = load_report(tmp_path, "p_test")
 
-    assert 'src="data:image/png;base64,' in report["markdown"]
-    assert "../.paperlens/figures/p_test/figure.png" not in report["markdown"]
+    assert f'src="{image_src}"' in report["markdown"]
+    assert 'src="data:' not in report["markdown"]
+
+
+def test_workspace_rejects_escaped_report_path(tmp_path: Path) -> None:
+    write_sample_library(tmp_path)
+    outside = tmp_path.parent / "outside.md"
+    outside.write_text("# outside", encoding="utf-8")
+    records_path = tmp_path / ".paperlens" / "library" / LIBRARY_RECORD_FILENAME
+    record = json.loads(records_path.read_text(encoding="utf-8").splitlines()[0])
+    record["outputs"]["briefing_md"] = "../outside.md"
+    records_path.write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    workspace = load_public_workspace(tmp_path)
+
+    assert workspace["papers"][0]["report_path"] == ""
+    with pytest.raises(FileNotFoundError, match="No report"):
+        load_report(tmp_path, "p_test")
+
+
+def test_read_request_json_rejects_oversized_body() -> None:
+    class Handler:
+        headers = {"Content-Length": "2000001"}
+        rfile = io.BytesIO(b"{}")
+
+    with pytest.raises(ValueError, match="too large"):
+        read_request_json(Handler())  # type: ignore[arg-type]
 
 
 def test_event_stream_assigns_sequence_numbers() -> None:
@@ -163,3 +195,59 @@ def test_event_stream_assigns_sequence_numbers() -> None:
 
     assert [event["seq"] for event in events] == [0, 1]
     assert events[1]["data"]["answer"]["answer_markdown"] == "ok"
+
+
+def test_service_rejects_concurrent_read_jobs_for_same_output(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    state = PaperLensServiceState(token="test-token")
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocked_run_job(*_args, **_kwargs):  # noqa: ANN001
+        started.set()
+        release.wait(timeout=5)
+        return RunResult(status="ok", data={})
+
+    state.engine.run_job = blocked_run_job  # type: ignore[method-assign]
+    first = state.start_read_job({"input_dir": str(input_dir), "output_dir": str(output_dir)})
+    assert started.wait(timeout=2)
+
+    try:
+        with pytest.raises(ValueError, match="already being processed"):
+            state.start_read_job({"input_dir": str(input_dir), "output_dir": str(output_dir)})
+    finally:
+        release.set()
+        job = state.jobs[first["job_id"]]
+        if job.thread:
+            job.thread.join(timeout=2)
+
+
+def test_retry_job_ignores_non_workflow_current_stage(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    output_dir = tmp_path / "output"
+    input_dir.mkdir()
+    output_dir.mkdir()
+    state = PaperLensServiceState(token="test-token")
+    captured: list[object] = []
+
+    def run_job(request, **_kwargs):  # noqa: ANN001
+        captured.append(request)
+        return RunResult(status="ok", data={})
+
+    state.engine.run_job = run_job  # type: ignore[method-assign]
+    first = state.start_read_job({"input_dir": str(input_dir), "output_dir": str(output_dir)})
+    deadline = time.time() + 2
+    while state.jobs[first["job_id"]].status not in {"completed", "failed"} and time.time() < deadline:
+        time.sleep(0.01)
+    state.jobs[first["job_id"]].current_stage = "startup"
+
+    retry = state.retry_job(first["job_id"], {})
+    deadline = time.time() + 2
+    while state.jobs[retry["job_id"]].status not in {"completed", "failed"} and time.time() < deadline:
+        time.sleep(0.01)
+
+    assert len(captured) >= 2
+    assert captured[-1].from_stage is None
