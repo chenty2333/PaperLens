@@ -354,8 +354,9 @@ function stageLabel(stage?: string | null) {
     stage_08_evidence_verify: '验证 Memory 证据',
     stage_15_export: '生成报告',
     stage_17_manifest: '收尾保存',
+    idle: '空闲',
   }
-  return labels[String(stage ?? '')] ?? String(stage ?? 'idle')
+  return labels[String(stage ?? '')] ?? String(stage ?? '')
 }
 
 function answerText(answer?: AnswerPayload | null) {
@@ -799,16 +800,6 @@ function App() {
     }
   }
 
-  function setPrompt(kind: 'challenge' | 'evaluation' | 'term' | 'lens') {
-    const prompts = {
-      challenge: '这个结论我不信，回原文核对：',
-      evaluation: '实验部分多看一点：论文具体证明了哪些 claim，哪些不能外推？',
-      term: '解释这个术语，并区分它是论文定义、领域背景，还是 PaperLens 的解释：',
-      lens: '换阅读视角：按实现者 / reviewer / 系统设计视角重新解释这篇论文。',
-    }
-    setQuestion(prompts[kind])
-  }
-
   function beginResize(pane: ResizePane, event: ReactPointerEvent<HTMLDivElement>) {
     event.preventDefault()
     const startX = event.clientX
@@ -1081,12 +1072,12 @@ function App() {
                 <PanelRightClose size={15} />
               </button>
             </div>
-            <section className="job-panel">
+            <section className={`job-panel ${activeJob || jobEvents.length ? 'has-activity' : 'is-idle'}`}>
               <div className="panel-head">
                 <div>
                   <p className="eyebrow">Activity</p>
                   <h3>{activeJob ? statusLabel(activeJob.status) : '无任务'}</h3>
-                  <span>{activeJob ? stageLabel(activeJob.current_stage) : 'idle'}</span>
+                  {activeJob && <span>{stageLabel(activeJob.current_stage)}</span>}
                 </div>
                 {activeJob && (
                   <div className="job-controls">
@@ -1105,15 +1096,16 @@ function App() {
                   </div>
                 )}
               </div>
-              <div className="job-timeline">
-                {jobEvents.slice(-8).map((event, index) => (
-                  <div key={`${event.seq ?? index}-${event.type}`} className={`timeline-event ${event.level ?? 'info'}`}>
-                    <span>{stageLabel(event.stage)}</span>
-                    <p>{event.message ?? event.type}</p>
-                  </div>
-                ))}
-                {!jobEvents.length && <div className="empty">任务事件会显示在这里</div>}
-              </div>
+              {Boolean(activeJob || jobEvents.length) && (
+                <div className="job-timeline">
+                  {jobEvents.slice(-6).map((event, index) => (
+                    <div key={`${event.seq ?? index}-${event.type}`} className={`timeline-event ${event.level ?? 'info'}`}>
+                      <span>{stageLabel(event.stage)}</span>
+                      <p>{event.message ?? event.type}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
             </section>
 
             <section className="chat-panel">
@@ -1142,21 +1134,6 @@ function App() {
                   <ChatBubble key={message.id} message={message} report={report} outputDir={currentOutputDir} service={service} />
                 ))}
                 <div ref={chatEndRef} />
-              </div>
-
-              <div className="quick-actions">
-                <button type="button" title="挑战结论" onClick={() => setPrompt('challenge')}>
-                  挑战
-                </button>
-                <button type="button" title="加深实验" onClick={() => setPrompt('evaluation')}>
-                  实验
-                </button>
-                <button type="button" title="解释术语" onClick={() => setPrompt('term')}>
-                  术语
-                </button>
-                <button type="button" title="换阅读视角" onClick={() => setPrompt('lens')}>
-                  视角
-                </button>
               </div>
 
               <div className="ask-box">
