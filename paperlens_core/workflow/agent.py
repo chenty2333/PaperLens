@@ -1320,9 +1320,9 @@ class PaperLensWorkflow:
             schema=MEMORY_PATCH_SET_SCHEMA,
             max_tokens=bounded_env_int(
                 "PAPERLENS_ROLLING_MEMORY_MAX_TOKENS",
-                default=4000,
-                minimum=1200,
-                maximum=8000,
+                default=40000,
+                minimum=4000,
+                maximum=100000,
             ),
             retry_message=f"Rolling memory retrying for {paper.paper_id}",
             retry_data={"pages": pages},
@@ -3506,9 +3506,9 @@ def generate_report_plan(
             schema=REPORT_PLAN_SCHEMA,
             max_tokens=bounded_env_int(
                 "PAPERLENS_REPORT_PLAN_MAX_TOKENS",
-                default=2400,
-                minimum=1000,
-                maximum=8000,
+                default=12000,
+                minimum=2400,
+                maximum=40000,
             ),
         )
     record_usage(stage, raw.usage)
@@ -3973,15 +3973,15 @@ def report_section_token_budget(section_plan: dict[str, Any]) -> int:
     if report_section_is_mechanism(section_plan):
         return bounded_env_int(
             "PAPERLENS_REPORT_MECHANISM_SECTION_MAX_TOKENS",
-            default=14000,
+            default=40000,
             minimum=3000,
-            maximum=36000,
+            maximum=100000,
         )
     return bounded_env_int(
         "PAPERLENS_REPORT_SECTION_MAX_TOKENS",
-        default=9000,
+        default=24000,
         minimum=2000,
-        maximum=30000,
+        maximum=100000,
     )
 
 

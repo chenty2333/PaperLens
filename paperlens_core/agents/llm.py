@@ -296,7 +296,7 @@ class JsonLlmClient:
         try:
             text, data = parse_chat_completion_json(response, schema_name, schema)
         except LlmError:
-            if not env_flag("PAPERLENS_ALLOW_JSON_RETRY"):
+            if not env_flag("PAPERLENS_ALLOW_JSON_RETRY", default=True):
                 raise
             fallback_payload = chat_json_schema_fallback_payload(
                 payload=payload,
@@ -365,7 +365,7 @@ class JsonLlmClient:
         try:
             text, data = parse_chat_completion_json(response, schema_name, schema)
         except LlmError:
-            if not env_flag("PAPERLENS_ALLOW_JSON_RETRY"):
+            if not env_flag("PAPERLENS_ALLOW_JSON_RETRY", default=True):
                 raise
             fallback_payload = chat_json_schema_fallback_payload_with_images(
                 payload=payload,
@@ -671,7 +671,7 @@ def enforce_request_safety(endpoint: str, payload: dict[str, Any], body_bytes: b
 
     output_limit = payload_completion_limit(payload)
     max_output_limit = bounded_int_env(
-        "PAPERLENS_MAX_COMPLETION_TOKENS", default=12_000, minimum=512, maximum=200_000
+        "PAPERLENS_MAX_COMPLETION_TOKENS", default=100_000, minimum=512, maximum=200_000
     )
     if output_limit is not None and output_limit > max_output_limit:
         raise LlmError(
@@ -926,7 +926,7 @@ def json_retry_completion_minimum(
         "paperlens_library_answer",
     }:
         floor = 3000
-    return max(max_tokens * 2, floor)
+    return min(max(max_tokens * 2, floor), 100_000)
 
 
 def extract_anthropic_text(response: dict[str, Any]) -> str:

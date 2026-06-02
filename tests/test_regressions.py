@@ -1454,8 +1454,8 @@ def test_mimo_thinking_can_be_enabled_for_selected_schema(monkeypatch):
     assert captured[0]["max_tokens"] == 123
 
 
-def test_chat_json_retry_is_opt_in_after_truncation(monkeypatch):
-    monkeypatch.delenv("PAPERLENS_ALLOW_JSON_RETRY", raising=False)
+def test_chat_json_retry_can_be_disabled_after_truncation(monkeypatch):
+    monkeypatch.setenv("PAPERLENS_ALLOW_JSON_RETRY", "0")
     captured: list[dict[str, object]] = []
 
     def fake_post_json(self, endpoint, payload, headers):  # noqa: ANN001
@@ -1499,8 +1499,8 @@ def test_chat_json_retry_is_opt_in_after_truncation(monkeypatch):
     assert len(captured) == 1
 
 
-def test_chat_json_retry_expands_budget_after_truncation_when_enabled(monkeypatch):
-    monkeypatch.setenv("PAPERLENS_ALLOW_JSON_RETRY", "1")
+def test_chat_json_retry_expands_budget_after_truncation_by_default(monkeypatch):
+    monkeypatch.delenv("PAPERLENS_ALLOW_JSON_RETRY", raising=False)
     captured: list[dict[str, object]] = []
     responses = [
         {
@@ -2135,7 +2135,7 @@ def test_rolling_memory_default_completion_budget_is_not_tiny(tmp_path, monkeypa
         total_chunks=1,
     )
 
-    assert captured["max_tokens"] >= 4000
+    assert captured["max_tokens"] >= 40000
     pipeline.db.close()
 
 
