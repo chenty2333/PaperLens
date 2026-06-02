@@ -116,7 +116,7 @@ Windows 安装包 workflow 在 [.github/workflows/windows-installer.yml](.github
 - Python sidecar 构建；
 - Tauri NSIS 安装包构建；
 - 安装包 artifact 上传；
-- `v*` tag 自动发布 GitHub Release。
+- 推送 `v*` tag、`main` 上 `package.json` 版本号变化，或手动运行并选择 `publish_release=true` 时发布 GitHub Release。
 
 CI 不需要模型 API key。
 

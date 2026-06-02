@@ -2,6 +2,17 @@ name: Windows Installer
 
 on:
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Publish or update a GitHub Release after building"
+        required: false
+        default: false
+        type: boolean
+      release_tag:
+        description: "Optional release tag override, for example v0.1.2"
+        required: false
+        default: ""
+        type: string
   pull_request:
     branches:
       - main
@@ -17,10 +28,13 @@ permissions:
 jobs:
   build-windows:
     name: Build PaperLens Windows installer
-    runs-on: windows-latest
+    runs-on: windows-2025-vs2026
     permissions:
       contents: read
     timeout-minutes: 90
+    outputs:
+      release_tag: ${{ steps.release-meta.outputs.release_tag }}
+      should_publish: ${{ steps.release-meta.outputs.should_publish }}
     env:
       CARGO_INCREMENTAL: "0"
       OPENAI_AGENTS_DONT_LOG_MODEL_DATA: "1"
@@ -29,16 +43,51 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release metadata
+        id: release-meta
+        shell: pwsh
+        env:
+          DISPATCH_PUBLISH: ${{ inputs.publish_release || 'false' }}
+          DISPATCH_TAG: ${{ inputs.release_tag || '' }}
+        run: |
+          $version = (Get-Content -LiteralPath "package.json" -Raw | ConvertFrom-Json).version
+          $releaseTag = if ($env:DISPATCH_TAG.Trim()) { $env:DISPATCH_TAG.Trim() } elseif ($env:GITHUB_REF_TYPE -eq "tag") { $env:GITHUB_REF_NAME } else { "v$version" }
+          $shouldPublish = "false"
+
+          if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -like "v*") {
+            $shouldPublish = "true"
+          } elseif ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch" -and $env:DISPATCH_PUBLISH -eq "true") {
+            $shouldPublish = "true"
+          } elseif ($env:GITHUB_EVENT_NAME -eq "push" -and $env:GITHUB_REF -eq "refs/heads/main") {
+            $before = "${{ github.event.before }}"
+            if ($before -and $before -notmatch "^0+$") {
+              try {
+                $oldVersion = (git show "${before}:package.json" | ConvertFrom-Json).version
+                if ($oldVersion -ne $version) {
+                  $shouldPublish = "true"
+                }
+              } catch {
+                Write-Host "Could not read previous package.json version; leaving release publish disabled for this push."
+              }
+            }
+          }
+
+          "release_tag=$releaseTag" >> $env:GITHUB_OUTPUT
+          "should_publish=$shouldPublish" >> $env:GITHUB_OUTPUT
+          "Resolved release_tag=$releaseTag should_publish=$shouldPublish"
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version: "24"
           cache: npm
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -132,7 +181,7 @@ jobs:
           "Installer: $($installer.FullName)"
 
       - name: Upload installer artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: PaperLens-Windows-NSIS
           path: src-tauri/target/release/bundle/nsis/*.exe
@@ -140,8 +189,8 @@ jobs:
           retention-days: 14
 
   publish-release:
-    name: Publish tagged release
-    if: startsWith(github.ref, 'refs/tags/')
+    name: Publish GitHub release
+    if: needs.build-windows.outputs.should_publish == 'true'
     needs: build-windows
     runs-on: ubuntu-latest
     permissions:
@@ -149,7 +198,7 @@ jobs:
 
     steps:
       - name: Download installer artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: PaperLens-Windows-NSIS
           path: release
@@ -160,14 +209,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
+          tag="${{ needs.build-windows.outputs.release_tag }}"
           installer="$(find release -maxdepth 1 -name '*.exe' -print -quit)"
           if [ -z "$installer" ]; then
             echo "No installer found in artifact."
             exit 1
           fi
+          if [ -z "$tag" ]; then
+            echo "No release tag was resolved."
+            exit 1
+          fi
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" "$installer" --clobber
           else
-            gh release create "$tag" "$installer" --title "$tag" --notes "PaperLens $tag"
+            gh release create "$tag" "$installer" --target "$GITHUB_SHA" --title "$tag" --notes "PaperLens $tag"
           fi

@@ -116,7 +116,7 @@ It runs:
 - Python sidecar build;
 - Tauri NSIS installer build;
 - installer artifact upload;
-- tagged release publish for `v*` tags.
+- GitHub Release publish when a `v*` tag is pushed, when `main` changes `package.json` version, or when manually dispatched with `publish_release=true`.
 
 The workflow intentionally does not require model API keys.
 
