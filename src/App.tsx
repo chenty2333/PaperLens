@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react'
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { confirm, message, open } from '@tauri-apps/plugin-dialog'
@@ -22,6 +22,9 @@ import {
   Library,
   Loader2,
   MessageSquareText,
+  PanelLeftClose,
+  PanelLeftOpen,
+  PanelRightClose,
   PanelRightOpen,
   Play,
   RefreshCw,
@@ -34,6 +37,7 @@ import './App.css'
 
 type ProviderKind = 'openai' | 'openai-compatible' | 'anthropic' | 'anthropic-compatible'
 type AskScope = 'paper' | 'library'
+type ResizePane = 'left' | 'right'
 
 type ServiceInfo = {
   baseUrl: string
@@ -305,6 +309,23 @@ function clearPaperLensLocalStorage() {
   }
 }
 
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value))
+}
+
+function loadNumberPreference(key: string, fallback: number) {
+  const raw = localStorage.getItem(key)
+  if (!raw) return fallback
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
+function loadBooleanPreference(key: string, fallback: boolean) {
+  const raw = localStorage.getItem(key)
+  if (!raw) return fallback
+  return raw === '1'
+}
+
 function App() {
   const [service, setService] = useState<ServiceInfo | null>(null)
   const [settings, setSettings] = useState<RunSettings>(loadSettings)
@@ -324,6 +345,11 @@ function App() {
   const [updateStatus, setUpdateStatus] = useState('')
   const [maintenanceStatus, setMaintenanceStatus] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [leftWidth, setLeftWidth] = useState(() => loadNumberPreference('paperLens.layout.leftWidth', 300))
+  const [rightWidth, setRightWidth] = useState(() => loadNumberPreference('paperLens.layout.rightWidth', 360))
+  const [leftSidebarOpen, setLeftSidebarOpen] = useState(() => loadBooleanPreference('paperLens.layout.leftOpen', true))
+  const [rightSidebarOpen, setRightSidebarOpen] = useState(() => loadBooleanPreference('paperLens.layout.rightOpen', true))
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth)
   const chatEndRef = useRef<HTMLDivElement>(null)
 
   const selectedPaper = useMemo(
@@ -332,6 +358,14 @@ function App() {
   )
   const activeJob = jobs.find((job) => job.job_id === activeJobId) ?? jobs[0] ?? null
   const currentOutputDir = workspace?.output_dir || settings.outputDir
+  const effectiveLeftSidebarOpen = leftSidebarOpen && viewportWidth >= 760
+  const effectiveRightSidebarOpen = rightSidebarOpen && viewportWidth >= 1040
+  const layoutLeftWidth = effectiveLeftSidebarOpen
+    ? clamp(leftWidth, 240, Math.max(240, viewportWidth - 720))
+    : 48
+  const layoutRightWidth = effectiveRightSidebarOpen
+    ? clamp(rightWidth, 300, Math.max(300, viewportWidth - layoutLeftWidth - 520))
+    : 48
   const canRun = Boolean(
     service &&
       settings.inputDir &&
@@ -346,6 +380,30 @@ function App() {
   useEffect(() => {
     localStorage.setItem('paperLens.settings', JSON.stringify({ ...settings, apiKey: '' }))
   }, [settings])
+
+  useEffect(() => {
+    localStorage.setItem('paperLens.layout.leftWidth', String(leftWidth))
+  }, [leftWidth])
+
+  useEffect(() => {
+    localStorage.setItem('paperLens.layout.rightWidth', String(rightWidth))
+  }, [rightWidth])
+
+  useEffect(() => {
+    localStorage.setItem('paperLens.layout.leftOpen', leftSidebarOpen ? '1' : '0')
+  }, [leftSidebarOpen])
+
+  useEffect(() => {
+    localStorage.setItem('paperLens.layout.rightOpen', rightSidebarOpen ? '1' : '0')
+  }, [rightSidebarOpen])
+
+  useEffect(() => {
+    function onResize() {
+      setViewportWidth(window.innerWidth)
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
 
   useEffect(() => {
     const unsubs: Array<() => void> = []
@@ -686,92 +744,171 @@ function App() {
     setQuestion(prompts[kind])
   }
 
+  function beginResize(pane: ResizePane, event: ReactPointerEvent<HTMLDivElement>) {
+    event.preventDefault()
+    const startX = event.clientX
+    const startLeftWidth = leftWidth
+    const startRightWidth = rightWidth
+
+    function onPointerMove(moveEvent: PointerEvent) {
+      if (pane === 'left') {
+        setLeftWidth(clamp(startLeftWidth + moveEvent.clientX - startX, 240, 520))
+      } else {
+        setRightWidth(clamp(startRightWidth - (moveEvent.clientX - startX), 300, 620))
+      }
+    }
+
+    function onPointerUp() {
+      window.removeEventListener('pointermove', onPointerMove)
+      window.removeEventListener('pointerup', onPointerUp)
+      document.body.classList.remove('resizing-layout')
+    }
+
+    document.body.classList.add('resizing-layout')
+    window.addEventListener('pointermove', onPointerMove)
+    window.addEventListener('pointerup', onPointerUp, { once: true })
+  }
+
   return (
-    <main className="app-shell">
+    <main
+      className={`app-shell ${effectiveLeftSidebarOpen ? '' : 'left-collapsed'} ${effectiveRightSidebarOpen ? '' : 'right-collapsed'}`}
+      style={{
+        gridTemplateColumns: `${layoutLeftWidth}px ${effectiveLeftSidebarOpen ? 4 : 0}px minmax(0, 1fr) ${effectiveRightSidebarOpen ? 4 : 0}px ${layoutRightWidth}px`,
+      }}
+    >
       <aside className="workspace-panel">
-        <header className="workspace-head">
-          <div className="brand">
+        {!effectiveLeftSidebarOpen ? (
+          <div className="collapsed-rail">
             <div className="mark">PL</div>
-            <div>
-              <h1>PaperLens</h1>
-              <span>{service ? 'Core connected' : 'Starting core'}</span>
-            </div>
+            <button
+              type="button"
+              className="icon-button"
+              title="展开侧栏"
+              aria-label="展开侧栏"
+              onClick={() => setLeftSidebarOpen(true)}
+            >
+              <PanelLeftOpen size={17} />
+            </button>
+            <button
+              type="button"
+              className="icon-button"
+              title="设置"
+              aria-label="设置"
+              onClick={() => {
+                setLeftSidebarOpen(true)
+                setSettingsOpen(true)
+              }}
+            >
+              <Settings2 size={17} />
+            </button>
           </div>
-          <button
-            type="button"
-            className="icon-button"
-            aria-label="Settings"
-            onClick={() => setSettingsOpen((value) => !value)}
-          >
-            <Settings2 size={17} />
-          </button>
-        </header>
+        ) : (
+          <>
+            <header className="workspace-head">
+              <div className="brand">
+                <div className="mark">PL</div>
+                <div>
+                  <h1>PaperLens</h1>
+                  <span>{service ? 'Core connected' : 'Starting core'}</span>
+                </div>
+              </div>
+              <div className="workspace-tools">
+                <button
+                  type="button"
+                  className="icon-button"
+                  aria-label="Settings"
+                  title="设置"
+                  onClick={() => setSettingsOpen((value) => !value)}
+                >
+                  <Settings2 size={17} />
+                </button>
+                <button
+                  type="button"
+                  className="icon-button"
+                  aria-label="折叠侧栏"
+                  title="折叠侧栏"
+                  onClick={() => setLeftSidebarOpen(false)}
+                >
+                  <PanelLeftClose size={17} />
+                </button>
+              </div>
+            </header>
 
-        <div className="primary-actions">
-          <button type="button" className="primary" disabled={!canRun} onClick={startReadJob}>
-            <Play size={16} /> 读论文
-          </button>
-          <button
-            type="button"
-            className="icon-button"
-            title="刷新"
-            aria-label="Refresh"
-            onClick={() => openWorkspace()}
-            disabled={!settings.outputDir || loading}
-          >
-            {loading ? <Loader2 className="spinning" size={15} /> : <RefreshCw size={15} />}
-          </button>
-        </div>
-
-        {settingsOpen && (
-          <SettingsPanel
-            settings={settings}
-            update={update}
-            pickDirectory={pickDirectory}
-            openWorkspace={openWorkspace}
-            loading={loading}
-            updateBusy={updateBusy}
-            updateStatus={updateStatus}
-            maintenanceStatus={maintenanceStatus}
-            checkForUpdates={checkForUpdates}
-            clearLocalData={clearLocalData}
-            clearWorkspace={clearWorkspace}
-            canClearWorkspace={Boolean(currentOutputDir)}
-          />
-        )}
-
-        <section className="library-section">
-          <div className="section-title">
-            <Library size={16} />
-            <span>Library</span>
-            <small>{workspace?.paper_count ?? 0}</small>
-          </div>
-          <div className="paper-list">
-            {!workspace?.papers.length && <div className="empty">选择输出目录后显示已读论文</div>}
-            {workspace?.papers.map((paper) => (
-              <button
-                key={paper.paper_id}
-                type="button"
-                className={paper.paper_id === selectedPaper?.paper_id ? 'paper-card active' : 'paper-card'}
-                onClick={() => setSelectedPaperId(paper.paper_id)}
-              >
-                <span className="paper-meta">
-                  <strong>{paper.grade || '—'}</strong>
-                  {paper.source?.year ? <span>{paper.source.year}</span> : null}
-                  {paper.qa?.count ? <span>{paper.qa.count} QA</span> : null}
-                </span>
-                <span className="paper-title">{paper.title}</span>
-                {paper.brief ? <span className="paper-brief">{paper.brief}</span> : null}
-                <span className="concept-row">
-                  {(paper.concepts ?? paper.tags ?? []).slice(0, 3).map((term) => (
-                    <span key={term}>{term}</span>
-                  ))}
-                </span>
+            <div className="primary-actions">
+              <button type="button" className="primary" disabled={!canRun} onClick={startReadJob}>
+                <Play size={16} /> 读论文
               </button>
-            ))}
-          </div>
-        </section>
+              <button
+                type="button"
+                className="icon-button"
+                title="刷新"
+                aria-label="Refresh"
+                onClick={() => openWorkspace()}
+                disabled={!settings.outputDir || loading}
+              >
+                {loading ? <Loader2 className="spinning" size={15} /> : <RefreshCw size={15} />}
+              </button>
+            </div>
+
+            {settingsOpen && (
+              <SettingsPanel
+                settings={settings}
+                update={update}
+                pickDirectory={pickDirectory}
+                openWorkspace={openWorkspace}
+                loading={loading}
+                updateBusy={updateBusy}
+                updateStatus={updateStatus}
+                maintenanceStatus={maintenanceStatus}
+                checkForUpdates={checkForUpdates}
+                clearLocalData={clearLocalData}
+                clearWorkspace={clearWorkspace}
+                canClearWorkspace={Boolean(currentOutputDir)}
+              />
+            )}
+
+            <section className="library-section">
+              <div className="section-title">
+                <Library size={16} />
+                <span>Library</span>
+                <small>{workspace?.paper_count ?? 0}</small>
+              </div>
+              <div className="paper-list">
+                {!workspace?.papers.length && <div className="empty">选择输出目录后显示已读论文</div>}
+                {workspace?.papers.map((paper) => (
+                  <button
+                    key={paper.paper_id}
+                    type="button"
+                    className={paper.paper_id === selectedPaper?.paper_id ? 'paper-card active' : 'paper-card'}
+                    onClick={() => setSelectedPaperId(paper.paper_id)}
+                  >
+                    <span className="paper-meta">
+                      <strong>{paper.grade || '—'}</strong>
+                      {paper.source?.year ? <span>{paper.source.year}</span> : null}
+                      {paper.qa?.count ? <span>{paper.qa.count} QA</span> : null}
+                    </span>
+                    <span className="paper-title">{paper.title}</span>
+                    {paper.brief ? <span className="paper-brief">{paper.brief}</span> : null}
+                    <span className="concept-row">
+                      {(paper.concepts ?? paper.tags ?? []).slice(0, 3).map((term) => (
+                        <span key={term}>{term}</span>
+                      ))}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </section>
+          </>
+        )}
       </aside>
+      {effectiveLeftSidebarOpen && (
+        <div
+          className="resize-handle left-resize"
+          role="separator"
+          aria-label="调整左侧栏宽度"
+          onPointerDown={(event) => beginResize('left', event)}
+        />
+      )}
 
       <section className="main-stage">
         <header className="paper-toolbar">
@@ -790,6 +927,11 @@ function App() {
             )}
           </div>
           <div className="reader-actions">
+            {!effectiveLeftSidebarOpen && (
+              <button type="button" className="icon-button" title="展开左侧栏" onClick={() => setLeftSidebarOpen(true)}>
+                <PanelLeftOpen size={16} />
+              </button>
+            )}
             {selectedPaper?.report_file && (
               <button type="button" className="icon-text-button" onClick={() => openPath(selectedPaper.report_file!)}>
                 <FileText size={16} /> Markdown
@@ -798,6 +940,11 @@ function App() {
             <button type="button" className={evidenceOpen ? 'active-button' : ''} onClick={() => setEvidenceOpen((value) => !value)}>
               <PanelRightOpen size={16} /> Evidence
             </button>
+            {!effectiveRightSidebarOpen && (
+              <button type="button" className="icon-button" title="展开右侧栏" onClick={() => setRightSidebarOpen(true)}>
+                <PanelRightOpen size={16} />
+              </button>
+            )}
           </div>
         </header>
 
@@ -824,102 +971,147 @@ function App() {
           </aside>
         )}
       </section>
+      {effectiveRightSidebarOpen && (
+        <div
+          className="resize-handle right-resize"
+          role="separator"
+          aria-label="调整右侧栏宽度"
+          onPointerDown={(event) => beginResize('right', event)}
+        />
+      )}
 
       <aside className="workbench-panel">
-        <section className="job-panel">
-          <div className="panel-head">
-            <div>
-              <p className="eyebrow">Activity</p>
-              <h3>{activeJob ? statusLabel(activeJob.status) : '无任务'}</h3>
-              <span>{activeJob ? stageLabel(activeJob.current_stage) : 'idle'}</span>
-            </div>
-            {activeJob && (
-              <div className="job-controls">
-                <button type="button" className="icon-button small" aria-label="Retry" onClick={() => controlJob(activeJob.job_id, 'retry')}>
-                  <RotateCcw size={14} />
-                </button>
-                <button
-                  type="button"
-                  className="icon-button small"
-                  aria-label="Stop"
-                  disabled={activeJob.status !== 'running'}
-                  onClick={() => controlJob(activeJob.job_id, 'cancel')}
-                >
-                  <Square size={14} />
-                </button>
-              </div>
-            )}
-          </div>
-          <div className="job-timeline">
-            {jobEvents.slice(-8).map((event, index) => (
-              <div key={`${event.seq ?? index}-${event.type}`} className={`timeline-event ${event.level ?? 'info'}`}>
-                <span>{stageLabel(event.stage)}</span>
-                <p>{event.message ?? event.type}</p>
-              </div>
-            ))}
-            {!jobEvents.length && <div className="empty">任务事件会显示在这里</div>}
-          </div>
-        </section>
-
-        <section className="chat-panel">
-          <div className="chat-head">
-            <div>
-              <p className="eyebrow">Chat</p>
-              <h3>{chatScope === 'library' ? '问整个 Library' : '问当前论文'}</h3>
-            </div>
-            <div className="segmented">
-              <button type="button" className={chatScope === 'paper' ? 'active' : ''} onClick={() => setChatScope('paper')}>
-                Paper
-              </button>
-              <button type="button" className={chatScope === 'library' ? 'active' : ''} onClick={() => setChatScope('library')}>
-                Library
-              </button>
-            </div>
-          </div>
-
-          <div className="chat-log">
-            {!chatMessages.length && (
-              <div className="empty">
-                暂无对话
-              </div>
-            )}
-            {chatMessages.map((message) => (
-              <ChatBubble key={message.id} message={message} report={report} outputDir={currentOutputDir} />
-            ))}
-            <div ref={chatEndRef} />
-          </div>
-
-          <div className="quick-actions">
-            <button type="button" title="挑战结论" onClick={() => setPrompt('challenge')}>
-              挑战
-            </button>
-            <button type="button" title="加深实验" onClick={() => setPrompt('evaluation')}>
-              实验
-            </button>
-            <button type="button" title="解释术语" onClick={() => setPrompt('term')}>
-              术语
-            </button>
-            <button type="button" title="换阅读视角" onClick={() => setPrompt('lens')}>
-              视角
-            </button>
-          </div>
-
-          <div className="ask-box">
-            <textarea
-              value={question}
-              onChange={(event) => setQuestion(event.target.value)}
-              placeholder={chatScope === 'library' ? '问本地已读论文库...' : '问当前论文...'}
-            />
+        {!effectiveRightSidebarOpen ? (
+          <div className="collapsed-rail right">
             <button
               type="button"
-              className="primary"
-              disabled={!question.trim() || !service || !settings.apiKey || !settings.model}
-              onClick={ask}
+              className="icon-button"
+              title="展开 Chat"
+              aria-label="展开 Chat"
+              onClick={() => setRightSidebarOpen(true)}
             >
-              <MessageSquareText size={16} /> 发送
+              <PanelRightOpen size={17} />
+            </button>
+            <button
+              type="button"
+              className="icon-button"
+              title="问答"
+              aria-label="问答"
+              onClick={() => setRightSidebarOpen(true)}
+            >
+              <MessageSquareText size={17} />
             </button>
           </div>
-        </section>
+        ) : (
+          <>
+            <div className="side-panel-titlebar">
+              <span>Workbench</span>
+              <button
+                type="button"
+                className="icon-button small"
+                title="折叠右侧栏"
+                aria-label="折叠右侧栏"
+                onClick={() => setRightSidebarOpen(false)}
+              >
+                <PanelRightClose size={15} />
+              </button>
+            </div>
+            <section className="job-panel">
+              <div className="panel-head">
+                <div>
+                  <p className="eyebrow">Activity</p>
+                  <h3>{activeJob ? statusLabel(activeJob.status) : '无任务'}</h3>
+                  <span>{activeJob ? stageLabel(activeJob.current_stage) : 'idle'}</span>
+                </div>
+                {activeJob && (
+                  <div className="job-controls">
+                    <button type="button" className="icon-button small" aria-label="Retry" onClick={() => controlJob(activeJob.job_id, 'retry')}>
+                      <RotateCcw size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-button small"
+                      aria-label="Stop"
+                      disabled={activeJob.status !== 'running'}
+                      onClick={() => controlJob(activeJob.job_id, 'cancel')}
+                    >
+                      <Square size={14} />
+                    </button>
+                  </div>
+                )}
+              </div>
+              <div className="job-timeline">
+                {jobEvents.slice(-8).map((event, index) => (
+                  <div key={`${event.seq ?? index}-${event.type}`} className={`timeline-event ${event.level ?? 'info'}`}>
+                    <span>{stageLabel(event.stage)}</span>
+                    <p>{event.message ?? event.type}</p>
+                  </div>
+                ))}
+                {!jobEvents.length && <div className="empty">任务事件会显示在这里</div>}
+              </div>
+            </section>
+
+            <section className="chat-panel">
+              <div className="chat-head">
+                <div>
+                  <p className="eyebrow">Chat</p>
+                  <h3>{chatScope === 'library' ? '问整个 Library' : '问当前论文'}</h3>
+                </div>
+                <div className="segmented">
+                  <button type="button" className={chatScope === 'paper' ? 'active' : ''} onClick={() => setChatScope('paper')}>
+                    Paper
+                  </button>
+                  <button type="button" className={chatScope === 'library' ? 'active' : ''} onClick={() => setChatScope('library')}>
+                    Library
+                  </button>
+                </div>
+              </div>
+
+              <div className="chat-log">
+                {!chatMessages.length && (
+                  <div className="empty">
+                    暂无对话
+                  </div>
+                )}
+                {chatMessages.map((message) => (
+                  <ChatBubble key={message.id} message={message} report={report} outputDir={currentOutputDir} />
+                ))}
+                <div ref={chatEndRef} />
+              </div>
+
+              <div className="quick-actions">
+                <button type="button" title="挑战结论" onClick={() => setPrompt('challenge')}>
+                  挑战
+                </button>
+                <button type="button" title="加深实验" onClick={() => setPrompt('evaluation')}>
+                  实验
+                </button>
+                <button type="button" title="解释术语" onClick={() => setPrompt('term')}>
+                  术语
+                </button>
+                <button type="button" title="换阅读视角" onClick={() => setPrompt('lens')}>
+                  视角
+                </button>
+              </div>
+
+              <div className="ask-box">
+                <textarea
+                  value={question}
+                  onChange={(event) => setQuestion(event.target.value)}
+                  placeholder={chatScope === 'library' ? '问本地已读论文库...' : '问当前论文...'}
+                />
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={!question.trim() || !service || !settings.apiKey || !settings.model}
+                  onClick={ask}
+                >
+                  <MessageSquareText size={16} /> 发送
+                </button>
+              </div>
+            </section>
+          </>
+        )}
       </aside>
     </main>
   )
