@@ -96,6 +96,7 @@ jobs:
           "release_tag=$releaseTag" >> $env:GITHUB_OUTPUT
           "should_publish=$shouldPublish" >> $env:GITHUB_OUTPUT
           "Resolved release_tag=$releaseTag should_publish=$shouldPublish"
+          exit 0
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
@@ -227,6 +228,7 @@ jobs:
         run: |
           set -euo pipefail
           tag="${{ needs.build-windows.outputs.release_tag }}"
+          repo="${GITHUB_REPOSITORY:?}"
           installer="$(find release -maxdepth 1 -name '*.exe' -print -quit)"
           if [ -z "$installer" ]; then
             echo "No installer found in artifact."
@@ -236,8 +238,8 @@ jobs:
             echo "No release tag was resolved."
             exit 1
           fi
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "$installer" --clobber
+          if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+            gh release upload "$tag" "$installer" --repo "$repo" --clobber
           else
-            gh release create "$tag" "$installer" --target "$GITHUB_SHA" --title "$tag" --notes "PaperLens $tag"
+            gh release create "$tag" "$installer" --repo "$repo" --target "$GITHUB_SHA" --title "$tag" --notes "PaperLens $tag"
           fi
