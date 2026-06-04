@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 from pathlib import Path
 from typing import Any
 
-from paperlens_core.agents.llm import JsonLlmClient, LlmError, llm_call_context
+from paperlens_core.agent_loop import AgentLoop, PaperToolRegistry
+from paperlens_core.agents.llm import JsonLlmClient
 from paperlens_core.config import CoreConfig
 from paperlens_core.library import read_library_records
 from paperlens_core.memory_v3 import (
@@ -19,28 +19,17 @@ from paperlens_core.runtime import context_pack_prompt
 
 
 ASK_SYSTEM_PROMPT = """
-You answer questions about one paper for PaperLens.
-Use the available PaperMemoryV3 claim/evidence IR first when present, then the library record,
-parsed page excerpts, and attached page images if present. Reports are orientation material, not
-primary facts.
-Use PaperMemoryV3 conceptual_bridge when present, but do not let paper evidence over-constrain
-prerequisite explanations. If the user asks for basic concepts, notation intuition, analogies,
-or implementation-style examples, act as an expert tutor: explain the background knowledge needed
-to understand the paper, then connect it back to the paper. Mark that material as background,
-not as a paper claim.
-Always separate paper claims, PaperLens inferences, background knowledge, and evidence limits in
-source_attribution. If you explain background knowledge that is not a paper claim, clearly label it
-as background. If the evidence is not enough, say so, set confidence low, and record the limitation.
-Answer naturally at the depth needed by the user's question. For implementation, notation, formula,
-or code questions, include complete and readable snippets/examples instead of compressing them away.
-Cite page numbers when you rely on page excerpts.
-Use user-facing wording for limits, such as "automatic reading evidence" or "the indexed paper
-evidence"; never expose internal wording about excerpts being supplied by the system or user.
-Return JSON only.
+You are PaperLens QA.
+Answer the user's question clearly. Use paper tools whenever the answer needs original-paper evidence.
+For prerequisite/background questions, teach the concept first, then connect it back to the paper.
+Separate paper claims, PaperLens inference, background knowledge, and evidence limits.
+If a background explanation is useful, label it as background knowledge, not a paper claim.
+Use source_attribution to record those boundaries.
+Return final_json matching the QA schema when done.
 """.strip()
 
 
-ASK_PROMPT_VERSION = "qa-v10-background-thread"
+ASK_PROMPT_VERSION = "qa-agent-v1"
 
 
 ASK_SCHEMA: dict[str, Any] = {
@@ -48,8 +37,8 @@ ASK_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["answer_markdown", "cited_pages", "confidence", "source_attribution"],
     "properties": {
-        "answer_markdown": {"type": "string", "maxLength": 6000},
-        "cited_pages": {"type": "array", "maxItems": 8, "items": {"type": "integer", "minimum": 1}},
+        "answer_markdown": {"type": "string"},
+        "cited_pages": {"type": "array", "items": {"type": "integer", "minimum": 1}},
         "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
         "source_attribution": {
             "type": "object",
@@ -61,10 +50,10 @@ ASK_SCHEMA: dict[str, Any] = {
                 "evidence_limits",
             ],
             "properties": {
-                "paper_claims": {"type": "array", "maxItems": 6, "items": {"type": "string"}},
-                "paperlens_inferences": {"type": "array", "maxItems": 6, "items": {"type": "string"}},
-                "background_context": {"type": "array", "maxItems": 6, "items": {"type": "string"}},
-                "evidence_limits": {"type": "array", "maxItems": 6, "items": {"type": "string"}},
+                "paper_claims": {"type": "array", "items": {"type": "string"}},
+                "paperlens_inferences": {"type": "array", "items": {"type": "string"}},
+                "background_context": {"type": "array", "items": {"type": "string"}},
+                "evidence_limits": {"type": "array", "items": {"type": "string"}},
             },
         },
     },
@@ -196,24 +185,37 @@ def answer_question(
             agent_context=agent_context,
         )
         return answer
-    raw = invoke_ask_model(
+    result = run_paper_qa_agent(
         client=client,
+        output_dir=output_dir,
+        paper_id=resolved_paper_id,
+        title=string_or_empty(
+            (paper_memory_v3.get("metadata") or {}).get("title")
+            if isinstance(paper_memory_v3.get("metadata"), dict)
+            else None
+        ),
+        question=question,
+        question_type=question_type,
+        chat_history=chat_history or [],
+        paper_memory_v3=paper_memory_v3,
+        library_record=library_record,
+        layout_pages=layout_pages,
+        selected_pages=pages,
+        agent_context=agent_context,
         user_prompt=user_prompt,
-        image_paths=image_paths,
-        visual_detail=config.visual_detail,
     )
-    answer = normalize_answer(raw.data)
+    answer = normalize_answer(result.final)
     answer["paper_id"] = resolved_paper_id
-    answer["usage"] = raw.usage
+    answer["usage"] = result.usage
     answer["cache_hit"] = False
     answer["question_type"] = question_type
     write_ask_cache(
         cache_path,
         {
-            "data": raw.data,
-            "usage": raw.usage,
-            "request_id": raw.request_id,
-            "endpoint": raw.endpoint,
+            "data": result.final,
+            "usage": result.usage,
+            "request_ids": result.request_ids,
+            "endpoint": "agent_loop",
         },
     )
     write_qa_trace(
@@ -227,67 +229,66 @@ def answer_question(
     return answer
 
 
-def invoke_ask_model(
+def run_paper_qa_agent(
     *,
     client: JsonLlmClient,
+    output_dir: Path,
+    paper_id: str,
+    title: str,
+    question: str,
+    question_type: str,
+    chat_history: list[dict[str, Any]],
+    paper_memory_v3: dict[str, Any],
+    library_record: dict[str, Any],
+    layout_pages: list[dict[str, Any]],
+    selected_pages: list[dict[str, Any]],
+    agent_context: dict[str, Any],
     user_prompt: str,
-    image_paths: list[Path],
-    visual_detail: str,
 ) -> Any:
-    attempts = bounded_env_int("PAPERLENS_ASK_RETRIES", default=1, minimum=1, maximum=5)
-    last_error: Exception | None = None
-    for attempt in range(attempts):
-        prompt = user_prompt if attempt == 0 else user_prompt + ask_retry_suffix(attempt)
-        max_tokens = bounded_env_int("PAPERLENS_ASK_MAX_TOKENS", default=2600, minimum=1200, maximum=8000)
-        if attempt:
-            max_tokens = min(8000, max_tokens + attempt * 800)
-        try:
-            if image_paths and attempt == 0:
-                try:
-                    with llm_call_context(stage="qa", operation="paper_question_with_images", attempt=attempt + 1):
-                        return client.invoke_json_with_images(
-                            system_prompt=ASK_SYSTEM_PROMPT,
-                            user_prompt=prompt,
-                            image_paths=image_paths,
-                            schema_name="paperlens_paper_question",
-                            schema=ASK_SCHEMA,
-                            max_tokens=max_tokens,
-                            detail=visual_detail,
-                        )
-                except LlmError as exc:
-                    if "image inputs are disabled" not in str(exc):
-                        raise
-            with llm_call_context(stage="qa", operation="paper_question", attempt=attempt + 1):
-                return client.invoke_json(
-                    system_prompt=ASK_SYSTEM_PROMPT,
-                    user_prompt=prompt,
-                    schema_name="paperlens_paper_question",
-                    schema=ASK_SCHEMA,
-                    max_tokens=max_tokens,
-                )
-        except Exception as exc:
-            last_error = exc
-            continue
-    if last_error:
-        raise last_error
-    raise RuntimeError("PaperLens QA model call failed")
-
-
-def ask_retry_suffix(attempt: int) -> str:
-    return (
-        "\n\nRetry instruction: the previous answer did not parse as the required JSON object. "
-        "Return exactly one JSON object with keys answer_markdown, cited_pages, confidence, and "
-        "source_attribution. Do not wrap it in Markdown fences and do not add any prose outside JSON. "
-        f"Retry attempt: {attempt + 1}."
+    runtime = PaperLensRuntime(artifacts=layout_pages)
+    tools = PaperToolRegistry(
+        runtime=runtime,
+        paper_id=paper_id,
+        title=title,
+        memory=paper_memory_v3,
+        layout_pages=layout_pages,
     )
-
-
-def bounded_env_int(name: str, *, default: int, minimum: int, maximum: int) -> int:
-    try:
-        value = int(os.getenv(name, str(default)))
-    except ValueError:
-        value = default
-    return max(minimum, min(value, maximum))
+    page_hints = [
+        {
+            "page_no": page.get("page_no"),
+            "text": normalize_text(str(page.get("text") or ""), limit=900),
+            "captions": (page.get("captions") or [])[:4],
+            "visual_notes": (page.get("visual_notes") or [])[:3],
+        }
+        for page in selected_pages[:6]
+    ]
+    loop = AgentLoop(
+        client=client,
+        tools=tools,
+        session_name="paper_qa",
+        objective=(
+            "Answer the current paper question. Use background knowledge freely for teaching, "
+            "but use paper tools before making paper-specific claims."
+        ),
+        final_schema_name="paperlens_paper_question",
+        final_schema=ASK_SCHEMA,
+        stage="qa",
+        paper_id=paper_id,
+        trace_path=paperlens_data_dir(output_dir) / "agent_trace.jsonl",
+        system_prompt=ASK_SYSTEM_PROMPT,
+    )
+    return loop.run(
+        initial_context={
+            "question": question,
+            "question_type": question_type,
+            "recent_chat_history": normalize_chat_history(chat_history),
+            "paper_memory_v3_ir": memory_v3_prompt_view(paper_memory_v3),
+            "paperlens_library_record": library_record,
+            "initial_page_hints": page_hints,
+            "legacy_context_pack": agent_context,
+            "legacy_prompt_for_compatibility": user_prompt,
+        }
+    )
 
 
 def ask_cache_path(output_dir: Path, paper_id: str, key_payload: dict[str, Any]) -> Path:

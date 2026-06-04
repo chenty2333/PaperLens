@@ -191,9 +191,6 @@ def config_overrides_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
             or string_or_none(provider.get("api_key_env"))
             or "PAPERLENS_API_KEY",
         },
-        "budget": {"max_usd": float_or_none(payload.get("budget"))}
-        if payload.get("budget") is not None
-        else None,
         "concurrency": int_or_default(payload.get("concurrency"), 1)
         if payload.get("concurrency") is not None
         else None,
@@ -813,7 +810,7 @@ class PaperLensRequestHandler(BaseHTTPRequestHandler):
         if parts == [] or parts == ["health"]:
             return {"status": "ok", "service": SERVER_VERSION}
         if parts == ["version"]:
-            return {"version": "paperlens-core 0.1.3", "service": SERVER_VERSION}
+            return {"version": "paperlens-core 0.1.4", "service": SERVER_VERSION}
         if parts == ["workspaces", "current"]:
             output_dir = output_dir_from_query(query, self.state.current_output_dir)
             return load_public_workspace(output_dir)

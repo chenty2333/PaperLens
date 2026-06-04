@@ -14,11 +14,6 @@ class BudgetSnapshot:
     output_tokens: int = 0
     estimated_usd: float = 0.0
     calls: int = 0
-    warned: bool = False
-
-
-class BudgetExceeded(RuntimeError):
-    pass
 
 
 class BudgetManager:
@@ -63,20 +58,6 @@ class BudgetManager:
                 + cached_input_tokens * self.config.cached_input_token_usd_per_million
                 + output_tokens * self.config.output_token_usd_per_million
             ) / 1_000_000
-            if (
-                self.config.max_usd > 0
-                and not self.snapshot.warned
-                and self.snapshot.estimated_usd >= self.config.max_usd * self.config.warn_at_ratio
-            ):
-                self.snapshot.warned = True
-            if (
-                self.config.hard_stop
-                and self.config.max_usd > 0
-                and self.snapshot.estimated_usd > self.config.max_usd
-            ):
-                raise BudgetExceeded(
-                    f"Budget exceeded: estimated ${self.snapshot.estimated_usd:.4f} > ${self.config.max_usd:.4f}"
-                )
             return self.snapshot
 
     def public_dict(self) -> dict[str, Any]:
@@ -86,6 +67,4 @@ class BudgetManager:
             "output_tokens": self.snapshot.output_tokens,
             "estimated_usd": round(self.snapshot.estimated_usd, 6),
             "calls": self.snapshot.calls,
-            "max_usd": self.config.max_usd,
-            "warned": self.snapshot.warned,
         }

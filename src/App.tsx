@@ -63,7 +63,6 @@ type RunSettings = {
   apiKey: string
   model: string
   reasoningModel: string
-  budget: string
   concurrency: string
   outputLanguage: 'zh' | 'en'
   readMode: 'standard'
@@ -213,7 +212,6 @@ const defaultSettings: RunSettings = {
   apiKey: '',
   model: '',
   reasoningModel: '',
-  budget: '10',
   concurrency: '1',
   outputLanguage: 'zh',
   readMode: 'standard',
@@ -824,7 +822,6 @@ function App() {
       api_key: settings.apiKey,
       model: settings.model || null,
       reasoning_model: settings.reasoningModel || null,
-      budget: Number(settings.budget || '0') || null,
       concurrency: Number(settings.concurrency || '1') || 1,
       output_language: settings.outputLanguage,
       read_mode: settings.readMode,
@@ -1504,10 +1501,6 @@ function SettingsPanel({
         </div>
       </div>
       <div className="settings-row">
-        <div className="field">
-          <label>Budget</label>
-          <input type="number" min="0" value={settings.budget} onChange={(event) => update('budget', event.target.value)} />
-        </div>
         <div className="field">
           <label>Concurrency</label>
           <input type="number" min="1" max="16" value={settings.concurrency} onChange={(event) => update('concurrency', event.target.value)} />

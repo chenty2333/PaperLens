@@ -72,7 +72,7 @@ class JsonLlmClient:
         user_prompt: str,
         schema_name: str,
         schema: dict[str, Any],
-        max_tokens: int = 1400,
+        max_tokens: int | None = None,
     ) -> LlmJsonResult:
         api_key = self._validate_request_config()
         if self.config.kind in {"openai", "openai-compatible"}:
@@ -111,7 +111,7 @@ class JsonLlmClient:
         image_paths: list[Path],
         schema_name: str,
         schema: dict[str, Any],
-        max_tokens: int = 1800,
+        max_tokens: int | None = None,
         detail: str = "high",
     ) -> LlmJsonResult:
         if not env_flag("PAPERLENS_ALLOW_IMAGE_INPUTS", default=False):
@@ -167,14 +167,13 @@ class JsonLlmClient:
         user_prompt: str,
         schema_name: str,
         schema: dict[str, Any],
-        max_tokens: int,
+        max_tokens: int | None,
     ) -> LlmJsonResult:
         endpoint = f"{self._base_url('https://api.openai.com/v1')}/responses"
         payload = {
             "model": self.config.request_model(),
             "instructions": system_prompt,
             "input": user_prompt,
-            "max_output_tokens": max_tokens,
             "text": {
                 "format": {
                     "type": "json_schema",
@@ -184,6 +183,8 @@ class JsonLlmClient:
                 }
             },
         }
+        if max_tokens is not None:
+            payload["max_output_tokens"] = max_tokens
         response, headers = self._post_json(
             endpoint,
             payload,
@@ -210,7 +211,7 @@ class JsonLlmClient:
         image_data_urls: list[str],
         schema_name: str,
         schema: dict[str, Any],
-        max_tokens: int,
+        max_tokens: int | None,
         detail: str,
     ) -> LlmJsonResult:
         endpoint = f"{self._base_url('https://api.openai.com/v1')}/responses"
@@ -221,7 +222,6 @@ class JsonLlmClient:
             "model": self.config.request_model(),
             "instructions": system_prompt,
             "input": [{"role": "user", "content": content}],
-            "max_output_tokens": max_tokens,
             "text": {
                 "format": {
                     "type": "json_schema",
@@ -231,6 +231,8 @@ class JsonLlmClient:
                 }
             },
         }
+        if max_tokens is not None:
+            payload["max_output_tokens"] = max_tokens
         response, headers = self._post_json(
             endpoint,
             payload,
@@ -256,13 +258,12 @@ class JsonLlmClient:
         user_prompt: str,
         schema_name: str,
         schema: dict[str, Any],
-        max_tokens: int,
+        max_tokens: int | None,
     ) -> LlmJsonResult:
         endpoint = f"{self._base_url('https://api.openai.com/v1')}/chat/completions"
         payload = {
             "model": self.config.request_model(),
             "temperature": 0,
-            "max_tokens": max_tokens,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -276,6 +277,8 @@ class JsonLlmClient:
                 },
             },
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         payload = self._apply_compatible_chat_options(payload)
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -304,9 +307,13 @@ class JsonLlmClient:
                 user_prompt=user_prompt,
                 schema=schema,
             )
-            retry_payload = expand_completion_budget(
-                fallback_payload,
-                minimum=json_retry_completion_minimum(schema_name, max_tokens, has_images=False),
+            retry_payload = (
+                fallback_payload
+                if max_tokens is None
+                else expand_completion_budget(
+                    fallback_payload,
+                    minimum=json_retry_completion_minimum(schema_name, max_tokens, has_images=False),
+                )
             )
             response, response_headers = self._post_json(endpoint, retry_payload, headers)
             text, data = parse_chat_completion_json(response, schema_name, schema)
@@ -327,7 +334,7 @@ class JsonLlmClient:
         image_data_urls: list[str],
         schema_name: str,
         schema: dict[str, Any],
-        max_tokens: int,
+        max_tokens: int | None,
         detail: str,
     ) -> LlmJsonResult:
         endpoint = f"{self._base_url('https://api.openai.com/v1')}/chat/completions"
@@ -342,7 +349,6 @@ class JsonLlmClient:
         payload = {
             "model": self.config.request_model(),
             "temperature": 0,
-            "max_tokens": max_tokens,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
@@ -356,6 +362,8 @@ class JsonLlmClient:
                 },
             },
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         payload = self._apply_compatible_chat_options(payload)
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -373,9 +381,13 @@ class JsonLlmClient:
                 user_content=user_content,
                 schema=schema,
             )
-            retry_payload = expand_completion_budget(
-                fallback_payload,
-                minimum=json_retry_completion_minimum(schema_name, max_tokens, has_images=True),
+            retry_payload = (
+                fallback_payload
+                if max_tokens is None
+                else expand_completion_budget(
+                    fallback_payload,
+                    minimum=json_retry_completion_minimum(schema_name, max_tokens, has_images=True),
+                )
             )
             response, response_headers = self._post_json(endpoint, retry_payload, headers)
             text, data = parse_chat_completion_json(response, schema_name, schema)
@@ -394,12 +406,12 @@ class JsonLlmClient:
         system_prompt: str,
         user_prompt: str,
         schema: dict[str, Any],
-        max_tokens: int,
+        max_tokens: int | None,
     ) -> LlmJsonResult:
         endpoint = f"{self._base_url('https://api.anthropic.com/v1')}/messages"
         payload = {
             "model": self.config.request_model(),
-            "max_tokens": max_tokens,
+            "max_tokens": anthropic_completion_limit(max_tokens),
             "system": system_prompt
             + "\nReturn only valid JSON. Do not wrap the JSON in Markdown fences.",
             "messages": [
@@ -669,16 +681,6 @@ def enforce_request_safety(endpoint: str, payload: dict[str, Any], body_bytes: b
             f"PAPERLENS_MAX_IMAGES_PER_REQUEST={max_images}"
         )
 
-    output_limit = payload_completion_limit(payload)
-    max_output_limit = bounded_int_env(
-        "PAPERLENS_MAX_COMPLETION_TOKENS", default=100_000, minimum=512, maximum=200_000
-    )
-    if output_limit is not None and output_limit > max_output_limit:
-        raise LlmError(
-            f"Refusing model request with completion limit {output_limit}; "
-            f"PAPERLENS_MAX_COMPLETION_TOKENS={max_output_limit}"
-        )
-
 
 def before_model_attempt(*, run_id: str | None = None) -> None:
     global _LAST_CALL_TIME
@@ -731,14 +733,6 @@ def payload_image_count(value: Any) -> int:
     return 0
 
 
-def payload_completion_limit(payload: dict[str, Any]) -> int | None:
-    for key in ("max_output_tokens", "max_completion_tokens", "max_tokens"):
-        value = payload.get(key)
-        if isinstance(value, int):
-            return value
-    return None
-
-
 def payload_schema_name(payload: dict[str, Any]) -> str:
     response_format = payload.get("response_format")
     if isinstance(response_format, dict):
@@ -788,7 +782,6 @@ def write_llm_ledger(
         "payload_bytes": payload_bytes,
         "prompt_chars": payload_text_chars(payload),
         "image_count": payload_image_count(payload),
-        "completion_limit": payload_completion_limit(payload),
         "attempt": attempt,
         "attempts": attempts,
         "status": status,
@@ -913,8 +906,19 @@ def expand_completion_budget(payload: dict[str, Any], *, minimum: int) -> dict[s
     return expanded
 
 
+def anthropic_completion_limit(max_tokens: int | None) -> int:
+    if max_tokens is not None:
+        return max(1, int(max_tokens))
+    return bounded_int_env(
+        "PAPERLENS_ANTHROPIC_COMPLETION_TOKENS",
+        default=100_000,
+        minimum=1_000,
+        maximum=200_000,
+    )
+
+
 def json_retry_completion_minimum(
-    schema_name: str, max_tokens: int, *, has_images: bool
+    schema_name: str, max_tokens: int | None, *, has_images: bool
 ) -> int:
     floor = 1800 if has_images else 1600
     if schema_name in {"paperlens_rolling_memory", "paperlens_memory_patch_set"}:
@@ -926,7 +930,8 @@ def json_retry_completion_minimum(
         "paperlens_library_answer",
     }:
         floor = 3000
-    return min(max(max_tokens * 2, floor), 100_000)
+    base = max_tokens if isinstance(max_tokens, int) else floor
+    return min(max(base * 2, floor), 100_000)
 
 
 def extract_anthropic_text(response: dict[str, Any]) -> str:

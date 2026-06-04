@@ -67,9 +67,6 @@ class ProviderConfig(BaseModel):
 
 
 class BudgetConfig(BaseModel):
-    max_usd: float = 10.0
-    warn_at_ratio: float = 0.8
-    hard_stop: bool = True
     input_token_usd_per_million: float = 0.75
     cached_input_token_usd_per_million: float = 0.075
     output_token_usd_per_million: float = 4.5

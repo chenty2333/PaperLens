@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from paperlens_core.agents.llm import JsonLlmClient, llm_call_context
+from paperlens_core.agent_loop import AgentLoop, AgentToolObservation, AgentToolRequest
+from paperlens_core.agents.llm import JsonLlmClient
 from paperlens_core.config import CoreConfig
 from paperlens_core.memory_v3 import read_paper_memory_v3
 
@@ -65,10 +65,9 @@ LIBRARY_ASK_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["answer_markdown", "related_papers", "confidence", "source_attribution"],
     "properties": {
-        "answer_markdown": {"type": "string", "maxLength": 6000},
+        "answer_markdown": {"type": "string"},
         "related_papers": {
             "type": "array",
-            "maxItems": 8,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
@@ -92,10 +91,10 @@ LIBRARY_ASK_SCHEMA: dict[str, Any] = {
                 "evidence_limits",
             ],
             "properties": {
-                "paper_claims": {"type": "array", "maxItems": 8, "items": {"type": "string"}},
-                "cross_paper_synthesis": {"type": "array", "maxItems": 8, "items": {"type": "string"}},
-                "background_context": {"type": "array", "maxItems": 8, "items": {"type": "string"}},
-                "evidence_limits": {"type": "array", "maxItems": 8, "items": {"type": "string"}},
+                "paper_claims": {"type": "array", "items": {"type": "string"}},
+                "cross_paper_synthesis": {"type": "array", "items": {"type": "string"}},
+                "background_context": {"type": "array", "items": {"type": "string"}},
+                "evidence_limits": {"type": "array", "items": {"type": "string"}},
             },
         },
     },
@@ -445,6 +444,77 @@ def search_library(
     return {"query": query, "matches": matches}
 
 
+class LibraryToolRegistry:
+    def __init__(self, records: list[dict[str, Any]]) -> None:
+        self.records = records
+        self.title = "PaperLens Library"
+
+    def tool_descriptions(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": "library.search",
+                "description": "Search papers that PaperLens has already read. Returns compact records only.",
+                "arguments": {"query": "string", "limit": "optional integer"},
+            },
+            {
+                "name": "library.get_record",
+                "description": "Read one local library record, including compact claims, evidence, concepts, outputs, and provenance.",
+                "arguments": {"paper_id": "string"},
+            },
+        ]
+
+    def execute(self, request: AgentToolRequest) -> AgentToolObservation:
+        try:
+            if request.tool == "library.search":
+                result = self._search(request.arguments)
+            elif request.tool == "library.get_record":
+                result = self._get_record(request.arguments)
+            else:
+                raise ValueError(f"Unknown tool: {request.tool}")
+            return AgentToolObservation(
+                id=request.id,
+                tool=request.tool,
+                arguments=request.arguments,
+                result=result,
+            )
+        except Exception as exc:
+            return AgentToolObservation(
+                id=request.id,
+                tool=request.tool,
+                arguments=request.arguments,
+                ok=False,
+                error=str(exc),
+                result={},
+            )
+
+    def _search(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        query = string_or_empty(arguments.get("query"))
+        limit = int_or_none(arguments.get("limit")) or 8
+        limit = max(1, min(limit, 20))
+        matches = search_library_records(self.records, query=query, limit=limit, public=False)
+        return {
+            "tool": "library.search",
+            "query": query,
+            "results": [
+                compact_library_record_for_agent(hit["paper"], score=hit["score"], include_memory=False)
+                for hit in matches
+            ],
+        }
+
+    def _get_record(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        paper_id = string_or_empty(arguments.get("paper_id"))
+        record = find_library_record(self.records, paper_id)
+        return {
+            "tool": "library.get_record",
+            "query": paper_id,
+            "results": (
+                [compact_library_record_for_agent(record, include_memory=True)]
+                if record is not None
+                else []
+            ),
+        }
+
+
 def answer_library_question(
     *,
     output_dir: Path,
@@ -475,6 +545,7 @@ def answer_library_question(
         output_dir,
         {
             "version": LIBRARY_ASK_PROMPT_VERSION,
+            "agent_loop": True,
             "model": config.provider.model,
             "question": question,
             "chat_history_hash": hash_json_payload(normalize_chat_history(chat_history or [])),
@@ -489,29 +560,70 @@ def answer_library_question(
         answer["cache_hit"] = True
         answer["usage"] = {}
         return answer
-    with llm_call_context(stage="library_qa", operation="library_question"):
-        raw = client.invoke_json(
-            system_prompt=LIBRARY_ASK_SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            schema_name="paperlens_library_question",
-            schema=LIBRARY_ASK_SCHEMA,
-            max_tokens=bounded_env_int(
-                "PAPERLENS_LIBRARY_ASK_MAX_TOKENS", default=2600, minimum=1200, maximum=8000
-            ),
-        )
-    answer = normalize_library_answer(raw.data)
+    result = run_library_qa_agent(
+        client=client,
+        output_dir=output_dir,
+        records=records,
+        matches=matches,
+        question=question,
+        chat_history=chat_history or [],
+        user_prompt=user_prompt,
+    )
+    answer = normalize_library_answer(result.final)
     answer["cache_hit"] = False
-    answer["usage"] = raw.usage
+    answer["usage"] = result.usage
     write_json(
         cache_path,
         {
-            "data": raw.data,
-            "usage": raw.usage,
-            "request_id": raw.request_id,
-            "endpoint": raw.endpoint,
+            "data": result.final,
+            "usage": result.usage,
+            "request_ids": result.request_ids,
+            "endpoint": "agent_loop",
         },
     )
     return answer
+
+
+def run_library_qa_agent(
+    *,
+    client: JsonLlmClient,
+    output_dir: Path,
+    records: list[dict[str, Any]],
+    matches: list[dict[str, Any]],
+    question: str,
+    chat_history: list[dict[str, Any]],
+    user_prompt: str,
+) -> Any:
+    tools = LibraryToolRegistry(records)
+    initial_matches = [
+        compact_library_record_for_agent(hit["paper"], score=hit["score"], include_memory=False)
+        for hit in matches[:8]
+    ]
+    loop = AgentLoop(
+        client=client,
+        tools=tools,
+        session_name="library_qa",
+        objective=(
+            "Answer a question over the local PaperLens library. Search or inspect library records "
+            "before making paper-specific or cross-paper claims. Use background knowledge for teaching, "
+            "but label it separately from local paper evidence."
+        ),
+        final_schema_name="paperlens_library_question",
+        final_schema=LIBRARY_ASK_SCHEMA,
+        stage="library_qa",
+        paper_id="__library__",
+        trace_path=paperlens_data_dir(output_dir) / "agent_trace.jsonl",
+        system_prompt=LIBRARY_ASK_SYSTEM_PROMPT,
+    )
+    return loop.run(
+        initial_context={
+            "question": question,
+            "recent_chat_history": normalize_chat_history(chat_history),
+            "initial_library_matches": initial_matches,
+            "library_record_count": len(records),
+            "legacy_prompt_for_compatibility": user_prompt,
+        }
+    )
 
 
 def build_library_ask_prompt(
@@ -660,6 +772,95 @@ def public_search_record(record: dict[str, Any]) -> dict[str, Any]:
         "report_path": record.get("outputs", {}).get("briefing_md"),
         "record_hash": record.get("record_hash"),
     }
+
+
+def find_library_record(records: list[dict[str, Any]], paper_id: str) -> dict[str, Any] | None:
+    normalized = paper_id.strip().lower()
+    if not normalized:
+        return None
+    for record in records:
+        if str(record.get("paper_id") or "").lower() == normalized:
+            return record
+    for record in records:
+        if str(record.get("title") or "").lower() == normalized:
+            return record
+    return None
+
+
+def compact_library_record_for_agent(
+    record: dict[str, Any],
+    *,
+    score: float | None = None,
+    include_memory: bool,
+) -> dict[str, Any]:
+    memory = dict_value(record.get("memory"))
+    outputs = dict_value(record.get("outputs"))
+    source = dict_value(record.get("source"))
+    quality = dict_value(record.get("quality"))
+    provenance = dict_value(record.get("provenance"))
+    payload: dict[str, Any] = {
+        "paper_id": record.get("paper_id"),
+        "title": record.get("title"),
+        "grade": record.get("grade"),
+        "tags": record.get("tags", [])[:10] if isinstance(record.get("tags"), list) else [],
+        "brief": compact_text(memory.get("brief") or memory.get("core_idea"), max_chars=380),
+        "core_idea": compact_text(memory.get("core_idea"), max_chars=420),
+        "report_path": outputs.get("briefing_md"),
+        "source": {
+            "venue": source.get("venue"),
+            "year": source.get("year"),
+            "pages": source.get("pages"),
+            "doi": source.get("doi"),
+            "arxiv_id": source.get("arxiv_id"),
+        },
+        "quality": {
+            "claim_count": quality.get("claim_count"),
+            "evidence_item_count": quality.get("evidence_item_count"),
+            "memory_audit_status": quality.get("memory_audit_status"),
+            "report_audit_verdict": quality.get("report_audit_verdict"),
+        },
+    }
+    if score is not None:
+        payload["score"] = score
+    if include_memory:
+        payload["memory"] = {
+            "problem": compact_text(memory.get("problem"), max_chars=500),
+            "mechanism": compact_text(memory.get("mechanism"), max_chars=900),
+            "mechanism_steps": [
+                compact_text(item, max_chars=280)
+                for item in normalized_string_list(memory.get("mechanism_steps"))[:8]
+            ],
+            "evidence_summary": compact_text(memory.get("evidence_summary"), max_chars=900),
+            "limits": [
+                compact_text(item, max_chars=260)
+                for item in normalized_string_list(memory.get("limits"))[:8]
+            ],
+            "concepts": memory.get("concepts", [])[:12]
+            if isinstance(memory.get("concepts"), list)
+            else [],
+            "conceptual_bridge": memory.get("conceptual_bridge")
+            if isinstance(memory.get("conceptual_bridge"), dict)
+            else {},
+            "claims": memory.get("claims", [])[:12]
+            if isinstance(memory.get("claims"), list)
+            else [],
+            "evidence_items": memory.get("evidence_items", [])[:12]
+            if isinstance(memory.get("evidence_items"), list)
+            else [],
+            "uncertainties": [
+                compact_text(item, max_chars=260)
+                for item in normalized_string_list(memory.get("uncertainties"))[:8]
+            ],
+        }
+        payload["provenance"] = {
+            "evidence_refs": provenance.get("evidence_refs", [])[:16]
+            if isinstance(provenance.get("evidence_refs"), list)
+            else [],
+            "paper_memory_v3": provenance.get("paper_memory_v3")
+            if isinstance(provenance.get("paper_memory_v3"), dict)
+            else {},
+        }
+    return payload
 
 
 def render_offline_library_answer(question: str, matches: list[dict[str, Any]]) -> str:
@@ -1087,14 +1288,6 @@ def normalize_chat_history(history: list[dict[str, Any]]) -> list[dict[str, str]
         if content:
             normalized.append({"role": role, "content": content})
     return normalized[-8:]
-
-
-def bounded_env_int(name: str, *, default: int, minimum: int, maximum: int) -> int:
-    try:
-        value = int(os.getenv(name, str(default)))
-    except ValueError:
-        value = default
-    return max(minimum, min(value, maximum))
 
 
 def string_or_none(value: Any) -> str | None:

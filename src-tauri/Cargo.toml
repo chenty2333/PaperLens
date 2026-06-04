@@ -1,6 +1,6 @@
 [package]
 name = "paperlens"
-version = "0.1.3"
+version = "0.1.4"
 description = "Portable desktop app for evidence-grounded paper auditing."
 authors = ["PaperLens"]
 license = "Unlicense"

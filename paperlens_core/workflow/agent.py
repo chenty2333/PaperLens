@@ -12,9 +12,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
+from paperlens_core.agent_loop import AgentLoop, PaperToolRegistry
 from paperlens_core.agents.llm import JsonLlmClient, llm_call_context
 from paperlens_core.agents.providers import describe_provider
-from paperlens_core.budget import BudgetExceeded, BudgetManager
+from paperlens_core.budget import BudgetManager
 from paperlens_core.config import CoreConfig
 from paperlens_core.control import ControlState
 from paperlens_core.db import ArtifactDb
@@ -457,44 +458,17 @@ class PaperLensWorkflow:
                 visual_results = []
                 for batch in chunked(visual_pages, self.config.visual_pages_per_call):
                     try:
-                        attempts = int(os.getenv("PAPERLENS_VLM_PAGE_RETRIES", "1"))
-                    except ValueError:
-                        attempts = 1
-                    attempts = max(1, min(attempts, 8))
-                    last_error: Exception | None = None
-                    for attempt in range(attempts):
-                        try:
-                            visual_results.append(
-                                self.run_vlm_page_mode(
-                                    client=client,
-                                    paper=paper,
-                                    artifacts=batch,
-                                    stage=stage,
-                                )
+                        visual_results.append(
+                            self.run_vlm_page_mode(
+                                client=client,
+                                paper=paper,
+                                artifacts=batch,
+                                stage=stage,
                             )
-                            last_error = None
-                            break
-                        except BudgetExceeded:
-                            raise
-                        except Exception as exc:
-                            last_error = exc
-                            if attempt < attempts - 1:
-                                self.events.emit(
-                                    "vlm_page_retrying",
-                                    stage=stage,
-                                    level="warning",
-                                    message=f"Retrying VLM page read for {paper.paper_id}",
-                                    data={
-                                        "paper_id": paper.paper_id,
-                                        "pages": [item.page_no for item in batch],
-                                        "attempt": attempt + 1,
-                                        "error": str(exc),
-                                    },
-                                )
-                                time.sleep(min(30.0 * (2**attempt), 180.0))
-                    if last_error:
+                        )
+                    except Exception as exc:
                         if self.require_llm_success():
-                            raise last_error
+                            raise
                         self.events.emit(
                             "vlm_page_fallback_failed",
                             stage=stage,
@@ -503,7 +477,7 @@ class PaperLensWorkflow:
                             data={
                                 "paper_id": paper.paper_id,
                                 "pages": [item.page_no for item in batch],
-                                "error": str(last_error),
+                                "error": str(exc),
                             },
                         )
                 if visual_results:
@@ -616,7 +590,7 @@ class PaperLensWorkflow:
                 image_paths=image_paths,
                 schema_name="paperlens_vlm_page_notes",
                 schema=VLM_PAGE_NOTES_SCHEMA,
-                max_tokens=2200,
+                max_tokens=None,
                 detail=self.config.visual_detail,
             )
         self.write_agent_run(
@@ -755,8 +729,6 @@ class PaperLensWorkflow:
                             )
                             self.record_llm_usage(stage, run_info.get("usage", {}))
                         self.persist_skim_classification(stage, paper, card, decision)
-                    except BudgetExceeded:
-                        raise
                     except Exception as exc:
                         failed_run = {
                             "agent_run_id": f"skim_{paper.paper_id}_failed",
@@ -845,69 +817,50 @@ class PaperLensWorkflow:
                 },
             )
 
-        try:
-            attempts = int(os.getenv("PAPERLENS_STAGE_LLM_RETRIES", "1"))
-        except ValueError:
-            attempts = 1
-        attempts = max(1, min(attempts, 6))
-        last_error: Exception | None = None
-        for attempt in range(attempts):
-            try:
-                agent_run_id = f"skim_{paper.paper_id}_{uuid.uuid4().hex[:8]}"
-                with llm_call_context(
-                    stage="stage_03_skim",
-                    paper_id=paper.paper_id,
-                    operation="skim_classification",
-                    attempt=attempt + 1,
-                ):
-                    raw = client.invoke_json(
-                        system_prompt=SKIM_CLASSIFIER_SYSTEM_PROMPT,
-                        user_prompt=user_prompt,
-                        schema_name="paperlens_skim_classification",
-                        schema=SKIM_CLASSIFICATION_SCHEMA,
-                        max_tokens=1100,
-                    )
-                self.write_cache_payload(
-                    cache_path,
-                    {
-                        "key": key_payload,
-                        "data": raw.data,
-                        "usage": raw.usage,
-                        "request_id": raw.request_id,
-                        "endpoint": raw.endpoint,
-                        "agent_run_id": agent_run_id,
-                    },
-                )
-                card, decision = llm_skim_classify_to_models(
-                    paper=paper,
-                    artifacts=artifacts,
-                    raw=raw.data,
-                    agent_run_id=agent_run_id,
-                    fallback_card=fallback_card,
-                    fallback_decision=fallback_decision,
-                )
-                return (
-                    card,
-                    decision,
-                    {
-                        "agent_run_id": agent_run_id,
-                        "cache_hit": False,
-                        "usage": raw.usage,
-                        "request_id": raw.request_id,
-                        "endpoint": raw.endpoint,
-                        "cache": str(cache_path),
-                    },
-                )
-            except BudgetExceeded:
-                raise
-            except Exception as exc:
-                last_error = exc
-                if attempt == attempts - 1:
-                    break
-                time.sleep(min(15.0 * (2**attempt), 90.0))
-        if last_error:
-            raise last_error
-        raise RuntimeError(f"Skim/classify failed for {paper.paper_id}")
+        agent_run_id = f"skim_{paper.paper_id}_{uuid.uuid4().hex[:8]}"
+        with llm_call_context(
+            stage="stage_03_skim",
+            paper_id=paper.paper_id,
+            operation="skim_classification",
+        ):
+            raw = client.invoke_json(
+                system_prompt=SKIM_CLASSIFIER_SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                schema_name="paperlens_skim_classification",
+                schema=SKIM_CLASSIFICATION_SCHEMA,
+                max_tokens=None,
+            )
+        self.write_cache_payload(
+            cache_path,
+            {
+                "key": key_payload,
+                "data": raw.data,
+                "usage": raw.usage,
+                "request_id": raw.request_id,
+                "endpoint": raw.endpoint,
+                "agent_run_id": agent_run_id,
+            },
+        )
+        card, decision = llm_skim_classify_to_models(
+            paper=paper,
+            artifacts=artifacts,
+            raw=raw.data,
+            agent_run_id=agent_run_id,
+            fallback_card=fallback_card,
+            fallback_decision=fallback_decision,
+        )
+        return (
+            card,
+            decision,
+            {
+                "agent_run_id": agent_run_id,
+                "cache_hit": False,
+                "usage": raw.usage,
+                "request_id": raw.request_id,
+                "endpoint": raw.endpoint,
+                "cache": str(cache_path),
+            },
+        )
 
     def persist_skim_classification(
         self,
@@ -971,13 +924,9 @@ class PaperLensWorkflow:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n")
 
     def record_llm_usage(self, stage: str, usage: dict[str, Any]) -> None:
-        try:
-            snapshot = self.budget.record_usage(usage)
-        except BudgetExceeded as exc:
-            self.events.emit("budget_exceeded", stage=stage, level="error", message=str(exc))
-            raise
+        snapshot = self.budget.record_usage(usage)
         self.events.emit(
-            "budget_update",
+            "usage_update",
             stage=stage,
             message="Model usage recorded",
             data={
@@ -985,17 +934,8 @@ class PaperLensWorkflow:
                 "output_tokens": snapshot.output_tokens,
                 "estimated_usd": snapshot.estimated_usd,
                 "calls": snapshot.calls,
-                "warned": snapshot.warned,
             },
         )
-        if snapshot.warned:
-            self.events.emit(
-                "budget_warning",
-                stage=stage,
-                level="warning",
-                message="Budget warning threshold reached",
-                data=self.budget.public_dict(),
-            )
 
     def cache_path(self, stage: str, paper_id: str, key_payload: dict[str, Any]) -> Path:
         key = hashlib.sha256(
@@ -1083,8 +1023,6 @@ class PaperLensWorkflow:
                         message=f"Rolling read completed for {paper.paper_id}",
                         data={"paper_id": paper.paper_id},
                     )
-                except BudgetExceeded:
-                    raise
                 except Exception as exc:
                     failed_run = {
                         "agent_run_id": f"reader_{paper.paper_id}_failed",
@@ -1179,8 +1117,6 @@ class PaperLensWorkflow:
                     ensure_read_pages_operation(patch_set, paper_id=paper.paper_id, pages=pages),
                     source=f"rolling_memory_chunk_{chunk_index + 1}",
                 )
-            except BudgetExceeded:
-                raise
             except Exception as exc:
                 if self.require_llm_success():
                     raise
@@ -1300,13 +1236,37 @@ class PaperLensWorkflow:
                 data={"paper_id": paper.paper_id, "pages": pages, "cache": str(cache_path)},
             )
             return normalize_memory_patch_set(cached["data"], paper_id=paper.paper_id)
-        raw = self.invoke_json_with_stage_retries(
+        loop = AgentLoop(
             client=client,
+            tools=PaperToolRegistry(
+                runtime=runtime,
+                paper_id=paper.paper_id,
+                title=paper.canonical_title,
+                memory=memory,
+                layout_pages=artifacts,
+            ),
+            session_name="rolling_memory",
+            objective=(
+                "Read the current paper pages and update PaperMemory with durable MemoryPatch "
+                "operations. Use tools if you need to inspect page text, figures, or current memory."
+            ),
+            final_schema_name="paperlens_memory_patch_set",
+            final_schema=MEMORY_PATCH_SET_SCHEMA,
             stage=stage,
             paper_id=paper.paper_id,
-            agent_prefix="rolling_memory",
+            trace_path=self.data_dir / "agent_trace.jsonl",
             system_prompt=ROLLING_MEMORY_SYSTEM_PROMPT,
-            user_prompt=build_rolling_memory_prompt(
+            control_check=self.control.require_not_cancelled,
+            pause_check=self.control.wait_if_paused,
+        )
+        result = loop.run(
+            initial_context={
+                "paper_id": paper.paper_id,
+                "title": paper.canonical_title or "unknown",
+                "classification": decision.class_label,
+                "pages": pages,
+                "agent_context_pack": agent_context,
+                "rolling_memory_prompt": build_rolling_memory_prompt(
                 paper=paper,
                 skim=skim,
                 decision=decision,
@@ -1316,28 +1276,33 @@ class PaperLensWorkflow:
                 chunk_index=chunk_index,
                 total_chunks=total_chunks,
             ),
-            schema_name="paperlens_memory_patch_set",
-            schema=MEMORY_PATCH_SET_SCHEMA,
-            max_tokens=bounded_env_int(
-                "PAPERLENS_ROLLING_MEMORY_MAX_TOKENS",
-                default=40000,
-                minimum=4000,
-                maximum=100000,
-            ),
-            retry_message=f"Rolling memory retrying for {paper.paper_id}",
-            retry_data={"pages": pages},
+            }
+        )
+        self.record_llm_usage(stage, result.usage)
+        self.write_agent_run(
+            {
+                "agent_run_id": f"rolling_memory_{paper.paper_id}_{uuid.uuid4().hex[:8]}",
+                "paper_id": paper.paper_id,
+                "stage": stage,
+                "provider_kind": self.config.provider.kind,
+                "model": self.config.provider.model,
+                "usage": result.usage,
+                "request_ids": result.request_ids,
+                "trace_events": len(result.trace),
+                "status": "PASS",
+            }
         )
         self.write_cache_payload(
             cache_path,
             {
                 "key": key_payload,
-                "data": raw.data,
-                "usage": raw.usage,
-                "request_id": raw.request_id,
-                "endpoint": raw.endpoint,
+                "data": result.final,
+                "usage": result.usage,
+                "request_ids": result.request_ids,
+                "endpoint": "agent_loop",
             },
         )
-        return normalize_memory_patch_set(raw.data, paper_id=paper.paper_id)
+        return normalize_memory_patch_set(result.final, paper_id=paper.paper_id)
 
     def central_verify_paper_memory(
         self,
@@ -1380,8 +1345,6 @@ class PaperLensWorkflow:
                 ),
                 source="central_memory_verify",
             )
-        except BudgetExceeded:
-            raise
         except Exception as exc:
             if self.require_llm_success() and not paper_memory_has_recoverable_content(
                 current_memory
@@ -1469,13 +1432,39 @@ class PaperLensWorkflow:
                 data={"paper_id": paper.paper_id, "pages": pages, "cache": str(cache_path)},
             )
             return normalize_memory_patch_set(cached["data"], paper_id=paper.paper_id)
-        raw = self.invoke_json_with_stage_retries(
+        loop = AgentLoop(
             client=client,
+            tools=PaperToolRegistry(
+                runtime=runtime,
+                paper_id=paper.paper_id,
+                title=paper.canonical_title,
+                memory=memory,
+                layout_pages=artifacts,
+            ),
+            session_name="central_memory_verify",
+            objective=(
+                "Verify the current PaperMemory against paper-local evidence. Use paper tools "
+                "until you can submit one MemoryPatchSet that repairs, weakens, links evidence, "
+                "or records open boundaries."
+            ),
+            final_schema_name="paperlens_memory_patch_set",
+            final_schema=MEMORY_PATCH_SET_SCHEMA,
             stage=stage,
             paper_id=paper.paper_id,
-            agent_prefix="central_memory_verify",
+            trace_path=self.data_dir / "agent_trace.jsonl",
             system_prompt=CENTRAL_MEMORY_VERIFY_SYSTEM_PROMPT,
-            user_prompt=build_central_memory_verify_prompt(
+            control_check=self.control.require_not_cancelled,
+            pause_check=self.control.wait_if_paused,
+        )
+        result = loop.run(
+            initial_context={
+                "paper_id": paper.paper_id,
+                "title": paper.canonical_title or "unknown",
+                "classification": decision.class_label,
+                "high_risk_claims": high_risk_claims,
+                "verification_pages": pages,
+                "agent_context_pack": agent_context,
+                "verify_prompt": build_central_memory_verify_prompt(
                 paper=paper,
                 skim=skim,
                 decision=decision,
@@ -1484,102 +1473,34 @@ class PaperLensWorkflow:
                 agent_context=agent_context,
                 artifacts=artifacts,
             ),
-            schema_name="paperlens_memory_patch_set",
-            schema=MEMORY_PATCH_SET_SCHEMA,
-            max_tokens=bounded_env_int(
-                "PAPERLENS_MEMORY_VERIFY_MAX_TOKENS",
-                default=2200,
-                minimum=800,
-                maximum=5000,
-            ),
-            retry_message=f"Memory verification retrying for {paper.paper_id}",
-            retry_data={"pages": pages},
+            }
         )
-        patch_set = normalize_memory_patch_set(raw.data, paper_id=paper.paper_id)
+        self.record_llm_usage(stage, result.usage)
+        self.write_agent_run(
+            {
+                "agent_run_id": f"central_memory_verify_{paper.paper_id}_{uuid.uuid4().hex[:8]}",
+                "paper_id": paper.paper_id,
+                "stage": stage,
+                "provider_kind": self.config.provider.kind,
+                "model": self.config.provider.model,
+                "usage": result.usage,
+                "request_ids": result.request_ids,
+                "trace_events": len(result.trace),
+                "status": "PASS",
+            }
+        )
+        patch_set = normalize_memory_patch_set(result.final, paper_id=paper.paper_id)
         self.write_cache_payload(
             cache_path,
             {
                 "key": key_payload,
                 "data": patch_set,
-                "usage": raw.usage,
-                "request_id": raw.request_id,
-                "endpoint": raw.endpoint,
+                "usage": result.usage,
+                "request_ids": result.request_ids,
+                "endpoint": "agent_loop",
             },
         )
         return patch_set
-
-    def invoke_json_with_stage_retries(
-        self,
-        *,
-        client: JsonLlmClient,
-        stage: str,
-        paper_id: str,
-        agent_prefix: str,
-        system_prompt: str,
-        user_prompt: str,
-        schema_name: str,
-        schema: dict[str, Any],
-        max_tokens: int,
-        retry_message: str,
-        retry_data: dict[str, Any],
-    ) -> Any:
-        try:
-            attempts = int(os.getenv("PAPERLENS_STAGE_LLM_RETRIES", "1"))
-        except ValueError:
-            attempts = 1
-        attempts = max(1, min(attempts, 6))
-        last_error: Exception | None = None
-        for attempt in range(attempts):
-            agent_run_id = f"{agent_prefix}_{paper_id}_{uuid.uuid4().hex[:8]}"
-            try:
-                with llm_call_context(
-                    stage=stage,
-                    paper_id=paper_id,
-                    operation=agent_prefix,
-                    schema_name=schema_name,
-                    attempt=attempt + 1,
-                ):
-                    raw = client.invoke_json(
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
-                        schema_name=schema_name,
-                        schema=schema,
-                        max_tokens=max_tokens,
-                    )
-                self.write_agent_run(
-                    {
-                        "agent_run_id": agent_run_id,
-                        "paper_id": paper_id,
-                        "stage": stage,
-                        "provider_kind": self.config.provider.kind,
-                        "model": self.config.provider.model,
-                        "endpoint": raw.endpoint,
-                        "request_id": raw.request_id,
-                        "usage": raw.usage,
-                        "status": "PASS",
-                    }
-                )
-                self.record_llm_usage(stage, raw.usage)
-                return raw
-            except BudgetExceeded:
-                raise
-            except Exception as exc:
-                last_error = exc
-                if attempt == attempts - 1:
-                    break
-                data = {"paper_id": paper_id, "attempt": attempt + 1, "error": str(exc)}
-                data.update(retry_data)
-                self.events.emit(
-                    "agent_run_retrying",
-                    stage=stage,
-                    level="warning",
-                    message=retry_message,
-                    data=data,
-                )
-                time.sleep(min(15.0 * (2**attempt), 90.0))
-        if last_error:
-            raise last_error
-        raise RuntimeError(f"{agent_prefix} failed for {paper_id}")
 
     def stage_08_evidence_verify(self) -> None:
         stage = "stage_08_evidence_verify"
@@ -1620,8 +1541,6 @@ class PaperLensWorkflow:
                         memory=memory,
                         fallback=card,
                     )
-                except BudgetExceeded:
-                    raise
                 except Exception as exc:
                     if self.require_llm_success():
                         raise
@@ -1841,40 +1760,19 @@ REPORT_SECTION_AUDIT_PROMPT_VERSION = "report-section-audit-v2-repair-unsupporte
 
 ROLLING_MEMORY_SYSTEM_PROMPT = """
 You are the PaperLens RollingReader.
-Read the current paper pages and return a MemoryPatchSet for PaperMemoryV3, the source-of-truth IR
-used by reports, QA, and library search.
-
-Rules:
-- Work like a lightweight paper-reading agent: use agent_context_pack for continuity, and use the
-  current pages as the focused working context for this step.
-- Return only patch operations, not a rewritten summary object.
-- Add durable paper knowledge: problem frame, core abstraction, mechanism, evaluation, concepts,
-  claims, evidence, limitations, and open questions.
-- Every paper claim should either reference evidence IDs you add in the same patch or remain
-  low/medium confidence with a risk tag such as needs_evidence.
-- Background concepts are allowed only through conceptual_bridge and must not be promoted to paper
-  claims.
-- Do not preserve page-summary residue. Patch only what should remain useful after this run.
-Return only JSON matching the MemoryPatchSet schema.
+Read paper pages and improve PaperMemoryV3.
+Use tools whenever they help you check text, figures, evidence, or current memory.
+Return final_json as one MemoryPatchSet when the memory patch is good enough.
+Keep durable paper claims separate from background concepts and open uncertainty.
 """.strip()
 
 
 CENTRAL_MEMORY_VERIFY_SYSTEM_PROMPT = """
 You are the PaperLens MemoryVerifier.
-Verify one paper's accumulated memory against the local paper map and relevant original page
-evidence in a single pass. Do not request another verification round.
-
-Rules:
-- Treat PaperMemoryV3 as the only durable knowledge state.
-- Use the supplied high-risk claims, evidence-linked pages, paper-map snippets, captions, figures,
-  tables, and agent_context_pack observations.
-- Return only a MemoryPatchSet. Do not write a report.
-- Fix memory directly: add or link evidence, weaken overclaims, mark unsupported claims disputed,
-  add missing limitations/open questions, and add prerequisite background only through
-  conceptual_bridge.
-- Include exactly one set_memory_audit operation. If evidence is not enough after this pass, record
-  PASS_WITH_WEAKNESSES or NEED_HUMAN_REVIEW with clear missing_items.
-Return only JSON matching the MemoryPatchSet schema.
+Verify PaperMemoryV3 against local paper evidence.
+Use tools until you can confidently repair memory, weaken unsupported claims, link evidence,
+or record explicit uncertainty.
+Return final_json as one MemoryPatchSet. Include a memory audit operation when done.
 """.strip()
 
 
@@ -2076,11 +1974,10 @@ def build_central_memory_verify_prompt(
                 ensure_ascii=False,
             ),
             (
-                "Task: verify the memory once and return a MemoryPatchSet. Do not request more "
-                "rounds. If a claim is supported, add/link evidence and mark it checked. If it is "
-                "too strong, rewrite it with lower confidence or mark it disputed. If something "
-                "important is missing but not supported by these pages, add an open question and "
-                "record the boundary in set_memory_audit."
+                "Task: verify memory and return a MemoryPatchSet when ready. If a claim is "
+                "supported, add/link evidence and mark it checked. If it is too strong, rewrite it "
+                "with lower confidence or mark it disputed. If something important is missing, use "
+                "tools or record the boundary in set_memory_audit."
             ),
         ]
     )
@@ -3089,24 +2986,10 @@ def classify_paper(paper: PaperRecord, card: SkimCard) -> ClassificationDecision
 
 REPORT_PLAN_SYSTEM_PROMPT = """
 You are the PaperLens ReportPlanner skill.
-Create a writing plan for one research-paper knowledge capsule from PaperMemoryV3 and local paper-tool observations.
-
-Rules:
-- PaperMemoryV3 is the source of truth. The report is a derived view, not a new fact source.
-- Plan reader-order sections, not paper-section summaries.
-- The user may not read the original paper, so the plan must make room for necessary background, mechanism, evidence, value, and limits.
-- Do not force a fixed template. Choose section titles that fit this paper.
-- Each planned section must name the claims/evidence it will rely on and the focused queries/pages that can ground it.
-- Mark each section_kind. For a mechanism section, include detail_questions that would let the
-  writer explain the system state before/after the idea, the key data structures, the request or
-  object lifecycle, and the tradeoffs.
-- If evidence is thin, plan a bounded uncertainty section instead of asking the writer to invent support.
-- If you provide uncertainty_note, make it reader-facing evidence boundary text. Do not mention
-  this plan, PaperMemory, schemas, prompts, or report-generation process.
-- Keep absolute wording inside the evidence boundary. Prefer "reduces", "mitigates", or
-  "the paper reports" over universal claims such as "eliminates" or "proves in all settings"
-  unless PaperMemory contains direct, high-confidence evidence for that exact scope.
-- Return JSON only.
+Plan a clear knowledge capsule from PaperMemoryV3.
+Choose the reading order that best explains this paper. Use tools if you need more grounding.
+The report is a derived view; do not invent facts outside memory/evidence.
+Return final_json matching the ReportPlan schema.
 """.strip()
 
 
@@ -3125,12 +3008,11 @@ REPORT_PLAN_SCHEMA: dict[str, Any] = {
         "paper_id": {"type": "string"},
         "grade": {"type": "string", "enum": ["A", "B", "C", "HOLD"]},
         "read_recommendation": {"type": "string", "enum": ["重点关注", "标准读", "低优先级", "需确认"]},
-        "one_line_reason": {"type": "string", "maxLength": 220},
-        "core_takeaway": {"type": "string", "maxLength": 520},
+        "one_line_reason": {"type": "string"},
+        "core_takeaway": {"type": "string"},
         "sections": {
             "type": "array",
             "minItems": 3,
-            "maxItems": 7,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
@@ -3144,7 +3026,7 @@ REPORT_PLAN_SCHEMA: dict[str, Any] = {
                     "target_pages",
                 ],
                 "properties": {
-                    "section_id": {"type": "string", "maxLength": 40},
+                    "section_id": {"type": "string"},
                     "section_kind": {
                         "type": "string",
                         "enum": [
@@ -3157,79 +3039,58 @@ REPORT_PLAN_SCHEMA: dict[str, Any] = {
                             "other",
                         ],
                     },
-                    "title": {"type": "string", "maxLength": 80},
-                    "purpose": {"type": "string", "maxLength": 320},
+                    "title": {"type": "string"},
+                    "purpose": {"type": "string"},
                     "focus_queries": {
                         "type": "array",
-                        "maxItems": 5,
-                        "items": {"type": "string", "maxLength": 180},
+                        "items": {"type": "string"},
                     },
                     "claim_ids": {
                         "type": "array",
-                        "maxItems": 8,
-                        "items": {"type": "string", "maxLength": 40},
+                        "items": {"type": "string"},
                     },
                     "evidence_refs": {
                         "type": "array",
-                        "maxItems": 10,
-                        "items": {"type": "string", "maxLength": 40},
+                        "items": {"type": "string"},
                     },
                     "target_pages": {
                         "type": "array",
-                        "maxItems": 8,
                         "items": {"type": "integer"},
                     },
                     "detail_questions": {
                         "type": "array",
-                        "maxItems": 8,
-                        "items": {"type": "string", "maxLength": 180},
+                        "items": {"type": "string"},
                     },
                     "avoid": {
                         "type": "array",
-                        "maxItems": 5,
-                        "items": {"type": "string", "maxLength": 160},
+                        "items": {"type": "string"},
                     },
                 },
             },
         },
         "key_visual_pages": {
             "type": "array",
-            "maxItems": 3,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
                 "required": ["page_no", "reason"],
                 "properties": {
                     "page_no": {"type": "integer"},
-                    "reason": {"type": "string", "maxLength": 180},
+                    "reason": {"type": "string"},
                 },
             },
         },
-        "uncertainty_note": {"type": "string", "maxLength": 500},
+        "uncertainty_note": {"type": "string"},
     },
 }
 
 
 REPORT_SECTION_SYSTEM_PROMPT = """
 You are the PaperLens ReportComposer skill.
-Write exactly one section of a research-paper knowledge capsule.
-
-Rules:
-- Use PaperMemoryV3 and the supplied local paper-tool observations as the factual contract.
-- Do not summarize the original paper section-by-section.
-- Do not write the whole report. Write only the requested section body and no heading.
-- Be explanatory and connected. This section should help the reader understand, not merely list facts.
-- Return the section as paragraphs, not one long markdown string. Each paragraph should be a
-  complete JSON string. The runtime will assemble Markdown.
-- For mechanism sections, unpack the mechanism like a systems engineer: explain the state before
-  the paper's idea, the new abstraction, the data structures/components, the step-by-step lifecycle,
-  why each step changes the bottleneck, and the important tradeoffs or overheads.
-- Keep paper claims, PaperLens interpretation, and background knowledge distinguishable in wording.
-- If a fact is not supported by memory/evidence, either omit it or mark it as uncertainty.
-- Keep absolute wording inside the evidence boundary. Prefer scoped claims such as
-  "the paper reports" or "in the evaluated setting" when discussing performance.
-- Do not expose internal phrases such as "the supplied excerpts", "the user provided", or "你给到".
-- Return JSON only.
+Write the requested report section as connected prose.
+Use PaperMemory and tools for grounding. Explain mechanisms and background when useful.
+Keep paper claims, interpretation, background knowledge, and evidence limits distinguishable.
+Return final_json matching the ReportSection schema.
 """.strip()
 
 
@@ -3246,41 +3107,31 @@ REPORT_SECTION_SCHEMA: dict[str, Any] = {
     ],
     "properties": {
         "section_id": {"type": "string"},
-        "title": {"type": "string", "maxLength": 80},
+        "title": {"type": "string"},
         "paragraphs": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 12,
-            "items": {"type": "string", "maxLength": 1800},
+            "items": {"type": "string"},
         },
-        "markdown": {"type": "string", "maxLength": 24000},
+        "markdown": {"type": "string"},
         "used_claim_ids": {
             "type": "array",
-            "maxItems": 12,
-            "items": {"type": "string", "maxLength": 40},
+            "items": {"type": "string"},
         },
         "used_evidence_refs": {
             "type": "array",
-            "maxItems": 16,
-            "items": {"type": "string", "maxLength": 40},
+            "items": {"type": "string"},
         },
-        "uncertainty_note": {"type": "string", "maxLength": 400},
+        "uncertainty_note": {"type": "string"},
     },
 }
 
 
 REPORT_SECTION_AUDITOR_SYSTEM_PROMPT = """
 You are the PaperLens SectionAuditor hook.
-Validate one generated report section against PaperMemoryV3 and local paper-tool observations.
-
-Rules:
-- Check only this section.
-- Flag unsupported claims, over-broad wording, missing necessary context, and reader-hostile internal phrasing.
-- Return REPAIR whenever the section contains unsupported quantitative results, unsupported
-  comparisons, or absolute wording that exceeds the evidence boundary.
-- Do not reinterpret the whole paper from scratch.
-- A section can pass with weaknesses when the prose is useful and the remaining boundary is explicit.
-- Return JSON only.
+Audit one generated section against PaperMemory and paper evidence.
+Use tools when a claim needs checking. Prefer explicit evidence boundaries over brittle certainty.
+Return final_json matching the ReportSectionAudit schema.
 """.strip()
 
 
@@ -3296,10 +3147,10 @@ REPORT_SECTION_AUDIT_SCHEMA: dict[str, Any] = {
     ],
     "properties": {
         "verdict": {"type": "string", "enum": ["PASS", "PASS_WITH_WEAKNESSES", "REPAIR"]},
-        "unsupported_items": {"type": "array", "maxItems": 6, "items": {"type": "string"}},
-        "missing_items": {"type": "array", "maxItems": 6, "items": {"type": "string"}},
-        "repair_instructions": {"type": "array", "maxItems": 6, "items": {"type": "string"}},
-        "safe_usage_note": {"type": "string", "maxLength": 500},
+        "unsupported_items": {"type": "array", "items": {"type": "string"}},
+        "missing_items": {"type": "array", "items": {"type": "string"}},
+        "repair_instructions": {"type": "array", "items": {"type": "string"}},
+        "safe_usage_note": {"type": "string"},
     },
 }
 
@@ -3381,50 +3232,6 @@ def compose_agentic_paper_report(
             read_mode=read_mode,
             cache_dir=cache_dir,
         )
-        repair_rounds = bounded_env_int(
-            "PAPERLENS_REPORT_SECTION_REPAIR_ROUNDS",
-            default=1,
-            minimum=0,
-            maximum=2,
-        )
-        round_index = 0
-        while audit.get("verdict") == "REPAIR" and round_index < repair_rounds:
-            round_index += 1
-            section = generate_report_section(
-                client=client,
-                data_dir=data_dir,
-                stage=stage,
-                paper=paper,
-                paper_memory=memory,
-                layout=layout,
-                plan=plan,
-                section_plan=section_plan,
-                previous_summaries=previous_summaries,
-                output_language=output_language,
-                record_usage=record_usage,
-                record_agent_run=record_agent_run,
-                read_mode=read_mode,
-                cache_dir=cache_dir,
-                section_audit=audit,
-                repair_round=round_index,
-            )
-            audit = audit_report_section(
-                client=client,
-                data_dir=data_dir,
-                stage=stage,
-                paper=paper,
-                paper_memory=memory,
-                layout=layout,
-                plan=plan,
-                section_plan=section_plan,
-                section=section,
-                output_language=output_language,
-                record_usage=record_usage,
-                record_agent_run=record_agent_run,
-                read_mode=read_mode,
-                cache_dir=cache_dir,
-                repair_round=round_index,
-            )
         sections.append(section)
         section_audits.append({"section_id": section.get("section_id"), **audit})
         previous_summaries.append(
@@ -3499,27 +3306,58 @@ def generate_report_plan(
         operation="report_plan",
         schema_name="paperlens_report_plan",
     ):
-        raw = client.invoke_json(
-            system_prompt=REPORT_PLAN_SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            schema_name="paperlens_report_plan",
-            schema=REPORT_PLAN_SCHEMA,
-            max_tokens=bounded_env_int(
-                "PAPERLENS_REPORT_PLAN_MAX_TOKENS",
-                default=12000,
-                minimum=2400,
-                maximum=40000,
+        result = AgentLoop(
+            client=client,
+            tools=PaperToolRegistry(
+                runtime=PaperLensRuntime(artifacts=list_payload(layout.get("pages"))),
+                paper_id=paper.paper_id,
+                title=paper.canonical_title,
+                memory=paper_memory,
+                layout_pages=list_payload(layout.get("pages")),
             ),
+            session_name="report_plan",
+            objective="Plan a natural PaperLens knowledge capsule from PaperMemory. Use tools if the plan needs grounding.",
+            final_schema_name="paperlens_report_plan",
+            final_schema=REPORT_PLAN_SCHEMA,
+            stage=stage,
+            paper_id=paper.paper_id,
+            trace_path=data_dir / "agent_trace.jsonl",
+            system_prompt=REPORT_PLAN_SYSTEM_PROMPT,
+        ).run(
+            initial_context={
+                "paper_id": paper.paper_id,
+                "title": paper.canonical_title or "unknown",
+                "output_language": output_language,
+                "read_mode": read_mode,
+                "topic": topic,
+                "idea": idea,
+                "skim_card": compact_skim_for_report(skim),
+                "classification": compact_decision_for_report(decision),
+                "paper_card": compact_paper_card_for_report(card),
+                "paper_memory": compact_paper_memory_for_report(paper_memory),
+                "context_prompt": user_prompt,
+            }
         )
-    record_usage(stage, raw.usage)
+    record_usage(stage, result.usage)
     record_agent_run(
-        model_agent_run(client, paper.paper_id, stage, "report_plan", raw, status="PASS")
+        {
+            "agent_run_id": f"report_plan_{paper.paper_id}_{uuid.uuid4().hex[:8]}",
+            "paper_id": paper.paper_id,
+            "stage": stage,
+            "operation": "report_plan",
+            "provider_kind": client.config.kind,
+            "model": client.config.model,
+            "usage": result.usage,
+            "request_ids": result.request_ids,
+            "trace_events": len(result.trace),
+            "status": "PASS",
+        }
     )
     write_llm_cache(
         cache_path,
-        {"key": key_payload, "data": raw.data, "usage": raw.usage, "request_id": raw.request_id, "endpoint": raw.endpoint},
+        {"key": key_payload, "data": result.final, "usage": result.usage, "request_ids": result.request_ids, "endpoint": "agent_loop"},
     )
-    return normalize_report_plan(raw.data, paper=paper, decision=decision)
+    return normalize_report_plan(result.final, paper=paper, decision=decision)
 
 
 def generate_report_section(
@@ -3539,7 +3377,6 @@ def generate_report_section(
     read_mode: str,
     cache_dir: Path | None,
     section_audit: dict[str, Any] | None = None,
-    repair_round: int = 0,
 ) -> dict[str, Any]:
     user_prompt = build_report_section_prompt(
         paper=paper,
@@ -3560,7 +3397,6 @@ def generate_report_section(
         "read_mode": read_mode,
         "paper_hash": paper.file_hash,
         "section_id": section_id,
-        "repair_round": repair_round,
         "plan_hash": hash_json_payload(plan),
         "previous_hash": hash_json_payload(previous_summaries),
         "audit_hash": hash_json_payload(section_audit or {}),
@@ -3579,25 +3415,59 @@ def generate_report_section(
         paper_id=paper.paper_id,
         operation="report_section",
         section_id=section_id,
-        repair_round=repair_round,
         schema_name="paperlens_report_section",
     ):
-        raw = client.invoke_json(
+        result = AgentLoop(
+            client=client,
+            tools=PaperToolRegistry(
+                runtime=PaperLensRuntime(artifacts=list_payload(layout.get("pages"))),
+                paper_id=paper.paper_id,
+                title=paper.canonical_title,
+                memory=paper_memory,
+                layout_pages=list_payload(layout.get("pages")),
+            ),
+            session_name=f"report_section_{section_id}",
+            objective="Write this report section as a clear article fragment from PaperMemory. Use tools if evidence or wording needs grounding.",
+            final_schema_name="paperlens_report_section",
+            final_schema=REPORT_SECTION_SCHEMA,
+            stage=stage,
+            paper_id=paper.paper_id,
+            trace_path=data_dir / "agent_trace.jsonl",
             system_prompt=REPORT_SECTION_SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            schema_name="paperlens_report_section",
-            schema=REPORT_SECTION_SCHEMA,
-            max_tokens=report_section_token_budget(section_plan),
+        ).run(
+            initial_context={
+                "paper_id": paper.paper_id,
+                "title": paper.canonical_title or "unknown",
+                "output_language": output_language,
+                "read_mode": read_mode,
+                "paper_memory": compact_paper_memory_for_report(paper_memory),
+                "report_plan": compact_report_plan(plan),
+                "section_to_write": section_plan,
+                "previous_section_summaries": previous_summaries[-4:],
+                "previous_section_audit": section_audit or {},
+                "context_prompt": user_prompt,
+            }
         )
-    record_usage(stage, raw.usage)
+    record_usage(stage, result.usage)
     record_agent_run(
-        model_agent_run(client, paper.paper_id, stage, f"report_section_{section_id}", raw, status="PASS")
+        {
+            "agent_run_id": f"report_section_{paper.paper_id}_{section_id}_{uuid.uuid4().hex[:8]}",
+            "paper_id": paper.paper_id,
+            "stage": stage,
+            "operation": f"report_section_{section_id}",
+            "provider_kind": client.config.kind,
+            "model": client.config.model,
+            "usage": result.usage,
+            "request_ids": result.request_ids,
+            "trace_events": len(result.trace),
+            "status": "PASS",
+        }
     )
     write_llm_cache(
         cache_path,
-        {"key": key_payload, "data": raw.data, "usage": raw.usage, "request_id": raw.request_id, "endpoint": raw.endpoint},
+        {"key": key_payload, "data": result.final, "usage": result.usage, "request_ids": result.request_ids, "endpoint": "agent_loop"},
     )
-    return normalize_report_section(raw.data, section_plan=section_plan)
+    return normalize_report_section(result.final, section_plan=section_plan)
 
 
 def audit_report_section(
@@ -3616,7 +3486,6 @@ def audit_report_section(
     record_agent_run: Any,
     read_mode: str,
     cache_dir: Path | None,
-    repair_round: int = 0,
 ) -> dict[str, Any]:
     user_prompt = build_report_section_audit_prompt(
         paper=paper,
@@ -3636,7 +3505,6 @@ def audit_report_section(
         "read_mode": read_mode,
         "paper_hash": paper.file_hash,
         "section_id": section_id,
-        "repair_round": repair_round,
         "section_hash": hash_json_payload(section),
         "plan_hash": hash_json_payload(plan),
         "prompt_hash": hash_text(REPORT_SECTION_AUDITOR_SYSTEM_PROMPT + "\n" + user_prompt),
@@ -3654,32 +3522,58 @@ def audit_report_section(
         paper_id=paper.paper_id,
         operation="report_section_audit",
         section_id=section_id,
-        repair_round=repair_round,
         schema_name="paperlens_report_section_audit",
     ):
-        raw = client.invoke_json(
-            system_prompt=REPORT_SECTION_AUDITOR_SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            schema_name="paperlens_report_section_audit",
-            schema=REPORT_SECTION_AUDIT_SCHEMA,
-            max_tokens=bounded_env_int(
-                "PAPERLENS_REPORT_SECTION_AUDIT_MAX_TOKENS",
-                default=1800,
-                minimum=700,
-                maximum=6000,
+        result = AgentLoop(
+            client=client,
+            tools=PaperToolRegistry(
+                runtime=PaperLensRuntime(artifacts=list_payload(layout.get("pages"))),
+                paper_id=paper.paper_id,
+                title=paper.canonical_title,
+                memory=paper_memory,
+                layout_pages=list_payload(layout.get("pages")),
             ),
+            session_name=f"report_section_audit_{section_id}",
+            objective="Audit one report section against PaperMemory and paper evidence. Use tools when a claim needs checking.",
+            final_schema_name="paperlens_report_section_audit",
+            final_schema=REPORT_SECTION_AUDIT_SCHEMA,
+            stage=stage,
+            paper_id=paper.paper_id,
+            trace_path=data_dir / "agent_trace.jsonl",
+            system_prompt=REPORT_SECTION_AUDITOR_SYSTEM_PROMPT,
+        ).run(
+            initial_context={
+                "paper_id": paper.paper_id,
+                "title": paper.canonical_title or "unknown",
+                "output_language": output_language,
+                "read_mode": read_mode,
+                "paper_memory": compact_paper_memory_for_report(paper_memory),
+                "report_plan": compact_report_plan(plan),
+                "section_plan": section_plan,
+                "generated_section": section,
+                "context_prompt": user_prompt,
+            }
         )
-    record_usage(stage, raw.usage)
+    record_usage(stage, result.usage)
     record_agent_run(
-        model_agent_run(
-            client, paper.paper_id, stage, f"report_section_audit_{section_id}", raw, status="PASS"
-        )
+        {
+            "agent_run_id": f"report_section_audit_{paper.paper_id}_{section_id}_{uuid.uuid4().hex[:8]}",
+            "paper_id": paper.paper_id,
+            "stage": stage,
+            "operation": f"report_section_audit_{section_id}",
+            "provider_kind": client.config.kind,
+            "model": client.config.model,
+            "usage": result.usage,
+            "request_ids": result.request_ids,
+            "trace_events": len(result.trace),
+            "status": "PASS",
+        }
     )
     write_llm_cache(
         cache_path,
-        {"key": key_payload, "data": raw.data, "usage": raw.usage, "request_id": raw.request_id, "endpoint": raw.endpoint},
+        {"key": key_payload, "data": result.final, "usage": result.usage, "request_ids": result.request_ids, "endpoint": "agent_loop"},
     )
-    return normalize_report_section_audit(raw.data)
+    return normalize_report_section_audit(result.final)
 
 
 def build_report_plan_prompt(
@@ -3967,22 +3861,6 @@ def report_section_is_mechanism(section_plan: dict[str, Any]) -> bool:
         purpose=section_plan.get("purpose"),
     )
     return inferred == "mechanism"
-
-
-def report_section_token_budget(section_plan: dict[str, Any]) -> int:
-    if report_section_is_mechanism(section_plan):
-        return bounded_env_int(
-            "PAPERLENS_REPORT_MECHANISM_SECTION_MAX_TOKENS",
-            default=40000,
-            minimum=3000,
-            maximum=100000,
-        )
-    return bounded_env_int(
-        "PAPERLENS_REPORT_SECTION_MAX_TOKENS",
-        default=24000,
-        minimum=2000,
-        maximum=100000,
-    )
 
 
 def report_section_detail_contract(section_plan: dict[str, Any]) -> str:
@@ -5279,7 +5157,6 @@ def summarize_model_calls(path: Path) -> dict[str, Any]:
         "payload_bytes": 0,
         "prompt_chars": 0,
         "duration_seconds": 0.0,
-        "completion_limit": 0,
         "image_count": 0,
     }
     for row in rows:

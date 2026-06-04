@@ -45,7 +45,6 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--reasoning-model")
     run.add_argument("--timeout-seconds", type=int)
     run.add_argument("--api-key-env", default="PAPERLENS_API_KEY")
-    run.add_argument("--budget", type=float)
     run.add_argument("--concurrency", type=int)
     run.add_argument("--offline-debug", action="store_true")
     run.add_argument("--topic")
@@ -129,7 +128,6 @@ def run_command(args: argparse.Namespace) -> int:
             "timeout_seconds": args.timeout_seconds,
             "api_key_env": args.api_key_env,
         },
-        "budget": {"max_usd": args.budget} if args.budget is not None else None,
         "concurrency": args.concurrency,
         "offline_debug": args.offline_debug,
         "topic": args.topic,
@@ -229,7 +227,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "version":
-        print("paperlens-core 0.1.3")
+        print("paperlens-core 0.1.4")
         return 0
     try:
         if args.command == "library":

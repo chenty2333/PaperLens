@@ -20,9 +20,11 @@ from paperlens_core.agents.llm import (
     json_retry_completion_minimum,
     parse_json_text_for_schema,
 )
+from paperlens_core.agent_loop import AgentLoop, PaperToolRegistry
 from paperlens_core.library import (
     LIBRARY_RECORD_FILENAME,
     LIBRARY_RECORD_SCHEMA_VERSION,
+    answer_library_question,
     build_library_ask_prompt,
     doctor_library,
     expand_search_query_terms,
@@ -518,10 +520,10 @@ def test_report_section_prompt_uses_expanded_memory_and_plan():
         read_mode="standard",
     )
 
-    assert REPORT_PLAN_SCHEMA["properties"]["sections"]["maxItems"] == 7
+    assert "maxItems" not in REPORT_PLAN_SCHEMA["properties"]["sections"]
     assert "section_kind" in REPORT_PLAN_SCHEMA["properties"]["sections"]["items"]["properties"]
     assert "detail_questions" in REPORT_PLAN_SCHEMA["properties"]["sections"]["items"]["properties"]
-    assert REPORT_SECTION_SCHEMA["properties"]["paragraphs"]["maxItems"] == 12
+    assert "maxItems" not in REPORT_SECTION_SCHEMA["properties"]["paragraphs"]
     assert "write only this planned section" in prompt
     assert "Mechanism section contract" in prompt
     assert "state or bottleneck" in prompt
@@ -1636,6 +1638,73 @@ def test_large_memory_schema_retry_has_higher_completion_floor():
     )
 
 
+def test_agent_loop_executes_paper_tool_before_final(tmp_path):
+    calls: list[dict[str, object]] = []
+
+    class FakeClient:
+        config = SimpleNamespace(kind="openai-compatible", model="fake-model")
+
+        def invoke_json(self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return SimpleNamespace(
+                    data={
+                        "action": "tool_request",
+                        "message": "Need page 1.",
+                        "tool_requests": [
+                            {
+                                "id": "t1",
+                                "tool": "paper.read_pages",
+                                "arguments_json": json.dumps({"pages": [1]}),
+                                "reason": "Read the target page.",
+                            }
+                        ],
+                        "final_json": "",
+                    },
+                    usage={"prompt_tokens": 10, "completion_tokens": 4},
+                    request_id="req_1",
+                    endpoint="fake",
+                )
+            return SimpleNamespace(
+                data={
+                    "action": "final",
+                    "message": "Done.",
+                    "tool_requests": [],
+                    "final_json": json.dumps({"ok": True, "page_seen": 1}),
+                },
+                usage={"prompt_tokens": 12, "completion_tokens": 5},
+                request_id="req_2",
+                endpoint="fake",
+            )
+
+    runtime = PaperLensRuntime(
+        artifacts=[{"page_no": 1, "text": "PagedAttention stores KV cache in blocks."}]
+    )
+    loop = AgentLoop(
+        client=FakeClient(),
+        tools=PaperToolRegistry(runtime=runtime, paper_id="p_test", title="Test"),
+        session_name="unit_agent",
+        objective="Read page then answer.",
+        final_schema_name="unit_final",
+        final_schema={
+            "type": "object",
+            "required": ["ok", "page_seen"],
+            "properties": {"ok": {"type": "boolean"}, "page_seen": {"type": "integer"}},
+        },
+        stage="unit",
+        paper_id="p_test",
+        trace_path=tmp_path / "agent_trace.jsonl",
+    )
+
+    result = loop.run(initial_context={"question": "what is on page 1?"})
+
+    assert result.final == {"ok": True, "page_seen": 1}
+    assert len(calls) == 2
+    assert calls[0]["max_tokens"] is None
+    trace = [json.loads(line) for line in (tmp_path / "agent_trace.jsonl").read_text().splitlines()]
+    assert any(row.get("event") == "tool_observation" for row in trace)
+
+
 def test_json_schema_parser_fills_nullable_required_defaults():
     data = parse_json_text_for_schema(
         '{"items": ["a"]}',
@@ -1675,6 +1744,131 @@ def test_library_ask_prompt_keeps_source_grounding():
     assert "specific papers" in prompt
     assert "cross-paper synthesis" in prompt
     assert "source_attribution" in prompt
+
+
+def test_library_question_uses_agent_loop_tools(tmp_path, monkeypatch):
+    output_dir = tmp_path / "out"
+    library_root = output_dir / ".paperlens" / "library"
+    library_root.mkdir(parents=True)
+    record = {
+        "schema_version": LIBRARY_RECORD_SCHEMA_VERSION,
+        "paper_id": "p_vllm",
+        "title": "PagedAttention",
+        "grade": "A",
+        "tags": ["kv", "cache"],
+        "source": {"year": 2023, "pages": 16},
+        "memory": {
+            "brief": "PagedAttention manages KV cache memory.",
+            "core_idea": "Use paging-style blocks for LLM KV cache.",
+            "problem": "KV cache fragmentation limits serving throughput.",
+            "mechanism": "A block table maps logical KV blocks to physical GPU blocks.",
+            "mechanism_steps": ["Split KV cache into blocks."],
+            "evidence_summary": "Evaluation reports lower memory waste.",
+            "evidence_items": [{"page_no": 2, "claim": "KV cache is block-managed."}],
+            "claims": [{"claim": "PagedAttention reduces KV cache waste.", "confidence": "high"}],
+            "reader_takeaways": ["Remember it for KV cache memory management."],
+            "qa_seed_questions": [],
+            "uncertainties": [],
+        },
+        "provenance": {"evidence_refs": [{"page_no": 2}]},
+        "outputs": {"briefing_md": "papers/p_vllm.md"},
+        "quality": {"claim_count": 1, "evidence_item_count": 1},
+        "record_hash": "hash",
+        "search_text": "PagedAttention KV cache paging memory",
+    }
+    (library_root / LIBRARY_RECORD_FILENAME).write_text(
+        json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+
+    calls: list[dict[str, object]] = []
+
+    class FakeClient:
+        config = SimpleNamespace(kind="openai-compatible", model="fake-model")
+
+        def invoke_json(self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return SimpleNamespace(
+                    data={
+                        "action": "tool_request",
+                        "message": "Need library evidence.",
+                        "tool_requests": [
+                            {
+                                "id": "s1",
+                                "tool": "library.search",
+                                "arguments_json": json.dumps({"query": "KV cache", "limit": 5}),
+                                "reason": "Find relevant read papers.",
+                            },
+                            {
+                                "id": "r1",
+                                "tool": "library.get_record",
+                                "arguments_json": json.dumps({"paper_id": "p_vllm"}),
+                                "reason": "Inspect claims and evidence.",
+                            },
+                        ],
+                        "final_json": "",
+                    },
+                    usage={"prompt_tokens": 10, "completion_tokens": 4},
+                    request_id="req_1",
+                    endpoint="fake",
+                )
+            return SimpleNamespace(
+                data={
+                    "action": "final",
+                    "message": "Done.",
+                    "tool_requests": [],
+                    "final_json": json.dumps(
+                        {
+                            "answer_markdown": "PagedAttention 是库里和 KV cache 最相关的论文。",
+                            "related_papers": [
+                                {
+                                    "paper_id": "p_vllm",
+                                    "title": "PagedAttention",
+                                    "report_path": "papers/p_vllm.md",
+                                    "why_related": "它讨论 KV cache paging。",
+                                }
+                            ],
+                            "confidence": "high",
+                            "source_attribution": {
+                                "paper_claims": ["PagedAttention manages KV cache memory."],
+                                "cross_paper_synthesis": [],
+                                "background_context": [],
+                                "evidence_limits": [],
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+                usage={"prompt_tokens": 12, "completion_tokens": 5},
+                request_id="req_2",
+                endpoint="fake",
+            )
+
+    monkeypatch.setattr("paperlens_core.library.JsonLlmClient", lambda *_args, **_kwargs: FakeClient())
+    answer = answer_library_question(
+        output_dir=output_dir,
+        config=CoreConfig(
+            provider=ProviderConfig(
+                kind="openai-compatible",
+                base_url="https://gateway.example/v1",
+                model="fake-model",
+                api_key="fake-key",
+            )
+        ),
+        question="哪些论文讲 KV cache？",
+    )
+
+    assert answer["confidence"] == "high"
+    assert calls[0]["schema_name"] == "paperlens_agent_turn"
+    assert calls[0]["max_tokens"] is None
+    trace = [
+        json.loads(line)
+        for line in (output_dir / ".paperlens" / "data" / "agent_trace.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+    assert any(row.get("event") == "tool_observation" and row["request"]["tool"] == "library.search" for row in trace)
+    assert any(row.get("event") == "tool_observation" and row["request"]["tool"] == "library.get_record" for row in trace)
 
 
 def test_library_rejects_old_library_record_schema_in_dev(tmp_path):
@@ -2081,8 +2275,7 @@ def test_memory_prompts_split_reading_from_single_verification():
     assert "MemoryPatchSet" in verify_prompt
 
 
-def test_rolling_memory_default_completion_budget_is_not_tiny(tmp_path, monkeypatch):
-    monkeypatch.delenv("PAPERLENS_ROLLING_MEMORY_MAX_TOKENS", raising=False)
+def test_rolling_memory_agent_session_omits_completion_budget(tmp_path):
     output_dir = tmp_path / "out"
     pipeline = PaperLensWorkflow(
         input_dir=tmp_path,
@@ -2104,15 +2297,21 @@ def test_rolling_memory_default_completion_budget_is_not_tiny(tmp_path, monkeypa
         control=ControlState(),
     )
     pipeline.prepare_output()
-    captured: dict[str, int] = {}
+    captured: dict[str, object] = {}
 
     class FakeClient:
         config = SimpleNamespace(kind="openai-compatible", model="fake-model")
 
         def invoke_json(self, **kwargs):
             captured["max_tokens"] = kwargs["max_tokens"]
+            captured["schema_name"] = kwargs["schema_name"]
             return SimpleNamespace(
-                data={"paper_id": "p_test", "operations": []},
+                data={
+                    "action": "final",
+                    "message": "done",
+                    "tool_requests": [],
+                    "final_json": json.dumps({"paper_id": "p_test", "operations": []}),
+                },
                 usage={"prompt_tokens": 10, "completion_tokens": 10},
                 endpoint="fake",
                 request_id="req",
@@ -2147,7 +2346,8 @@ def test_rolling_memory_default_completion_budget_is_not_tiny(tmp_path, monkeypa
         total_chunks=1,
     )
 
-    assert captured["max_tokens"] >= 40000
+    assert captured["schema_name"] == "paperlens_agent_turn"
+    assert captured["max_tokens"] is None
     pipeline.db.close()
 
 
@@ -2354,8 +2554,8 @@ def test_central_memory_verification_failure_keeps_existing_memory(tmp_path, mon
     pipeline.db.close()
 
 
-def test_default_budget_rates_estimate_nonzero_cost():
-    snapshot = BudgetManager(BudgetConfig(max_usd=0)).record_usage(
+def test_default_usage_rates_estimate_nonzero_cost():
+    snapshot = BudgetManager(BudgetConfig()).record_usage(
         {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000}
     )
 
@@ -2386,7 +2586,10 @@ def test_agentic_report_composer_uses_step_cache(tmp_path):
 
         def invoke_json(self, *, schema_name, **_kwargs):
             calls.append(schema_name)
-            if schema_name == "paperlens_report_plan":
+            prompt = str(_kwargs.get("user_prompt") or "")
+            if schema_name != "paperlens_agent_turn":
+                raise AssertionError(schema_name)
+            if '"session": "report_plan"' in prompt:
                 data = {
                     "paper_id": "p_test",
                     "grade": "A",
@@ -2408,7 +2611,7 @@ def test_agentic_report_composer_uses_step_cache(tmp_path):
                     "key_visual_pages": [],
                     "uncertainty_note": "",
                 }
-            elif schema_name == "paperlens_report_section":
+            elif '"session": "report_section_idea"' in prompt:
                 data = {
                     "section_id": "idea",
                     "title": "核心抽象",
@@ -2417,7 +2620,7 @@ def test_agentic_report_composer_uses_step_cache(tmp_path):
                     "used_evidence_refs": [],
                     "uncertainty_note": "",
                 }
-            elif schema_name == "paperlens_report_section_audit":
+            elif '"session": "report_section_audit_idea"' in prompt:
                 data = {
                     "verdict": "PASS",
                     "unsupported_items": [],
@@ -2426,9 +2629,14 @@ def test_agentic_report_composer_uses_step_cache(tmp_path):
                     "safe_usage_note": "",
                 }
             else:
-                raise AssertionError(schema_name)
+                raise AssertionError(prompt)
             return SimpleNamespace(
-                data=data,
+                data={
+                    "action": "final",
+                    "message": "done",
+                    "tool_requests": [],
+                    "final_json": json.dumps(data),
+                },
                 usage={"prompt_tokens": 10, "completion_tokens": 20},
                 endpoint="fake",
                 request_id=schema_name,
@@ -2458,9 +2666,9 @@ def test_agentic_report_composer_uses_step_cache(tmp_path):
     second, second_audit = compose_agentic_paper_report(**kwargs)
 
     assert calls == [
-        "paperlens_report_plan",
-        "paperlens_report_section",
-        "paperlens_report_section_audit",
+        "paperlens_agent_turn",
+        "paperlens_agent_turn",
+        "paperlens_agent_turn",
     ]
     assert first["explanation_markdown"] == second["explanation_markdown"]
     assert first_audit == second_audit
@@ -2472,7 +2680,7 @@ def test_agentic_report_composer_uses_step_cache(tmp_path):
     assert agent_runs[-1]["status"] == "CACHE_HIT"
 
 
-def test_report_composer_repairs_only_the_failed_section(tmp_path):
+def test_report_composer_records_failed_section_boundary_without_fixed_repair(tmp_path):
     output_dir = tmp_path / "out"
     data_dir = output_dir / ".paperlens" / "data"
     for relative in [
@@ -2497,7 +2705,10 @@ def test_report_composer_repairs_only_the_failed_section(tmp_path):
         config = SimpleNamespace(kind="openai-compatible", model="fake-model")
 
         def invoke_json(self, *, schema_name, **_kwargs):
-            if schema_name == "paperlens_report_plan":
+            prompt = str(_kwargs.get("user_prompt") or "")
+            if schema_name != "paperlens_agent_turn":
+                raise AssertionError(schema_name)
+            if '"session": "report_plan"' in prompt:
                 data = {
                     "paper_id": "p_test",
                     "grade": "A",
@@ -2519,49 +2730,32 @@ def test_report_composer_repairs_only_the_failed_section(tmp_path):
                     "key_visual_pages": [],
                     "uncertainty_note": "",
                 }
-            elif schema_name == "paperlens_report_section":
-                section_calls = sum(
-                    1
-                    for run in agent_runs
-                    if "report_section_idea" in str(run.get("agent_run_id"))
-                )
+            elif '"session": "report_section_idea"' in prompt:
                 data = {
                     "section_id": "idea",
                     "title": "核心抽象",
-                    "paragraphs": [
-                        "修复后的分段正文。" if section_calls else "含有过度结论的分段正文。"
-                    ],
+                    "paragraphs": ["含有过度结论的分段正文。"],
                     "used_claim_ids": [],
                     "used_evidence_refs": [],
                     "uncertainty_note": "",
                 }
-            elif schema_name == "paperlens_report_section_audit":
-                audit_calls = sum(
-                    1
-                    for run in agent_runs
-                    if "report_section_audit_idea" in str(run.get("agent_run_id"))
-                )
-                data = (
-                    {
-                        "verdict": "PASS_WITH_WEAKNESSES",
-                        "unsupported_items": [],
-                        "missing_items": [],
-                        "repair_instructions": [],
-                        "safe_usage_note": "Usable with evidence boundary.",
-                    }
-                    if audit_calls
-                    else {
-                        "verdict": "REPAIR",
-                        "unsupported_items": ["overclaim"],
-                        "missing_items": [],
-                        "repair_instructions": ["remove overclaim"],
-                        "safe_usage_note": "Needs section repair.",
-                    }
-                )
+            elif '"session": "report_section_audit_idea"' in prompt:
+                data = {
+                    "verdict": "REPAIR",
+                    "unsupported_items": ["overclaim"],
+                    "missing_items": [],
+                    "repair_instructions": ["remove overclaim"],
+                    "safe_usage_note": "Needs section repair.",
+                }
             else:
-                raise AssertionError(schema_name)
+                raise AssertionError(prompt)
             return SimpleNamespace(
-                data=data,
+                data={
+                    "action": "final",
+                    "message": "done",
+                    "tool_requests": [],
+                    "final_json": json.dumps(data),
+                },
                 usage={"prompt_tokens": 10, "completion_tokens": 20},
                 endpoint="fake",
                 request_id=schema_name,
@@ -2590,7 +2784,7 @@ def test_report_composer_repairs_only_the_failed_section(tmp_path):
 
     assert any(path.name == "PaperLens.md" for path in written)
     report = (output_dir / "papers" / "p_test_test_paper.md").read_text(encoding="utf-8")
-    assert "修复后的分段正文" in report
+    assert "含有过度结论的分段正文" in report
     assert not any("final_paper_report_repair" in str(run) for run in agent_runs)
 
 
@@ -2659,11 +2853,17 @@ def test_paper_question_answer_uses_cache(tmp_path, monkeypatch):
 
         def invoke_json(self, **_kwargs):
             calls["count"] += 1
+            answer = {
+                "answer_markdown": "这篇论文的核心是一个可复用的系统抽象。",
+                "cited_pages": [1],
+                "confidence": "high",
+            }
             return SimpleNamespace(
                 data={
-                    "answer_markdown": "这篇论文的核心是一个可复用的系统抽象。",
-                    "cited_pages": [1],
-                    "confidence": "high",
+                    "action": "final",
+                    "message": "done",
+                    "tool_requests": [],
+                    "final_json": json.dumps(answer),
                 },
                 usage={"prompt_tokens": 11, "completion_tokens": 22},
                 endpoint="fake",
@@ -2998,7 +3198,6 @@ def test_model_call_summary_groups_attempts(tmp_path):
                         "payload_bytes": 100,
                         "prompt_chars": 200,
                         "duration_seconds": 1.5,
-                        "completion_limit": 1200,
                         "image_count": 0,
                         "usage": {"prompt_tokens": 10, "completion_tokens": 2},
                     }
