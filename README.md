@@ -98,6 +98,14 @@ npm run core:build
 npm run tauri:build
 ```
 
+Bump and synchronize all release versions from one command:
+
+```powershell
+npm run version:patch
+```
+
+Use `npm run version:minor` or `npm run version:major` for larger releases. CI runs `npm run version:check` so `package.json`, Python metadata, Tauri config, Rust metadata, and lockfiles cannot drift silently.
+
 The installer is written to:
 
 ```text

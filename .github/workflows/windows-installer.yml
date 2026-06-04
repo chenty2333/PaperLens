@@ -122,6 +122,10 @@ jobs:
           python -m pip install --upgrade pip uv
           npm ci
 
+      - name: Check synchronized versions
+        shell: pwsh
+        run: npm run version:check
+
       - name: Configure updater for signed releases
         shell: pwsh
         env:

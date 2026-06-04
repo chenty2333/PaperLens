@@ -18,6 +18,7 @@ from paperlens_core.control import ControlState
 from paperlens_core.engine import PaperLensEngine
 from paperlens_core.library import read_library_records, search_library
 from paperlens_core.protocol import LibraryQuestionRequest, PaperQuestionRequest, RunRequest
+from paperlens_core.version import display_version
 from paperlens_core.workflow.stages import normalize_workflow_stage
 
 
@@ -810,7 +811,7 @@ class PaperLensRequestHandler(BaseHTTPRequestHandler):
         if parts == [] or parts == ["health"]:
             return {"status": "ok", "service": SERVER_VERSION}
         if parts == ["version"]:
-            return {"version": "paperlens-core 0.1.4", "service": SERVER_VERSION}
+            return {"version": display_version(), "service": SERVER_VERSION}
         if parts == ["workspaces", "current"]:
             output_dir = output_dir_from_query(query, self.state.current_output_dir)
             return load_public_workspace(output_dir)

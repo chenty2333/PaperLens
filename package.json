@@ -13,6 +13,12 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "app:build": "npm run core:build && npm run tauri:build",
+    "version:check": "uv run python scripts/sync_version.py check",
+    "version:sync": "uv run python scripts/sync_version.py sync",
+    "version:bump": "uv run python scripts/sync_version.py bump",
+    "version:patch": "uv run python scripts/sync_version.py bump patch",
+    "version:minor": "uv run python scripts/sync_version.py bump minor",
+    "version:major": "uv run python scripts/sync_version.py bump major",
     "core:version": "uv run python -m paperlens_core.main version",
     "core:build": "uv run --extra build python scripts/build_core.py"
   },

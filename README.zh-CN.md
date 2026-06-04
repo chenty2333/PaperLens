@@ -98,6 +98,14 @@ npm run core:build
 npm run tauri:build
 ```
 
+一次性推进并同步所有发布版本号：
+
+```powershell
+npm run version:patch
+```
+
+较大的版本使用 `npm run version:minor` 或 `npm run version:major`。CI 会执行 `npm run version:check`，避免 `package.json`、Python metadata、Tauri config、Rust metadata 和锁文件版本号静默漂移。
+
 安装包输出到：
 
 ```text
