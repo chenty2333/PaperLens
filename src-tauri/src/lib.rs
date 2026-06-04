@@ -71,6 +71,7 @@ impl Drop for CoreService {
                 }
             }
             let _ = child.kill();
+            let _ = child.wait();
         }
     }
 }
@@ -167,9 +168,7 @@ fn remove_cleanup_path(report: &mut CleanupReport, path: PathBuf) {
 
     match result {
         Ok(()) => report.removed.push(path_label(&path)),
-        Err(err) => report
-            .errors
-            .push(format!("{}: {err}", path_label(&path))),
+        Err(err) => report.errors.push(format!("{}: {err}", path_label(&path))),
     }
 }
 
@@ -343,12 +342,26 @@ fn ensure_core_service(
 
 #[tauri::command]
 fn shutdown_core_service(state: tauri::State<'_, CoreServiceState>) -> Result<(), String> {
+    stop_core_service(state.inner())
+}
+
+fn stop_core_service(state: &CoreServiceState) -> Result<(), String> {
     let mut slot = state
         .service
         .lock()
         .map_err(|_| "Core service state lock poisoned".to_string())?;
     *slot = None;
     Ok(())
+}
+
+fn stop_core_service_from_app(app: &tauri::AppHandle) {
+    let state = app.state::<CoreServiceState>();
+    if let Err(err) = stop_core_service(state.inner()) {
+        let _ = app.emit(
+            "core-service-error",
+            format!("Core service shutdown failed: {err}"),
+        );
+    }
 }
 
 #[tauri::command]
@@ -397,6 +410,15 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .on_window_event(|window, event| {
+            if matches!(
+                event,
+                tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
+            ) {
+                let state = window.state::<CoreServiceState>();
+                let _ = stop_core_service(state.inner());
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             ensure_core_service,
             shutdown_core_service,
@@ -413,6 +435,14 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                stop_core_service_from_app(app);
+            }
+        });
 }
