@@ -2525,8 +2525,9 @@ def test_high_risk_claim_selection_prioritizes_unsupported_claims():
 
 def test_paperlens_runtime_searches_and_reads_pages():
     pages = [
-        SimpleNamespace(page_no=1, text="abstract", captions=[]),
+        SimpleNamespace(paper_id="p_test", page_no=1, text="abstract", captions=[]),
         SimpleNamespace(
+            paper_id="p_test",
             page_no=5,
             text="KV cache fragmentation appears in evaluation results.",
             captions=[{"text": "Figure 2: memory waste"}],
@@ -2560,13 +2561,17 @@ def test_paperlens_runtime_searches_and_reads_pages():
     )
 
     assert search.results[0]["page_no"] == 5
+    assert search.results[0]["source_ids"] == ["span:p_test:p5:1"]
     assert "KV cache" in pack.results[0]["text"]
+    assert pack.results[0]["source_ids"][0] == "span:p_test:p5:1"
+    assert pack.as_dict()["source_ids"][0] == "span:p_test:p5:1"
     assert 5 in audit_context["candidate_unread_pages"]
     context_pack = audit_context["agent_context_pack"]
     assert context_pack["schema_version"] == "paperlens.context_pack.v1"
     assert context_pack["always_context"]["paper_id"] == "p_test"
     assert context_pack["budget"]["whole_paper_in_context"] is False
     assert context_pack["tool_trace"]
+    assert context_pack["tool_trace"][0]["source_ids"]
 
 
 def test_rolling_page_limit_env_can_make_formal_smoke_tiny(monkeypatch):

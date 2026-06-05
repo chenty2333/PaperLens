@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterable
 
+from paperlens_core.dom import stable_source_id
+from paperlens_core.dom.paper_dom import split_paragraphs
 from paperlens_core.memory_v3 import dict_value, list_payload, memory_v3_prompt_view
 
 
@@ -16,9 +18,16 @@ class ToolObservation:
     tool: str
     query: str
     results: list[dict[str, Any]]
+    source_ids: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
-        return {"tool": self.tool, "query": self.query, "results": self.results}
+        source_ids = self.source_ids or source_ids_from_results(self.results)
+        return {
+            "tool": self.tool,
+            "query": self.query,
+            "results": self.results,
+            "source_ids": source_ids,
+        }
 
 
 @dataclass(frozen=True)
@@ -83,6 +92,7 @@ class PaperLensRuntime:
                     number,
                     {
                         "page_no": number,
+                        "source_ids": page_text_source_ids(page, terms=terms),
                         "matched_terms": [term for term in terms if term in haystack][:8],
                         "snippet": best_snippet(text, terms, limit=520),
                         "captions": page_captions(page)[:3],
@@ -114,6 +124,7 @@ class PaperLensRuntime:
             results.append(
                 {
                     "page_no": number,
+                    "source_ids": page_source_ids(page),
                     "text": compact_text(page_text(page), limit=text_limit),
                     "captions": page_captions(page)[:5],
                     "figures": page_list_field(page, "figures")[:4],
@@ -151,6 +162,7 @@ class PaperLensRuntime:
                     number,
                     {
                         "page_no": number,
+                        "source_ids": page_visual_source_ids(page),
                         "captions": page_captions(page)[:5],
                         "figures": page_list_field(page, "figures")[:4],
                         "tables": page_list_field(page, "tables")[:4],
@@ -553,6 +565,84 @@ def page_captions_text(page: Any) -> str:
         else:
             captions.append(str(caption))
     return "\n".join(captions)
+
+
+def page_source_ids(page: Any, *, terms: list[str] | None = None) -> list[str]:
+    return dedupe_source_ids(
+        [
+            *explicit_source_ids(page),
+            *page_text_source_ids(page, terms=terms),
+            *page_visual_source_ids(page),
+        ]
+    )
+
+
+def page_text_source_ids(page: Any, *, terms: list[str] | None = None) -> list[str]:
+    terms = terms or []
+    source_ids = []
+    for index, block in enumerate(page_list_field(page, "blocks"), start=1):
+        if not isinstance(block, dict):
+            continue
+        text = str(block.get("text") or "")
+        if terms and not any(term in normalize_for_search(text) for term in terms):
+            continue
+        source_id = str(block.get("source_id") or block.get("text_span_id") or "").strip()
+        if source_id:
+            source_ids.append(source_id)
+        elif text.strip():
+            source_ids.append(generated_source_id(page, "span", index))
+    if source_ids:
+        return dedupe_source_ids(source_ids)
+    for index, paragraph in enumerate(split_paragraphs(page_text(page)), start=1):
+        if terms and not any(term in normalize_for_search(paragraph) for term in terms):
+            continue
+        source_ids.append(generated_source_id(page, "span", index))
+    return dedupe_source_ids(source_ids)
+
+
+def page_visual_source_ids(page: Any) -> list[str]:
+    source_ids = []
+    for field_name, kind in [("figures", "figure"), ("tables", "table")]:
+        for index, item in enumerate(page_list_field(page, field_name), start=1):
+            if isinstance(item, dict):
+                source_id = str(item.get("source_id") or "").strip()
+                source_ids.append(source_id or generated_source_id(page, kind, index))
+            elif item is not None:
+                source_ids.append(generated_source_id(page, kind, index))
+    return dedupe_source_ids(source_ids)
+
+
+def explicit_source_ids(page: Any) -> list[str]:
+    value = page.get("source_ids") if isinstance(page, dict) else getattr(page, "source_ids", [])
+    return [str(item).strip() for item in list_payload(value) if str(item).strip()]
+
+
+def source_ids_from_results(results: list[dict[str, Any]]) -> list[str]:
+    source_ids = []
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        source_ids.extend(str(item).strip() for item in list_payload(result.get("source_ids")))
+    return dedupe_source_ids(source_ids)
+
+
+def generated_source_id(page: Any, kind: str, index: int) -> str:
+    number = page_no(page) or "unknown"
+    return stable_source_id(page_paper_id(page), kind, f"p{number}", index)
+
+
+def page_paper_id(page: Any) -> str:
+    value = page.get("paper_id") if isinstance(page, dict) else getattr(page, "paper_id", None)
+    return str(value or "unknown").strip() or "unknown"
+
+
+def dedupe_source_ids(values: Iterable[Any]) -> list[str]:
+    result = []
+    for value in values:
+        source_id = str(value or "").strip()
+        if source_id and source_id not in result:
+            result.append(source_id)
+    return result
 
 
 def normalize_for_search(text: str) -> str:
