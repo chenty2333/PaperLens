@@ -56,6 +56,7 @@ from paperlens_core.schemas import (
 )
 from paperlens_core.workflow.agent import PaperLensWorkflow, paper_report_filename
 from paperlens_core.workflow.core_v2 import (
+    OBSERVATION_CARDS_SCHEMA,
     observation_cards_from_model_envelope,
     refresh_core_v2_audit_artifacts,
     run_core_v2_model_observation_tasks,
@@ -883,6 +884,42 @@ def test_model_observation_cards_reject_disallowed_observation_type():
             paper_id="p_test",
             task=task,
             valid_source_ids=sample_dom().source_ids(),
+        )
+
+
+def test_model_observation_cards_reject_background_provenance():
+    dom = sample_dom()
+    task = build_initial_reading_plan(dom).tasks[0]
+    observation_type = task.allowed_observation_types[0]
+    envelope = ArtifactEnvelope(
+        artifact_type="observation_cards",
+        producer="fake",
+        data={
+            "cards": [
+                {
+                    "observation_type": observation_type,
+                    "statement": "A card that tries to store background knowledge as a paper fact.",
+                    "source_ids": [dom.spans[0].source_id],
+                    "confidence": "high",
+                    "provenance": "background",
+                    "uncertainty": None,
+                    "extracted_numbers": [],
+                    "proposed_links": [],
+                }
+            ]
+        },
+    )
+    provenance_schema = OBSERVATION_CARDS_SCHEMA["properties"]["data"]["properties"]["cards"][
+        "items"
+    ]["properties"]["provenance"]
+
+    assert provenance_schema["enum"] == ["explicit", "inferred"]
+    with pytest.raises(ValueError, match="disallowed provenance=background"):
+        observation_cards_from_model_envelope(
+            envelope,
+            paper_id="p_test",
+            task=task,
+            valid_source_ids=dom.source_ids(),
         )
 
 

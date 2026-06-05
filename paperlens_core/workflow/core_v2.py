@@ -86,7 +86,7 @@ OBSERVATION_CARDS_SCHEMA: dict[str, Any] = {
                             },
                             "provenance": {
                                 "type": "string",
-                                "enum": ["explicit", "inferred", "background"],
+                                "enum": ["explicit", "inferred"],
                             },
                             "uncertainty": {"type": ["string", "null"]},
                             "extracted_numbers": {
@@ -760,6 +760,7 @@ def observation_cards_from_model_envelope(
                 f"Observation card for {task.task_id} returned disallowed observation_type="
                 f"{observation_type}; allowed={allowed_types}"
             )
+        provenance = clean_model_provenance(item.get("provenance"), task.task_id)
         observation_id = make_observation_id(
             task_id=task.task_id,
             observation_type=observation_type,
@@ -775,7 +776,7 @@ def observation_cards_from_model_envelope(
                 statement=statement,
                 source_ids=source_ids,
                 confidence=str(item.get("confidence") or "medium"),
-                provenance=str(item.get("provenance") or "explicit"),
+                provenance=provenance,
                 uncertainty=none_if_blank(item.get("uncertainty")),
                 extracted_numbers=[
                     number
@@ -790,6 +791,16 @@ def observation_cards_from_model_envelope(
             )
         )
     return result
+
+
+def clean_model_provenance(value: Any, task_id: str) -> str:
+    provenance = str(value or "explicit").strip()
+    if provenance not in {"explicit", "inferred"}:
+        raise ValueError(
+            f"Observation card for {task_id} returned disallowed provenance={provenance}; "
+            "allowed=['explicit', 'inferred']"
+        )
+    return provenance
 
 
 def task_allowed_observation_types(task: ReadingTask) -> list[str]:
