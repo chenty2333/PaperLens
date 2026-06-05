@@ -239,6 +239,80 @@ def test_observation_log_is_append_only_and_requires_sources():
         )
 
 
+def test_observation_log_append_many_preserves_order_and_default_duplicate_rejection():
+    first = ObservationCard(
+        observation_id="obs_first",
+        paper_id="p_test",
+        task_id="read_01_orientation",
+        observation_type=ObservationType.CLAIM,
+        statement="The paper makes a first claim.",
+        source_ids=["span:p_test:p1:1"],
+    )
+    second = ObservationCard(
+        observation_id="obs_second",
+        paper_id="p_test",
+        task_id="read_02_claim_inventory",
+        observation_type=ObservationType.CLAIM,
+        statement="The paper makes a second claim.",
+        source_ids=["span:p_test:p1:2"],
+    )
+
+    log = ObservationLog(paper_id="p_test").append_many([first, second])
+
+    assert [card.observation_id for card in log.cards] == ["obs_first", "obs_second"]
+    with pytest.raises(ValueError, match="duplicate observation_id"):
+        log.append_many([first])
+
+
+def test_observation_log_merge_ignores_identical_duplicates_but_rejects_conflicts():
+    first = ObservationCard(
+        observation_id="obs_same",
+        paper_id="p_test",
+        task_id="read_01_orientation",
+        observation_type=ObservationType.CLAIM,
+        statement="A claim.",
+        source_ids=["span:p_test:p1:1"],
+        created_at="t1",
+    )
+    identical_duplicate = ObservationCard(
+        observation_id="obs_same",
+        paper_id="p_test",
+        task_id="read_01_orientation",
+        observation_type=ObservationType.CLAIM,
+        statement="A claim.",
+        source_ids=["span:p_test:p1:1"],
+        created_at="t2",
+    )
+    conflict = ObservationCard(
+        observation_id="obs_same",
+        paper_id="p_test",
+        task_id="read_01_orientation",
+        observation_type=ObservationType.CLAIM,
+        statement="A different claim.",
+        source_ids=["span:p_test:p1:1"],
+        created_at="t3",
+    )
+
+    log = ObservationLog(paper_id="p_test", cards=(first,))
+    merged = log.merge(
+        ObservationLog(paper_id="p_test", cards=(identical_duplicate,)),
+        on_duplicate="ignore",
+    )
+
+    assert len(merged.cards) == 1
+    assert merged.cards[0].created_at == "t1"
+    with pytest.raises(ValueError, match="conflicting duplicate observation_id"):
+        log.merge(ObservationLog(paper_id="p_test", cards=(conflict,)), on_duplicate="ignore")
+
+
+def test_observation_log_merge_rejects_other_paper():
+    log = ObservationLog(paper_id="p_test")
+    other = ObservationLog(paper_id="p_other")
+
+    with pytest.raises(ValueError, match="observation paper_id mismatch"):
+        log.merge(other)
+
+
 def test_claim_graph_memory_and_audit_flow_from_observations():
     dom = sample_dom()
     result_span = next(span for span in dom.spans if "27%" in span.text)

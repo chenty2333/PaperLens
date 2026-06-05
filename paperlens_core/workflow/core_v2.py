@@ -313,13 +313,13 @@ def run_core_v2_model_observation_tasks(
                 f"Core v2 observation task failed for {paper.paper_id}/{task.task_id}: "
                 + "; ".join(node_result.issues)
             )
-        for card in observation_cards_from_model_envelope(
+        cards = observation_cards_from_model_envelope(
             node_result.output,
             paper_id=paper.paper_id,
             task=task,
             valid_source_ids=dom.source_ids(),
-        ):
-            log = log.append(card)
+        )
+        log = log.append_many(cards)
         completed_tasks += 1
 
     paths = write_core_v2_from_observation_log(
