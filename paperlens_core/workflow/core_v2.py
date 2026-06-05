@@ -251,6 +251,7 @@ def run_core_v2_model_observation_tasks(
 
         def handler(context: Any) -> ArtifactEnvelope:
             context.record_model_call()
+            context.record_tool_call("paper_dom.read_sources")
             with llm_call_context(
                 stage=stage,
                 paper_id=paper.paper_id,
@@ -294,6 +295,8 @@ def run_core_v2_model_observation_tasks(
                 "status": node_result.status.value,
                 "issues": node_result.issues,
                 "model_calls_used": node_result.model_calls_used,
+                "tool_calls_used": node_result.tool_calls_used,
+                "used_tools": node_result.used_tools,
             }
         )
         if node_result.status != NodeStatus.PASS or node_result.output is None:

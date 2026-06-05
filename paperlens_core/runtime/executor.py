@@ -38,6 +38,8 @@ class NodeSpec:
     def __post_init__(self) -> None:
         if not self.node_id.strip():
             raise ValueError("node_id cannot be blank")
+        if any(not tool.strip() for tool in self.allowed_tools):
+            raise ValueError("allowed_tools cannot contain blank tool names")
         if self.max_steps < 1:
             raise ValueError("max_steps must be >= 1")
         if self.max_model_calls < 0:
@@ -53,6 +55,8 @@ class NodeResult:
     output: ArtifactEnvelope | None = None
     steps_used: int = 0
     model_calls_used: int = 0
+    tool_calls_used: int = 0
+    used_tools: list[str] = field(default_factory=list)
     elapsed_seconds: float = 0.0
     issues: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -65,6 +69,8 @@ class NodeContext:
     started_at: float = field(default_factory=time.time)
     steps_used: int = 0
     model_calls_used: int = 0
+    tool_calls_used: int = 0
+    used_tools: list[str] = field(default_factory=list)
 
     def require_step(self) -> None:
         self.steps_used += 1
@@ -81,6 +87,20 @@ class NodeContext:
             raise RuntimeBudgetExceeded(
                 f"{self.spec.node_id} exceeded max_model_calls={self.spec.max_model_calls}"
             )
+
+    def record_tool_call(self, tool_name: str) -> None:
+        tool_name = tool_name.strip()
+        if not tool_name:
+            raise NodeExecutionError("tool_name cannot be blank")
+        self.tool_calls_used += 1
+        self._check_runtime_budget()
+        if tool_name not in self.spec.allowed_tools:
+            allowed = ", ".join(self.spec.allowed_tools) or "none"
+            raise NodeExecutionError(
+                f"{self.spec.node_id} attempted disallowed tool={tool_name}; allowed={allowed}"
+            )
+        if tool_name not in self.used_tools:
+            self.used_tools.append(tool_name)
 
     def _check_runtime_budget(self) -> None:
         elapsed = time.time() - self.started_at
@@ -122,6 +142,8 @@ def run_finite_node(
             output=output,
             steps_used=context.steps_used,
             model_calls_used=context.model_calls_used,
+            tool_calls_used=context.tool_calls_used,
+            used_tools=list(context.used_tools),
             elapsed_seconds=round(time.time() - context.started_at, 3),
         )
     except Exception as exc:
@@ -134,6 +156,8 @@ def run_finite_node(
             status=status,
             steps_used=context.steps_used,
             model_calls_used=context.model_calls_used,
+            tool_calls_used=context.tool_calls_used,
+            used_tools=list(context.used_tools),
             elapsed_seconds=round(time.time() - context.started_at, 3),
             issues=[str(exc)],
         )

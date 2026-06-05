@@ -472,6 +472,42 @@ def test_artifact_envelope_rejects_wrong_output_type():
     assert "Expected artifact_type=claim_graph" in result.issues[0]
 
 
+def test_finite_runtime_node_enforces_allowed_tools():
+    spec = NodeSpec(
+        node_id="read_sources",
+        output_artifact_type="observation_cards",
+        allowed_tools=("paper_dom.read_sources",),
+    )
+
+    def handler(context):
+        context.record_tool_call("paper_dom.read_sources")
+        return ArtifactEnvelope(
+            artifact_type="observation_cards",
+            producer="unit",
+            data=[],
+        )
+
+    result = run_finite_node(spec, [], handler)
+
+    assert result.status == NodeStatus.PASS
+    assert result.tool_calls_used == 1
+    assert result.used_tools == ["paper_dom.read_sources"]
+
+
+def test_finite_runtime_node_rejects_disallowed_tools():
+    spec = NodeSpec(node_id="read_sources", allowed_tools=("paper_dom.read_sources",))
+
+    def handler(context):
+        context.record_tool_call("filesystem.read")
+        return None
+
+    result = run_finite_node(spec, [], handler)
+
+    assert result.status == NodeStatus.FAIL
+    assert result.tool_calls_used == 1
+    assert "disallowed tool=filesystem.read" in result.issues[0]
+
+
 def test_stage03_writes_core_v2_artifact_envelopes(tmp_path):
     output_dir = tmp_path / "out"
     input_dir = tmp_path / "in"
@@ -638,6 +674,8 @@ def test_core_v2_model_observer_rewrites_observation_graph_artifacts(tmp_path):
     assert metrics["data"]["publish_status"] == PublishStatus.REVIEWED
     assert len(usage_rows) == calls["count"]
     assert all(row["status"] == "PASS" for row in agent_runs)
+    assert all(row["tool_calls_used"] == 1 for row in agent_runs)
+    assert all(row["used_tools"] == ["paper_dom.read_sources"] for row in agent_runs)
 
 
 def test_refresh_core_v2_audit_artifacts_blocks_missing_dom_sources(tmp_path):
