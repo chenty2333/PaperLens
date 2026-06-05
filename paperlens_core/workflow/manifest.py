@@ -113,6 +113,33 @@ def validate_paperlens_output(
         ]
     if paper_reports and len(memory_v3_files) < len(paper_reports):
         issues.append("PaperMemoryV3 file count is lower than paper report count")
+    core_root = output_dir / ".paperlens" / "data" / "core" / "v2"
+    core_paper_ids = (
+        sorted(expected_paper_ids)
+        if expected_paper_ids is not None
+        else sorted(path.name for path in core_root.iterdir() if path.is_dir())
+        if core_root.exists()
+        else []
+    )
+    for paper_id in core_paper_ids:
+        paper_root = core_root / paper_id
+        if not paper_root.exists():
+            continue
+        core_manifest_path = paper_root / "core_manifest.v1.json"
+        if not core_manifest_path.exists():
+            issues.append(f"Core v2 manifest is missing for {paper_id}")
+            continue
+        try:
+            core_manifest = json.loads(core_manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            issues.append(f"Core v2 manifest is invalid JSON for {paper_id}")
+            continue
+        if core_manifest.get("artifact_type") != "core_v2_manifest":
+            issues.append(f"Core v2 manifest has wrong artifact_type for {paper_id}")
+            continue
+        data = core_manifest.get("data") if isinstance(core_manifest.get("data"), dict) else {}
+        if data.get("status") != "COMPLETE":
+            issues.append(f"Core v2 manifest is incomplete for {paper_id}")
     result = {
         "status": "PASS" if not issues else "FAIL",
         "checked_links": checked_links,

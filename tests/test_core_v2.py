@@ -57,6 +57,7 @@ from paperlens_core.schemas import (
 from paperlens_core.workflow.agent import PaperLensWorkflow, paper_report_filename
 from paperlens_core.workflow.core_v2 import (
     OBSERVATION_CARDS_SCHEMA,
+    build_core_v2_manifest,
     load_core_v2_dom_and_plan,
     observation_cards_from_model_envelope,
     refresh_core_v2_audit_artifacts,
@@ -782,6 +783,9 @@ def test_stage03_writes_core_v2_artifact_envelopes(tmp_path):
         report_audit_envelope = json.loads(
             (core_root / "report_audit_findings.v1.json").read_text(encoding="utf-8")
         )
+        core_manifest_envelope = json.loads(
+            (core_root / "core_manifest.v1.json").read_text(encoding="utf-8")
+        )
 
         assert dom_envelope["artifact_type"] == "paper_dom"
         assert plan_envelope["artifact_type"] == "reading_plan"
@@ -789,6 +793,7 @@ def test_stage03_writes_core_v2_artifact_envelopes(tmp_path):
         assert metrics_envelope["artifact_type"] == "core_quality_metrics"
         assert report_envelope["artifact_type"] == "graph_report_draft"
         assert report_audit_envelope["artifact_type"] == "report_audit_findings"
+        assert core_manifest_envelope["artifact_type"] == "core_v2_manifest"
         assert dom_envelope["data"]["spans"]
         assert plan_envelope["data"]["tasks"]
         assert graph_envelope["data"]["nodes"]
@@ -796,6 +801,13 @@ def test_stage03_writes_core_v2_artifact_envelopes(tmp_path):
         assert report_audit_envelope["data"] == []
         assert metrics_envelope["data"]["fact_node_count"] > 0
         assert metrics_envelope["data"]["publish_status"] == PublishStatus.DRAFT_WEAK
+        assert core_manifest_envelope["data"]["status"] == "COMPLETE"
+        assert core_manifest_envelope["data"]["publish_status"] == PublishStatus.DRAFT_WEAK
+        assert core_manifest_envelope["data"]["consumable"] is False
+        assert core_manifest_envelope["data"]["issues"] == []
+        assert all(
+            item["exists"] for item in core_manifest_envelope["data"]["required_artifacts"].values()
+        )
         assert any(
             item.artifact_type == "core_v2_paper_dom"
             for item in pipeline.db.list_artifact_versions()
@@ -880,6 +892,7 @@ def test_core_v2_model_observer_rewrites_observation_graph_artifacts(tmp_path):
     observation_log = json.loads((root / "observation_log.v1.json").read_text(encoding="utf-8"))
     graph = json.loads((root / "claim_graph.v1.json").read_text(encoding="utf-8"))
     metrics = json.loads((root / "quality_metrics.v1.json").read_text(encoding="utf-8"))
+    core_manifest = json.loads((root / "core_manifest.v1.json").read_text(encoding="utf-8"))
 
     assert result["tasks"] == calls["count"]
     assert result["cards"] == calls["count"]
@@ -887,6 +900,10 @@ def test_core_v2_model_observer_rewrites_observation_graph_artifacts(tmp_path):
     assert len(observation_log["data"]["cards"]) == calls["count"]
     assert graph["producer"] == "paperlens_core_v2_model_observer"
     assert metrics["data"]["publish_status"] == PublishStatus.REVIEWED
+    assert core_manifest["artifact_type"] == "core_v2_manifest"
+    assert core_manifest["data"]["status"] == "COMPLETE"
+    assert core_manifest["data"]["publish_status"] == PublishStatus.REVIEWED
+    assert core_manifest["data"]["consumable"] is True
     assert len(usage_rows) == calls["count"]
     assert all(row["status"] == "PASS" for row in agent_runs)
     assert all(row["tool_calls_used"] == 1 for row in agent_runs)
@@ -968,6 +985,38 @@ def test_write_core_v2_from_observation_log_rejects_inconsistent_inputs(tmp_path
             observation_log=ObservationLog(paper_id="p_other"),
             producer="unit_test",
         )
+
+
+def test_core_v2_manifest_reports_incomplete_artifact_sets(tmp_path):
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    write_core_v2_artifacts(
+        data_dir=tmp_path,
+        paper=paper,
+        layout={
+            "pages": [
+                {
+                    "page_no": 1,
+                    "text": "Abstract\n\nWe propose a block table method for serving.",
+                    "section_candidates": [{"title": "Abstract", "level": 1}],
+                }
+            ]
+        },
+    )
+    root = tmp_path / "core" / "v2" / "p_test"
+    (root / "quality_metrics.v1.json").unlink()
+
+    manifest = build_core_v2_manifest(root, "p_test")
+
+    assert manifest["status"] == "INCOMPLETE"
+    assert manifest["publish_status"] is None
+    assert manifest["consumable"] is False
+    assert "missing:quality_metrics.v1.json" in manifest["issues"]
 
 
 def test_refresh_core_v2_audit_artifacts_blocks_missing_dom_sources(tmp_path):

@@ -213,6 +213,33 @@ def test_output_validation_counts_only_canonical_paper_reports(tmp_path):
     assert result["paper_memory_v3"] == 1
 
 
+def test_output_validation_rejects_incomplete_core_v2_manifest(tmp_path):
+    (tmp_path / "papers").mkdir()
+    (tmp_path / ".paperlens" / "library" / "index").mkdir(parents=True)
+    memory_v3_dir = tmp_path / ".paperlens" / "data" / "memory" / "v3"
+    memory_v3_dir.mkdir(parents=True)
+    (tmp_path / ".paperlens" / "data" / "core" / "v2" / "p_test").mkdir(parents=True)
+    (tmp_path / "PaperLens.md").write_text(
+        "# PaperLens\n\n- [A] [Good](./papers/p_test.md)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "papers" / "p_test.md").write_text("# Good\n\nA useful report.\n", encoding="utf-8")
+    (tmp_path / ".paperlens" / "library" / LIBRARY_RECORD_FILENAME).write_text(
+        "{}\n", encoding="utf-8"
+    )
+    (tmp_path / ".paperlens" / "library" / "index" / "search_index.json").write_text(
+        "[]", encoding="utf-8"
+    )
+    (memory_v3_dir / "p_test.paper_memory.v3.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Core v2 manifest is missing"):
+        validate_paperlens_output(
+            tmp_path,
+            expected_report_names={"p_test.md"},
+            expected_paper_ids={"p_test"},
+        )
+
+
 def test_render_freeform_report_normalizes_model_newlines():
     paper = PaperRecord(
         paper_id="p_test", file_path="paper.pdf", file_hash="hash", canonical_title="Test Paper"
