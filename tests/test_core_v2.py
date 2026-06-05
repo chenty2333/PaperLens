@@ -241,6 +241,59 @@ def test_report_draft_is_a_claim_graph_view_with_declared_evidence():
     }
 
 
+def test_report_audit_rejects_declared_evidence_not_linked_to_declared_node():
+    dom = sample_dom()
+    first_source_id = dom.spans[0].source_id
+    second_source_id = dom.spans[-1].source_id
+    first_observation = ObservationCard(
+        observation_id="obs_claim_first",
+        paper_id="p_test",
+        task_id="read_02_claim_inventory",
+        observation_type=ObservationType.CLAIM,
+        statement="The paper proposes a block table method.",
+        source_ids=[first_source_id],
+    )
+    second_observation = ObservationCard(
+        observation_id="obs_claim_second",
+        paper_id="p_test",
+        task_id="read_02_claim_inventory",
+        observation_type=ObservationType.CLAIM,
+        statement="The paper reports a latency result.",
+        source_ids=[second_source_id],
+    )
+    graph = graph_from_observations("p_test", [first_observation, second_observation])
+    bad = GraphReportDraft(
+        paper_id="p_test",
+        sections=[
+            ReportSection(
+                section_id="claims",
+                title="Claims",
+                paragraphs=[
+                    ReportParagraph(
+                        paragraph_id="claim_01",
+                        markdown="The paper proposes a block table method.",
+                        used_node_ids=["claim:obs_claim_first"],
+                        used_evidence_ids=[f"evidence:{second_source_id}"],
+                    )
+                ],
+            )
+        ],
+    )
+
+    findings = audit_report_draft_against_graph(bad, graph)
+
+    assert {finding.code for finding in findings} == {
+        "report_paragraph_node_missing_declared_evidence",
+        "report_paragraph_evidence_not_linked_to_declared_node",
+    }
+    evidence_finding = next(
+        finding
+        for finding in findings
+        if finding.code == "report_paragraph_evidence_not_linked_to_declared_node"
+    )
+    assert evidence_finding.source_ids == [second_source_id]
+
+
 def test_finite_runtime_node_enforces_model_call_budget():
     spec = NodeSpec(
         node_id="read_orientation",

@@ -73,6 +73,9 @@ def audit_report_draft_against_graph(
     findings: list[AuditFinding] = []
     node_ids = set(graph.nodes)
     evidence_node_ids = {node.node_id for node in graph.nodes.values() if node.kind == "evidence"}
+    support_edges = {
+        (edge.source_id, edge.target_id) for edge in graph.edges if edge.kind == "supported_by"
+    }
     for section in draft.sections:
         for paragraph in section.paragraphs:
             if not paragraph.used_node_ids:
@@ -117,4 +120,55 @@ def audit_report_draft_against_graph(
                             node_id=evidence_id,
                         )
                     )
+            known_node_ids = [node_id for node_id in paragraph.used_node_ids if node_id in node_ids]
+            known_evidence_ids = [
+                evidence_id
+                for evidence_id in paragraph.used_evidence_ids
+                if evidence_id in evidence_node_ids
+            ]
+            for node_id in known_node_ids:
+                if not any(
+                    (node_id, evidence_id) in support_edges for evidence_id in known_evidence_ids
+                ):
+                    findings.append(
+                        AuditFinding(
+                            finding_id=(
+                                "paragraph_node_without_declared_support:"
+                                f"{paragraph.paragraph_id}:{node_id}"
+                            ),
+                            severity=AuditSeverity.ERROR,
+                            code="report_paragraph_node_missing_declared_evidence",
+                            message=(
+                                "Report paragraph declares a graph node but none of its declared "
+                                "evidence IDs support that node"
+                            ),
+                            node_id=node_id,
+                        )
+                    )
+            for evidence_id in known_evidence_ids:
+                if not any((node_id, evidence_id) in support_edges for node_id in known_node_ids):
+                    findings.append(
+                        AuditFinding(
+                            finding_id=(
+                                "paragraph_evidence_without_declared_node:"
+                                f"{paragraph.paragraph_id}:{evidence_id}"
+                            ),
+                            severity=AuditSeverity.ERROR,
+                            code="report_paragraph_evidence_not_linked_to_declared_node",
+                            message=(
+                                "Report paragraph declares an evidence ID that does not support "
+                                "any declared graph node"
+                            ),
+                            node_id=evidence_id,
+                            source_ids=evidence_source_ids(graph, evidence_id),
+                        )
+                    )
     return findings
+
+
+def evidence_source_ids(graph: ClaimGraph, evidence_id: str) -> list[str]:
+    node = graph.nodes.get(evidence_id)
+    if node is None:
+        return []
+    source_id = str(node.payload.get("source_id") or "")
+    return [source_id] if source_id else []
