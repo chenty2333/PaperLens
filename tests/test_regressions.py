@@ -44,6 +44,10 @@ from paperlens_core.library import (
     write_paperlens_library,
 )
 from paperlens_core.main import configure_utf8_stdio
+from paperlens_core.report import (
+    combine_report_and_memory_audits,
+    final_report_audit_acceptable,
+)
 from paperlens_core.memory_v3 import (
     MEMORY_V3_SCHEMA_VERSION,
     read_paper_memory_v3,
@@ -61,11 +65,9 @@ from paperlens_core.workflow.agent import (
     build_report_section_audit_prompt,
     build_report_section_prompt,
     clean_model_markdown,
-    combine_report_and_memory_audits,
     compose_agentic_paper_report,
     ensure_memory_audit_operation,
     fallback_memory_audit,
-    final_report_audit_acceptable,
     memory_audit_acceptable,
     normalize_memory_audit,
     normalize_report_plan,
@@ -872,6 +874,31 @@ def test_final_report_audit_combines_memory_boundary():
     assert combined["verdict"] == "PASS_WITH_WEAKNESSES"
     assert combined["missing_items"] == ["hardware setup needs checking"]
     assert "PaperMemory audit confidence is low" in combined["safe_usage_note"]
+
+
+def test_final_report_audit_blocks_when_memory_audit_is_unsafe():
+    combined = combine_report_and_memory_audits(
+        {"verdict": "PASS", "unsupported_items": [], "missing_items": [], "safe_usage_note": ""},
+        {
+            "schema_version": "paper_memory.v3",
+            "audit_trail": {
+                "memory_audit": {
+                    "status": "NEED_HUMAN_REVIEW",
+                    "unsupported_claims": ["claim has no source"],
+                    "missing_items": [],
+                    "repair_instructions": ["re-read method section"],
+                    "safe_to_generate_capsule": False,
+                    "confidence": "medium",
+                }
+            },
+        },
+    )
+
+    assert combined is not None
+    assert combined["verdict"] == "NEED_HUMAN_REVIEW"
+    assert combined["unsupported_items"] == ["claim has no source"]
+    assert combined["correction_notes"] == ["re-read method section"]
+    assert "requires human review" in combined["safe_usage_note"]
 
 
 def test_memory_patch_set_updates_capsule_fields(tmp_path):

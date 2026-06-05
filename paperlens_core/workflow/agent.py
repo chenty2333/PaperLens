@@ -39,6 +39,8 @@ from paperlens_core.pdf.pymupdf_parser import parse_pdf
 from paperlens_core.pdf.qa import parse_quality
 from paperlens_core.quality_snapshot import write_core_quality_snapshot
 from paperlens_core.report import (
+    combine_report_and_memory_audits,
+    final_report_audit_acceptable,
     write_core_graph_report_view,
 )
 from paperlens_core.report.memory_context import (
@@ -5494,71 +5496,6 @@ def report_generation_must_succeed() -> bool:
 
 def utc_timestamp() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-
-def final_report_audit_acceptable(report_audit: dict[str, Any] | None) -> bool:
-    if not report_audit:
-        return False
-    return report_audit.get("verdict") in {"PASS", "PASS_WITH_WEAKNESSES"}
-
-
-def combine_report_and_memory_audits(
-    report_audit: dict[str, Any] | None, paper_memory: dict[str, Any] | None
-) -> dict[str, Any] | None:
-    if report_audit is None:
-        return None
-    memory = paper_memory_v3_dict(dict_value(paper_memory))
-    memory_audit = dict_value(dict_value(memory.get("audit_trail")).get("memory_audit"))
-    if not memory_audit:
-        return report_audit
-    result = dict(report_audit)
-    verdict = str(result.get("verdict") or "NEED_HUMAN_REVIEW")
-    memory_status = str(memory_audit.get("status") or "").upper()
-    memory_safe = bool(memory_audit.get("safe_to_generate_capsule"))
-    memory_confidence = str(memory_audit.get("confidence") or "low")
-    if memory_status == "NEED_HUMAN_REVIEW" or not memory_safe:
-        verdict = "NEED_HUMAN_REVIEW"
-    elif memory_status == "PASS_WITH_WEAKNESSES" or memory_confidence == "low":
-        if verdict == "PASS":
-            verdict = "PASS_WITH_WEAKNESSES"
-    result["verdict"] = verdict
-    result["unsupported_items"] = compact_string_list(
-        list_payload(result.get("unsupported_items"))
-        + normalized_string_list(memory_audit.get("unsupported_claims")),
-        limit=5,
-        max_chars=240,
-    )
-    result["missing_items"] = compact_string_list(
-        list_payload(result.get("missing_items"))
-        + normalized_string_list(memory_audit.get("missing_items")),
-        limit=5,
-        max_chars=240,
-    )
-    result["correction_notes"] = compact_string_list(
-        list_payload(result.get("correction_notes"))
-        + normalized_string_list(memory_audit.get("repair_instructions")),
-        limit=5,
-        max_chars=240,
-    )
-    notes = compact_string_list(
-        [result.get("safe_usage_note"), memory_audit_safe_usage_note(memory_audit)],
-        limit=2,
-        max_chars=260,
-    )
-    result["safe_usage_note"] = "; ".join(notes)
-    return result
-
-
-def memory_audit_safe_usage_note(memory_audit: dict[str, Any]) -> str:
-    status = str(memory_audit.get("status") or "").upper()
-    confidence = str(memory_audit.get("confidence") or "low")
-    if status == "PASS":
-        return ""
-    if status == "NEED_HUMAN_REVIEW" or not memory_audit.get("safe_to_generate_capsule"):
-        return "PaperMemory audit requires human review before treating this capsule as reviewed."
-    if confidence == "low":
-        return "PaperMemory audit confidence is low; keep evidence boundaries visible."
-    return "PaperMemory audit passed with evidence boundaries."
 
 
 def render_paperlens_report(
