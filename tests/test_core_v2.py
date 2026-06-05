@@ -199,6 +199,7 @@ def test_claim_graph_keeps_valid_observation_relationship_edges():
         source_ids=[second_source_id],
         proposed_links=[
             {"source_id": "obs_mechanism", "target_id": "obs_claim", "kind": "explain"},
+            {"source_id": "obs_mechanism", "target_id": "obs_claim", "kind": "support"},
             {"source_id": "obs_missing", "target_id": "obs_claim", "kind": "explains"},
             {"source_id": "obs_mechanism", "target_id": "obs_claim", "kind": "unknown"},
         ],
@@ -211,6 +212,40 @@ def test_claim_graph_keeps_valid_observation_relationship_edges():
         ("mechanism:obs_mechanism", "claim:obs_claim", "explains")
     ]
     assert relationship_edges[0].payload == {"proposed_by_observation_id": "obs_mechanism"}
+
+
+def test_audit_blocks_supported_by_edges_that_do_not_target_evidence():
+    dom = sample_dom()
+    claim = ObservationCard(
+        observation_id="obs_claim",
+        paper_id="p_test",
+        task_id="read_02_claim_inventory",
+        observation_type=ObservationType.CLAIM,
+        statement="The paper proposes a block table method.",
+        source_ids=[dom.spans[0].source_id],
+    )
+    mechanism = ObservationCard(
+        observation_id="obs_mechanism",
+        paper_id="p_test",
+        task_id="read_03_method_mechanism",
+        observation_type=ObservationType.MECHANISM,
+        statement="The block table mechanism organizes serving state.",
+        source_ids=[dom.spans[-1].source_id],
+    )
+    graph = graph_from_observations("p_test", [claim, mechanism])
+    graph.edges.append(
+        GraphEdge(
+            source_id="claim:obs_claim",
+            target_id="mechanism:obs_mechanism",
+            kind="supported_by",
+        )
+    )
+
+    findings = audit_claim_graph(graph, dom)
+
+    assert "mechanism:obs_mechanism" not in graph.evidence_ids_for("claim:obs_claim")
+    assert {finding.code for finding in findings} >= {"support_edge_target_not_evidence"}
+    assert publish_status_from_findings(findings) == PublishStatus.BLOCKED
 
 
 def test_audit_blocks_missing_sources_and_unsupported_fact_nodes():

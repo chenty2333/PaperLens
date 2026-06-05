@@ -22,7 +22,9 @@ def audit_claim_graph(graph: ClaimGraph, dom: PaperDOM) -> list[AuditFinding]:
     findings: list[AuditFinding] = []
     dom_source_ids = dom.source_ids()
     for index, edge in enumerate(graph.edges, start=1):
-        if edge.source_id not in graph.nodes:
+        source_node = graph.nodes.get(edge.source_id)
+        target_node = graph.nodes.get(edge.target_id)
+        if source_node is None:
             findings.append(
                 AuditFinding(
                     finding_id=f"dangling_edge_source:{index}:{edge.source_id}",
@@ -32,7 +34,7 @@ def audit_claim_graph(graph: ClaimGraph, dom: PaperDOM) -> list[AuditFinding]:
                     node_id=edge.source_id,
                 )
             )
-        if edge.target_id not in graph.nodes:
+        if target_node is None:
             findings.append(
                 AuditFinding(
                     finding_id=f"dangling_edge_target:{index}:{edge.target_id}",
@@ -40,6 +42,37 @@ def audit_claim_graph(graph: ClaimGraph, dom: PaperDOM) -> list[AuditFinding]:
                     code="dangling_graph_edge_target",
                     message=f"ClaimGraph edge target_id does not exist: {edge.target_id}",
                     node_id=edge.target_id,
+                )
+            )
+        if (
+            edge.kind == "supported_by"
+            and target_node is not None
+            and target_node.kind != "evidence"
+        ):
+            findings.append(
+                AuditFinding(
+                    finding_id=f"support_edge_target_not_evidence:{index}:{edge.target_id}",
+                    severity=AuditSeverity.ERROR,
+                    code="support_edge_target_not_evidence",
+                    message=(
+                        "ClaimGraph supported_by edge must target an evidence node backed by a "
+                        f"PaperDOM source_id, got {target_node.kind}: {edge.target_id}"
+                    ),
+                    node_id=edge.target_id,
+                )
+            )
+        if (
+            edge.kind == "supported_by"
+            and source_node is not None
+            and source_node.kind == "evidence"
+        ):
+            findings.append(
+                AuditFinding(
+                    finding_id=f"support_edge_source_is_evidence:{index}:{edge.source_id}",
+                    severity=AuditSeverity.ERROR,
+                    code="support_edge_source_is_evidence",
+                    message="ClaimGraph supported_by edge source cannot be an evidence node",
+                    node_id=edge.source_id,
                 )
             )
     for node in graph.nodes.values():

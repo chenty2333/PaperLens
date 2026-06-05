@@ -32,9 +32,6 @@ EdgeKind = Literal[
 
 EDGE_KINDS = set(get_args(EdgeKind))
 EDGE_KIND_ALIASES = {
-    "support": "supported_by",
-    "supports": "supported_by",
-    "supported_by": "supported_by",
     "contradict": "contradicted_by",
     "contradicts": "contradicted_by",
     "contradicted_by": "contradicted_by",
@@ -92,7 +89,10 @@ class ClaimGraph(BaseModel):
         return [
             edge.target_id
             for edge in self.edges
-            if edge.source_id == node_id and edge.kind == "supported_by"
+            if edge.source_id == node_id
+            and edge.kind == "supported_by"
+            and self.nodes.get(edge.target_id) is not None
+            and self.nodes[edge.target_id].kind == "evidence"
         ]
 
 
