@@ -2453,6 +2453,16 @@ def test_core_quality_snapshot_tracks_structural_and_qa_metrics(tmp_path):
                 json.dumps(
                     {
                         "paper_id": "p_test",
+                        "question": "选中了图但没有可用引用",
+                        "cited_source_ids": [],
+                        "selected_graph_nodes": ["claim:obs"],
+                        "cache_hit": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "paper_id": "p_test",
                         "question": "离线缓存问题",
                         "cited_source_ids": [],
                         "selected_graph_nodes": [],
@@ -2477,11 +2487,16 @@ def test_core_quality_snapshot_tracks_structural_and_qa_metrics(tmp_path):
     assert paper_snapshot["numeric_fact_node_count"] >= 1
     assert paper_snapshot["numeric_locatable_rate"] == 1.0
     assert paper_snapshot["unsupported_fact_node_rate"] == 0.0
-    assert paper_snapshot["qa"]["total"] == 2
-    assert paper_snapshot["qa"]["graph_hit_rate"] == 0.5
-    assert paper_snapshot["qa"]["cache_hit_rate"] == 0.5
-    assert snapshot["aggregate"]["qa_total"] == 2
-    assert snapshot["aggregate"]["qa_cache_hit_rate"] == 0.5
+    assert paper_snapshot["qa"]["total"] == 3
+    assert paper_snapshot["qa"]["graph_hit_count"] == 1
+    assert paper_snapshot["qa"]["graph_hit_rate"] == 0.3333
+    assert paper_snapshot["qa"]["graph_context_selected_count"] == 2
+    assert paper_snapshot["qa"]["graph_context_selected_rate"] == 0.6667
+    assert paper_snapshot["qa"]["cache_hit_rate"] == 0.3333
+    assert snapshot["aggregate"]["qa_total"] == 3
+    assert snapshot["aggregate"]["qa_graph_hit_count"] == 1
+    assert snapshot["aggregate"]["qa_graph_context_selected_count"] == 2
+    assert snapshot["aggregate"]["qa_cache_hit_rate"] == 0.3333
 
 
 def test_stage17_manifest_includes_core_quality_snapshot(tmp_path):

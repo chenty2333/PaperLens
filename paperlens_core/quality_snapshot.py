@@ -122,6 +122,7 @@ def aggregate_quality(
     total_qa = len(qa_rows)
     qa_cache_hits = sum(1 for row in qa_rows if row.get("cache_hit") is True)
     qa_graph_hits = sum(1 for row in qa_rows if qa_row_has_graph_hit(row))
+    qa_graph_context_selected = sum(1 for row in qa_rows if qa_row_selected_graph_context(row))
     cache_event_count = sum(1 for row in event_rows if row.get("event") == "cache_hit")
     blocked = [paper for paper in papers if paper.get("publish_status") == "BLOCKED"]
     draft_weak = [paper for paper in papers if paper.get("publish_status") == "DRAFT_WEAK"]
@@ -138,6 +139,10 @@ def aggregate_quality(
         "qa_total": total_qa,
         "qa_graph_hit_count": qa_graph_hits,
         "qa_graph_hit_rate": rate(qa_graph_hits, total_qa, default=0.0),
+        "qa_graph_context_selected_count": qa_graph_context_selected,
+        "qa_graph_context_selected_rate": rate(
+            qa_graph_context_selected, total_qa, default=0.0
+        ),
         "qa_cache_hit_count": qa_cache_hits,
         "qa_cache_hit_rate": rate(qa_cache_hits, total_qa, default=0.0),
         "cache_hit_event_count": cache_event_count,
@@ -148,12 +153,15 @@ def qa_metrics_for_paper(rows: list[dict[str, Any]], paper_id: str) -> dict[str,
     paper_rows = [row for row in rows if row.get("paper_id") == paper_id]
     total = len(paper_rows)
     graph_hits = sum(1 for row in paper_rows if qa_row_has_graph_hit(row))
+    graph_context_selected = sum(1 for row in paper_rows if qa_row_selected_graph_context(row))
     source_cited = sum(1 for row in paper_rows if row.get("cited_source_ids"))
     cache_hits = sum(1 for row in paper_rows if row.get("cache_hit") is True)
     return {
         "total": total,
         "graph_hit_count": graph_hits,
         "graph_hit_rate": rate(graph_hits, total, default=0.0),
+        "graph_context_selected_count": graph_context_selected,
+        "graph_context_selected_rate": rate(graph_context_selected, total, default=0.0),
         "source_cited_count": source_cited,
         "source_cited_rate": rate(source_cited, total, default=0.0),
         "cache_hit_count": cache_hits,
@@ -162,7 +170,11 @@ def qa_metrics_for_paper(rows: list[dict[str, Any]], paper_id: str) -> dict[str,
 
 
 def qa_row_has_graph_hit(row: dict[str, Any]) -> bool:
-    return bool(row.get("cited_source_ids") or row.get("selected_graph_nodes"))
+    return bool(row.get("cited_source_ids") and row.get("selected_graph_nodes"))
+
+
+def qa_row_selected_graph_context(row: dict[str, Any]) -> bool:
+    return bool(row.get("selected_graph_nodes"))
 
 
 def read_claim_graph(path: Path) -> ClaimGraph | None:
