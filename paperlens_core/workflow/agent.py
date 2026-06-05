@@ -49,6 +49,7 @@ from paperlens_core.pdf.layout_index import build_layout_index
 from paperlens_core.pdf.pymupdf_parser import parse_pdf
 from paperlens_core.pdf.qa import parse_quality
 from paperlens_core.quality_snapshot import write_core_quality_snapshot
+from paperlens_core.reading import select_rolling_read_pages
 from paperlens_core.report import (
     combine_report_and_memory_audits,
     final_report_audit_acceptable,
@@ -2334,60 +2335,6 @@ def llm_skim_classify_to_models(
         decision.false_negative_risk = max(decision.false_negative_risk, 0.65)
         decision.reason_codes.append("keyword_anti_leak_guardrail")
     return card, decision
-
-
-def select_rolling_read_pages(
-    artifacts: list[Any],
-    skim: SkimCard,
-    decision: ClassificationDecision,
-    *,
-    read_mode: str = "standard",
-) -> list[Any]:
-    pages = [page for page in artifacts if normalize_excerpt(getattr(page, "text", ""), limit=80)]
-    if not pages:
-        return []
-    max_pages_env = os.getenv("PAPERLENS_ROLLING_MAX_PAGES")
-    if max_pages_env is None:
-        return pages
-    default_max_pages = "14"
-    try:
-        max_pages = int(max_pages_env)
-    except ValueError:
-        max_pages = int(default_max_pages)
-    max_pages = max(1, min(max_pages, 24))
-    by_no = {page.page_no: page for page in pages}
-    selected: list[int] = []
-
-    def add(page_no: int | None) -> None:
-        if page_no and page_no in by_no and page_no not in selected:
-            selected.append(page_no)
-
-    for page in pages[:3]:
-        add(page.page_no)
-    for ref in skim.evidence_refs:
-        add(ref.page_no)
-    keywords = [
-        "abstract",
-        "introduction",
-        "overview",
-        "design",
-        "implementation",
-        "evaluation",
-        "experiment",
-        "limitation",
-        "conclusion",
-    ]
-    for page in pages:
-        haystack = normalize_for_search(
-            " ".join([page.text[:1400]] + [str(c.get("text") or "") for c in page.captions[:4]])
-        )
-        if any(keyword in haystack for keyword in keywords):
-            add(page.page_no)
-        if len(selected) >= max_pages - 1:
-            break
-    for page in pages[-2:]:
-        add(page.page_no)
-    return [by_no[page_no] for page_no in selected[:max_pages]]
 
 
 def dedupe_artifacts_by_page(artifacts: list[Any]) -> list[Any]:

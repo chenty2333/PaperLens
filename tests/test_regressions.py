@@ -48,6 +48,7 @@ from paperlens_core.report import (
     combine_report_and_memory_audits,
     final_report_audit_acceptable,
 )
+from paperlens_core.reading import select_rolling_read_pages
 from paperlens_core.memory_v3 import (
     MEMORY_V3_SCHEMA_VERSION,
     read_paper_memory_v3,
@@ -80,7 +81,6 @@ from paperlens_core.workflow.agent import (
     render_freeform_paper_report,
     render_paperlens_report,
     sanitize_reader_hostile_text,
-    select_rolling_read_pages,
     summarize_model_calls,
     user_visible_review_items,
     validate_paperlens_output,
@@ -2545,6 +2545,26 @@ def test_rolling_page_limit_env_can_make_formal_smoke_tiny(monkeypatch):
     selected = select_rolling_read_pages(pages, skim, decision)
 
     assert [page.page_no for page in selected] == [1]
+
+
+def test_rolling_page_selection_includes_skim_evidence_refs(monkeypatch):
+    monkeypatch.setenv("PAPERLENS_ROLLING_MAX_PAGES", "4")
+    pages = [
+        SimpleNamespace(page_no=page_no, text=f"page {page_no}", captions=[])
+        for page_no in range(1, 8)
+    ]
+    skim = SkimCard(
+        paper_id="p_test",
+        problem="problem",
+        evidence_refs=[EvidenceRef(paper_id="p_test", page_no=6)],
+    )
+    decision = ClassificationDecision(
+        paper_id="p_test", class_label="B", confidence=0.9, false_negative_risk=0.1
+    )
+
+    selected = select_rolling_read_pages(pages, skim, decision)
+
+    assert [page.page_no for page in selected] == [1, 2, 3, 6]
 
 
 def test_standard_read_mode_reads_all_usable_pages_by_default(monkeypatch):
