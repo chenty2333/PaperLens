@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from pydantic import BaseModel, Field
 
 from paperlens_core.audit import AuditFinding, AuditSeverity
@@ -37,6 +39,10 @@ SECTION_TITLES = {
     "limitation": "Limitations",
     "concept": "Concept Bridge",
 }
+
+NUMBER_TEXT_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_])[-+]?(?:\d[\d,]*(?:\.\d+)?|\.\d+)(?:\s?%|[A-Za-z]{1,6})?"
+)
 
 
 def build_report_draft_from_graph(
@@ -196,6 +202,34 @@ def audit_report_draft_against_graph(
                             node_id=node_id,
                         )
                     )
+            declared_node_texts = [graph.nodes[node_id].label for node_id in known_node_ids]
+            if paragraph_overlaps_any_node:
+                for number_text in number_texts(paragraph.markdown):
+                    if declared_node_texts and not any(
+                        number_text_is_located(number_text, node_text)
+                        for node_text in declared_node_texts
+                    ):
+                        findings.append(
+                            AuditFinding(
+                                finding_id=(
+                                    "paragraph_number_not_grounded:"
+                                    f"{paragraph.paragraph_id}:"
+                                    f"{normalized_number_text(number_text)}"
+                                ),
+                                severity=AuditSeverity.ERROR,
+                                code="report_paragraph_number_not_grounded_in_declared_nodes",
+                                message=(
+                                    "Report paragraph includes a numeric value that is not present "
+                                    "in its declared ClaimGraph node labels"
+                                ),
+                                node_id=known_node_ids[0] if known_node_ids else None,
+                                source_ids=[
+                                    source_id
+                                    for evidence_id in known_evidence_ids
+                                    for source_id in evidence_source_ids(graph, evidence_id)
+                                ],
+                            )
+                        )
             for evidence_id in known_evidence_ids:
                 if not any((node_id, evidence_id) in support_edges for node_id in known_node_ids):
                     findings.append(
@@ -326,3 +360,22 @@ def compact_source_text(text: str, *, limit: int = 260) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[:limit].rstrip() + "..."
+
+
+def number_texts(text: str) -> list[str]:
+    result: list[str] = []
+    for match in NUMBER_TEXT_PATTERN.finditer(str(text or "")):
+        value = match.group(0).strip()
+        if value and value not in result:
+            result.append(value)
+    return result
+
+
+def number_text_is_located(number_text: str, source_text: str) -> bool:
+    needle = normalized_number_text(number_text)
+    haystack = normalized_number_text(source_text)
+    return bool(needle and needle in haystack)
+
+
+def normalized_number_text(text: str) -> str:
+    return re.sub(r"[\s,]+", "", str(text or "").casefold())

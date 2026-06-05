@@ -961,6 +961,47 @@ def test_report_draft_is_a_claim_graph_view_with_declared_evidence():
     }
 
 
+def test_report_audit_rejects_numeric_fact_added_outside_declared_nodes():
+    dom = sample_dom()
+    result_span = next(span for span in dom.spans if "27%" in span.text)
+    observation = ObservationCard(
+        observation_id="obs_result",
+        paper_id="p_test",
+        task_id="read_06_result_extraction",
+        observation_type=ObservationType.RESULT,
+        statement="The method improves latency by 27% on Dataset-A.",
+        source_ids=[result_span.source_id],
+    )
+    graph = graph_from_observations("p_test", [observation])
+    draft = GraphReportDraft(
+        paper_id="p_test",
+        sections=[
+            ReportSection(
+                section_id="results",
+                title="Results",
+                paragraphs=[
+                    ReportParagraph(
+                        paragraph_id="result_01",
+                        markdown=(
+                            "The method improves latency by 27% on Dataset-A and reaches "
+                            "99% accuracy."
+                        ),
+                        used_node_ids=["result:obs_result"],
+                        used_evidence_ids=[f"evidence:{result_span.source_id}"],
+                    )
+                ],
+            )
+        ],
+    )
+
+    findings = audit_report_draft_against_graph(draft, graph)
+
+    assert {finding.code for finding in findings} == {
+        "report_paragraph_number_not_grounded_in_declared_nodes"
+    }
+    assert findings[0].source_ids == [result_span.source_id]
+
+
 def test_report_audit_blocks_draft_for_other_claim_graph():
     dom = sample_dom()
     observation = ObservationCard(
