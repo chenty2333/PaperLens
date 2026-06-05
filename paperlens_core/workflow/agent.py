@@ -18,8 +18,11 @@ from paperlens_core.agents.providers import describe_provider
 from paperlens_core.budget import BudgetManager
 from paperlens_core.config import CoreConfig
 from paperlens_core.control import ControlState
+from paperlens_core.core_manifest import inspect_core_v2_artifact_set
 from paperlens_core.db import ArtifactDb
+from paperlens_core.dom import PaperDOM
 from paperlens_core.events import EventWriter, write_json
+from paperlens_core.graph import ClaimGraph
 from paperlens_core.library import write_paperlens_library
 from paperlens_core.memory_v3 import (
     dict_value,
@@ -38,7 +41,8 @@ from paperlens_core.pdf.layout_index import build_layout_index
 from paperlens_core.pdf.pymupdf_parser import parse_pdf
 from paperlens_core.pdf.qa import parse_quality
 from paperlens_core.quality_snapshot import write_core_quality_snapshot
-from paperlens_core.runtime import PaperLensRuntime, context_pack_prompt
+from paperlens_core.report import GraphReportDraft, render_graph_report_markdown
+from paperlens_core.runtime import PaperLensRuntime, context_pack_prompt, read_typed_artifact
 from paperlens_core.schemas import (
     ArtifactVersion,
     ClassificationDecision,
@@ -5742,6 +5746,14 @@ def write_final_report_bundle(
         )
         report_path.write_text(report_markdown, encoding="utf-8")
         written.append(report_path)
+        core_graph_report_path = write_core_graph_report_view(
+            output_dir=output_dir,
+            data_dir=data_dir,
+            paper=paper,
+            report_name=report_name,
+        )
+        if core_graph_report_path is not None:
+            written.append(core_graph_report_path)
         paper_report_rows.append(
             {
                 "paper": paper,
@@ -5749,6 +5761,11 @@ def write_final_report_bundle(
                 "decision": decision,
                 "card": card,
                 "report_name": report_name,
+                "core_graph_report_name": (
+                    core_graph_report_path.relative_to(output_dir / "papers").as_posix()
+                    if core_graph_report_path is not None
+                    else None
+                ),
                 "report_title": markdown_title(report_markdown) or paper.canonical_title,
                 "paper_memory_v3": paper_memory_v3,
                 "model_report": model_report,
@@ -5778,6 +5795,60 @@ def write_final_report_bundle(
         )
     )
     return written
+
+
+def write_core_graph_report_view(
+    *,
+    output_dir: Path,
+    data_dir: Path,
+    paper: PaperRecord,
+    report_name: str,
+) -> Path | None:
+    manifest = inspect_core_v2_artifact_set(data_dir, paper.paper_id)
+    if manifest.get("consumable") is not True:
+        return None
+    root = data_dir / "core" / "v2" / paper.paper_id
+    try:
+        dom_envelope = read_typed_artifact(root / "paper_dom.v1.json", expected_type="paper_dom")
+        graph_envelope = read_typed_artifact(
+            root / "claim_graph.v1.json", expected_type="claim_graph"
+        )
+        draft_envelope = read_typed_artifact(
+            root / "report_draft.v1.json",
+            expected_type="graph_report_draft",
+        )
+        quality_envelope = read_typed_artifact(
+            root / "quality_metrics.v1.json",
+            expected_type="core_quality_metrics",
+        )
+    except (FileNotFoundError, ValueError):
+        return None
+    if not all(
+        isinstance(envelope.data, dict)
+        for envelope in [dom_envelope, graph_envelope, draft_envelope, quality_envelope]
+    ):
+        return None
+    dom = PaperDOM.model_validate(dom_envelope.data)
+    graph = ClaimGraph.model_validate(graph_envelope.data)
+    draft = GraphReportDraft.model_validate(draft_envelope.data)
+    quality = quality_envelope.data if isinstance(quality_envelope.data, dict) else {}
+    markdown = render_graph_report_markdown(
+        title=paper.canonical_title or paper.paper_id,
+        draft=draft,
+        graph=graph,
+        dom=dom,
+        quality=quality,
+    )
+    path = output_dir / "papers" / "core_graph" / core_graph_report_filename(report_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(markdown, encoding="utf-8")
+    return path
+
+
+def core_graph_report_filename(report_name: str) -> str:
+    if report_name.endswith(".md"):
+        return report_name[:-3] + ".core_graph.md"
+    return report_name + ".core_graph.md"
 
 
 def report_generation_must_succeed() -> bool:
@@ -5910,8 +5981,12 @@ def render_paperlens_report(
     for row in ranked:
         decision = row_decision(row)
         reason = one_line_row_reason(row)
+        graph_link = core_graph_report_link(row, output_language=output_language)
+        suffix = f"；{graph_link}" if graph_link and output_language != "en" else ""
+        if graph_link and output_language == "en":
+            suffix = f"; {graph_link}"
         lines.append(
-            f"- [{decision.class_label}] [{display_row_title(row)}](./papers/{row['report_name']}) - {reason}"
+            f"- [{decision.class_label}] [{display_row_title(row)}](./papers/{row['report_name']}) - {reason}{suffix}"
         )
     if visible_reviews:
         if output_language == "en":
@@ -5934,6 +6009,14 @@ def render_paperlens_report(
         label = "Estimated model cost" if output_language == "en" else "模型成本估算"
         lines.append(f"{label}: ${estimated_usd:.4f}.")
     return "\n".join(lines) + "\n"
+
+
+def core_graph_report_link(row: dict[str, Any], *, output_language: str) -> str:
+    name = string_or_none(row.get("core_graph_report_name"))
+    if not name:
+        return ""
+    label = "Core graph report" if output_language == "en" else "事实图报告"
+    return f"[{label}](./papers/{name})"
 
 
 def one_line_row_reason(row: dict[str, Any]) -> str:

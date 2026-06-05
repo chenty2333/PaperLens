@@ -3,6 +3,7 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 from paperlens_core.audit import AuditFinding, AuditSeverity
+from paperlens_core.dom import PaperDOM
 from paperlens_core.grounding import text_overlaps_any_reference
 from paperlens_core.graph import ClaimGraph
 
@@ -193,3 +194,106 @@ def evidence_source_ids(graph: ClaimGraph, evidence_id: str) -> list[str]:
         return []
     source_id = str(node.payload.get("source_id") or "")
     return [source_id] if source_id else []
+
+
+def render_graph_report_markdown(
+    *,
+    title: str,
+    draft: GraphReportDraft,
+    graph: ClaimGraph,
+    dom: PaperDOM,
+    quality: dict | None = None,
+) -> str:
+    quality = quality or {}
+    lines = [
+        f"# {title or draft.paper_id}",
+        "",
+        "> Deterministic ClaimGraph report view. Paragraph facts come from graph nodes; evidence",
+        "> is declared with ClaimGraph evidence IDs and PaperDOM source IDs.",
+        "",
+        f"- Paper ID: `{draft.paper_id}`",
+        f"- Graph schema: `{graph.schema_version}`",
+    ]
+    publish_status = quality.get("publish_status")
+    if publish_status:
+        lines.append(f"- Publish status: `{publish_status}`")
+    lines.append("")
+    for section in draft.sections:
+        lines.extend([f"## {section.title}", ""])
+        for paragraph in section.paragraphs:
+            node_ids = [node_id for node_id in paragraph.used_node_ids if node_id in graph.nodes]
+            evidence_ids = [
+                evidence_id
+                for evidence_id in paragraph.used_evidence_ids
+                if evidence_id in graph.nodes
+            ]
+            source_ids = graph_report_source_ids(graph=graph, evidence_ids=evidence_ids)
+            lines.extend(
+                [
+                    paragraph.markdown.strip(),
+                    "",
+                    f"- ClaimGraph nodes: {inline_code_list(node_ids)}",
+                    f"- Evidence nodes: {inline_code_list(evidence_ids)}",
+                    f"- PaperDOM sources: {inline_code_list(source_ids)}",
+                ]
+            )
+            for source_id in source_ids[:4]:
+                source = describe_dom_source(dom, source_id)
+                if source:
+                    lines.append(f"  - {source}")
+            lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def graph_report_source_ids(*, graph: ClaimGraph, evidence_ids: list[str]) -> list[str]:
+    source_ids = []
+    for evidence_id in evidence_ids:
+        for source_id in evidence_source_ids(graph, evidence_id):
+            if source_id not in source_ids:
+                source_ids.append(source_id)
+    return source_ids
+
+
+def inline_code_list(values: list[str]) -> str:
+    return ", ".join(f"`{value}`" for value in values) if values else "`none`"
+
+
+def describe_dom_source(dom: PaperDOM, source_id: str) -> str:
+    for span in dom.spans:
+        if span.source_id == source_id:
+            return (
+                f"`{source_id}` ({span.kind}, page {span.page_no}): "
+                f"{compact_source_text(span.text)}"
+            )
+    for figure in dom.figures:
+        if figure.source_id == source_id:
+            return (
+                f"`{source_id}` ({figure.kind}, page {figure.page_no}): "
+                f"{compact_source_text(figure.caption or '')}"
+            )
+    for table in dom.tables:
+        if table.source_id == source_id:
+            return (
+                f"`{source_id}` ({table.kind}, page {table.page_no}): "
+                f"{compact_source_text(table.caption or '')}"
+            )
+    for equation in dom.equations:
+        if equation.source_id == source_id:
+            return (
+                f"`{source_id}` ({equation.kind}, page {equation.page_no}): "
+                f"{compact_source_text(equation.latex_or_text)}"
+            )
+    for section in dom.sections:
+        if section.source_id == source_id:
+            return (
+                f"`{source_id}` ({section.kind}, page {section.page_no}): "
+                f"{compact_source_text(section.title)}"
+            )
+    return ""
+
+
+def compact_source_text(text: str, *, limit: int = 260) -> str:
+    cleaned = " ".join(str(text or "").split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[:limit].rstrip() + "..."

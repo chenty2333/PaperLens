@@ -43,6 +43,7 @@ from paperlens_core.report import (
     ReportSection,
     audit_report_draft_against_graph,
     build_report_draft_from_graph,
+    render_graph_report_markdown,
 )
 from paperlens_core.runtime import (
     ArtifactEnvelope,
@@ -61,7 +62,11 @@ from paperlens_core.schemas import (
     PaperRecord,
     SkimCard,
 )
-from paperlens_core.workflow.agent import PaperLensWorkflow, paper_report_filename
+from paperlens_core.workflow.agent import (
+    PaperLensWorkflow,
+    paper_report_filename,
+    write_final_report_bundle,
+)
 from paperlens_core.workflow.core_v2 import (
     OBSERVATION_CARDS_SCHEMA,
     load_core_v2_dom_and_plan,
@@ -195,7 +200,7 @@ def test_reading_plan_targets_equation_sources_for_mechanism_tasks():
 
 def test_observation_log_is_append_only_and_requires_sources():
     dom = sample_dom()
-    source_id = dom.spans[0].source_id
+    source_id = next(span.source_id for span in dom.spans if "block table method" in span.text)
     observation = ObservationCard(
         observation_id=make_observation_id(
             task_id="read_01_orientation",
@@ -489,7 +494,7 @@ def test_audit_blocks_fact_text_unrelated_to_declared_source():
 
 def test_audit_blocks_dangling_claim_graph_edges():
     dom = sample_dom()
-    source_id = dom.spans[0].source_id
+    source_id = next(span.source_id for span in dom.spans if "block table method" in span.text)
     observation = ObservationCard(
         observation_id="obs_claim",
         paper_id="p_test",
@@ -581,6 +586,35 @@ def test_report_draft_is_a_claim_graph_view_with_declared_evidence():
     assert {finding.code for finding in ungrounded_findings} == {
         "report_paragraph_text_not_grounded_in_declared_nodes"
     }
+
+
+def test_graph_report_markdown_declares_nodes_evidence_and_sources():
+    dom = sample_dom()
+    source_id = next(span.source_id for span in dom.spans if "block table method" in span.text)
+    observation = ObservationCard(
+        observation_id="obs_claim",
+        paper_id="p_test",
+        task_id="read_02_claim_inventory",
+        observation_type=ObservationType.CLAIM,
+        statement="The paper proposes a block table method.",
+        source_ids=[source_id],
+    )
+    graph = graph_from_observations("p_test", [observation])
+    draft = build_report_draft_from_graph(graph)
+
+    markdown = render_graph_report_markdown(
+        title="Test Paper",
+        draft=draft,
+        graph=graph,
+        dom=dom,
+        quality={"publish_status": PublishStatus.REVIEWED},
+    )
+
+    assert "# Test Paper" in markdown
+    assert "ClaimGraph nodes: `claim:obs_claim`" in markdown
+    assert f"Evidence nodes: `evidence:{source_id}`" in markdown
+    assert f"PaperDOM sources: `{source_id}`" in markdown
+    assert "The paper proposes a block table method." in markdown
 
 
 def test_report_audit_rejects_declared_evidence_not_linked_to_declared_node():
@@ -1430,6 +1464,86 @@ def test_core_v2_qa_memory_view_promotes_reviewed_claim_graph_context(tmp_path):
     assert "core_v2_context_priority: primary_reviewed_claim_graph" in prompt
     assert "memory_fallback_policy:" in prompt
     assert "Legacy claim should not be primary" not in prompt
+
+
+def test_export_writes_core_graph_report_view_for_reviewed_core_artifacts(tmp_path):
+    output_dir = tmp_path / "out"
+    data_dir = output_dir / ".paperlens" / "data"
+    (output_dir / "papers").mkdir(parents=True)
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    decision = ClassificationDecision(
+        paper_id="p_test",
+        class_label="A",
+        confidence=0.9,
+        false_negative_risk=0.1,
+    )
+    layout = {
+        "pages": [
+            {
+                "page_no": 1,
+                "text": "Abstract\n\nWe propose a block table method for faster serving.",
+                "section_candidates": [{"title": "Abstract", "level": 1}],
+            }
+        ]
+    }
+    dom = build_paper_dom_from_layout(
+        paper_id=paper.paper_id,
+        title=paper.canonical_title,
+        layout=layout,
+    )
+    source_id = next(span.source_id for span in dom.spans if "block table method" in span.text)
+    write_core_v2_from_observation_log(
+        data_dir=data_dir,
+        paper=paper,
+        dom=dom,
+        reading_plan=build_initial_reading_plan(dom),
+        observation_log=ObservationLog(paper_id="p_test").append(
+            ObservationCard(
+                observation_id="obs_claim",
+                paper_id="p_test",
+                task_id="read_02_claim_inventory",
+                observation_type=ObservationType.CLAIM,
+                statement="We propose a block table method for faster serving.",
+                source_ids=[source_id],
+            )
+        ),
+        producer="unit_test",
+    )
+
+    written = write_final_report_bundle(
+        output_dir=output_dir,
+        data_dir=data_dir,
+        evidence_dir=output_dir / ".paperlens",
+        client=None,
+        record_usage=lambda _stage, _usage: None,
+        record_agent_run=lambda _run: None,
+        stage="stage_15_export",
+        papers=[paper],
+        skim_cards=[],
+        decisions=[decision],
+        paper_cards=[],
+        review_items=[],
+        budget={},
+        config={"offline_debug": True},
+        topic=None,
+        idea=None,
+        cache_dir=output_dir / ".paperlens" / "cache",
+    )
+
+    graph_report = output_dir / "papers" / "core_graph" / "p_test_test_paper.core_graph.md"
+    index = (output_dir / "PaperLens.md").read_text(encoding="utf-8")
+    markdown = graph_report.read_text(encoding="utf-8")
+    assert graph_report in written
+    assert "[事实图报告](./papers/core_graph/p_test_test_paper.core_graph.md)" in index
+    assert "ClaimGraph nodes: `claim:obs_claim`" in markdown
+    assert f"Evidence nodes: `evidence:{source_id}`" in markdown
+    assert f"PaperDOM sources: `{source_id}`" in markdown
 
 
 def test_core_v2_qa_context_does_not_use_blocked_claim_graph(tmp_path):
