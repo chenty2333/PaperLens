@@ -57,6 +57,7 @@ from paperlens_core.schemas import (
 from paperlens_core.workflow.agent import PaperLensWorkflow, paper_report_filename
 from paperlens_core.workflow.core_v2 import (
     OBSERVATION_CARDS_SCHEMA,
+    load_core_v2_dom_and_plan,
     observation_cards_from_model_envelope,
     refresh_core_v2_audit_artifacts,
     run_core_v2_model_observation_tasks,
@@ -894,6 +895,79 @@ def test_core_v2_model_observer_rewrites_observation_graph_artifacts(tmp_path):
     assert all(
         row["token_usage"] == {"prompt_tokens": 10, "completion_tokens": 2} for row in agent_runs
     )
+
+
+def test_write_core_v2_from_observation_log_writes_complete_core_inputs(tmp_path):
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    layout = {
+        "pages": [
+            {
+                "page_no": 1,
+                "text": "Abstract\n\nWe propose a block table method for serving.",
+                "section_candidates": [{"title": "Abstract", "level": 1}],
+            }
+        ]
+    }
+    dom = build_paper_dom_from_layout(
+        paper_id=paper.paper_id,
+        title=paper.canonical_title,
+        layout=layout,
+    )
+    reading_plan = build_initial_reading_plan(dom)
+    claim_span = next(span for span in dom.spans if "block table method" in span.text)
+
+    paths = write_core_v2_from_observation_log(
+        data_dir=tmp_path,
+        paper=paper,
+        dom=dom,
+        reading_plan=reading_plan,
+        observation_log=ObservationLog(paper_id="p_test").append(
+            ObservationCard(
+                observation_id="obs_claim",
+                paper_id="p_test",
+                task_id="read_02_claim_inventory",
+                observation_type=ObservationType.CLAIM,
+                statement="The paper proposes a block table method.",
+                source_ids=[claim_span.source_id],
+            )
+        ),
+        producer="unit_test",
+    )
+    loaded_dom, loaded_plan = load_core_v2_dom_and_plan(tmp_path, "p_test")
+
+    assert (tmp_path / "core" / "v2" / "p_test" / "paper_dom.v1.json").exists()
+    assert (tmp_path / "core" / "v2" / "p_test" / "reading_plan.v1.json").exists()
+    assert loaded_dom.paper_id == "p_test"
+    assert loaded_plan.paper_id == "p_test"
+    assert paths["quality_metrics"].exists()
+
+
+def test_write_core_v2_from_observation_log_rejects_inconsistent_inputs(tmp_path):
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    dom = sample_dom()
+    reading_plan = build_initial_reading_plan(dom)
+
+    with pytest.raises(ValueError, match="observation_log paper_id mismatch"):
+        write_core_v2_from_observation_log(
+            data_dir=tmp_path,
+            paper=paper,
+            dom=dom,
+            reading_plan=reading_plan,
+            observation_log=ObservationLog(paper_id="p_other"),
+            producer="unit_test",
+        )
 
 
 def test_refresh_core_v2_audit_artifacts_blocks_missing_dom_sources(tmp_path):

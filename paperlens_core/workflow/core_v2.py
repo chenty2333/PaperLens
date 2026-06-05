@@ -343,6 +343,12 @@ def write_core_v2_from_observation_log(
     observation_log: ObservationLog,
     producer: str,
 ) -> dict[str, Path]:
+    validate_core_v2_write_inputs(
+        paper=paper,
+        dom=dom,
+        reading_plan=reading_plan,
+        observation_log=observation_log,
+    )
     claim_graph = graph_from_observations(paper.paper_id, list(observation_log.cards))
     derived = build_core_v2_derived_views(
         dom=dom,
@@ -353,6 +359,20 @@ def write_core_v2_from_observation_log(
         },
     )
     root = data_dir / "core" / "v2" / paper.paper_id
+    write_core_v2_envelope(
+        root / "paper_dom.v1.json",
+        "paper_dom",
+        paper.paper_id,
+        dom.model_dump(),
+        producer="paperlens_core_v2_input",
+    )
+    write_core_v2_envelope(
+        root / "reading_plan.v1.json",
+        "reading_plan",
+        paper.paper_id,
+        reading_plan.model_dump(),
+        producer="paperlens_core_v2_input",
+    )
     paths = {
         "observation_log": root / "observation_log.v1.json",
         "claim_graph": root / "claim_graph.v1.json",
@@ -413,6 +433,52 @@ def write_core_v2_from_observation_log(
         producer=producer,
     )
     return paths
+
+
+def validate_core_v2_write_inputs(
+    *,
+    paper: PaperRecord,
+    dom: PaperDOM,
+    reading_plan: ReadingPlan,
+    observation_log: ObservationLog,
+) -> None:
+    if dom.paper_id != paper.paper_id:
+        raise ValueError(f"Core v2 dom paper_id mismatch: {dom.paper_id} != {paper.paper_id}")
+    if reading_plan.paper_id != paper.paper_id:
+        raise ValueError(
+            f"Core v2 reading_plan paper_id mismatch: {reading_plan.paper_id} != {paper.paper_id}"
+        )
+    if observation_log.paper_id != paper.paper_id:
+        raise ValueError(
+            f"Core v2 observation_log paper_id mismatch: "
+            f"{observation_log.paper_id} != {paper.paper_id}"
+        )
+    invalid_plan_sources = sorted(
+        {
+            source_id
+            for task in reading_plan.tasks
+            for source_id in task.target_source_ids
+            if not dom.source_exists(source_id)
+        }
+    )
+    if invalid_plan_sources:
+        raise ValueError(
+            "Core v2 reading_plan references source_ids missing from PaperDOM: "
+            + ", ".join(invalid_plan_sources[:8])
+        )
+    invalid_observation_sources = sorted(
+        {
+            source_id
+            for card in observation_log.cards
+            for source_id in card.source_ids
+            if not dom.source_exists(source_id)
+        }
+    )
+    if invalid_observation_sources:
+        raise ValueError(
+            "Core v2 observation_log references source_ids missing from PaperDOM: "
+            + ", ".join(invalid_observation_sources[:8])
+        )
 
 
 def refresh_core_v2_audit_artifacts(
