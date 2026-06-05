@@ -47,6 +47,8 @@ from paperlens_core.main import configure_utf8_stdio
 from paperlens_core.report import (
     combine_report_and_memory_audits,
     final_report_audit_acceptable,
+    render_paperlens_report,
+    user_visible_review_items,
 )
 from paperlens_core.reading import select_rolling_read_pages
 from paperlens_core.memory_v3 import (
@@ -79,10 +81,8 @@ from paperlens_core.workflow.agent import (
     normalize_report_plan,
     readable_model_body,
     render_freeform_paper_report,
-    render_paperlens_report,
     sanitize_reader_hostile_text,
     summarize_model_calls,
-    user_visible_review_items,
     validate_paperlens_output,
     visual_crop_bbox_for_page,
     write_final_report_bundle,
@@ -328,6 +328,7 @@ def test_paperlens_report_hides_zero_cost_from_resume_without_calls():
                 "paper": paper,
                 "decision": decision,
                 "report_name": "p_test.md",
+                "core_graph_report_name": "core_graph/p_test.core_graph.md",
                 "model_report": {"one_line_reason": "核心理由"},
             }
         ],
@@ -339,6 +340,7 @@ def test_paperlens_report_hides_zero_cost_from_resume_without_calls():
     )
 
     assert "模型成本估算" not in markdown
+    assert "[事实图报告](./papers/core_graph/p_test.core_graph.md)" in markdown
 
 
 def test_output_language_is_a_single_rendering_preference():
