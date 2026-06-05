@@ -21,6 +21,27 @@ FACT_NODE_KINDS = {
 def audit_claim_graph(graph: ClaimGraph, dom: PaperDOM) -> list[AuditFinding]:
     findings: list[AuditFinding] = []
     dom_source_ids = dom.source_ids()
+    for index, edge in enumerate(graph.edges, start=1):
+        if edge.source_id not in graph.nodes:
+            findings.append(
+                AuditFinding(
+                    finding_id=f"dangling_edge_source:{index}:{edge.source_id}",
+                    severity=AuditSeverity.ERROR,
+                    code="dangling_graph_edge_source",
+                    message=f"ClaimGraph edge source_id does not exist: {edge.source_id}",
+                    node_id=edge.source_id,
+                )
+            )
+        if edge.target_id not in graph.nodes:
+            findings.append(
+                AuditFinding(
+                    finding_id=f"dangling_edge_target:{index}:{edge.target_id}",
+                    severity=AuditSeverity.ERROR,
+                    code="dangling_graph_edge_target",
+                    message=f"ClaimGraph edge target_id does not exist: {edge.target_id}",
+                    node_id=edge.target_id,
+                )
+            )
     for node in graph.nodes.values():
         if node.kind == "evidence":
             source_id = str(node.payload.get("source_id") or "")

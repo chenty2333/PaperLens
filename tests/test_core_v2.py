@@ -12,7 +12,7 @@ from paperlens_core.audit import (
     publish_status_from_findings,
 )
 from paperlens_core.dom import build_paper_dom_from_layout
-from paperlens_core.graph import graph_from_observations
+from paperlens_core.graph import GraphEdge, graph_from_observations
 from paperlens_core.library import (
     doctor_library,
     rebuild_library_from_output,
@@ -178,6 +178,41 @@ def test_claim_graph_memory_and_audit_flow_from_observations():
     assert metrics.publish_status == PublishStatus.REVIEWED
 
 
+def test_claim_graph_keeps_valid_observation_relationship_edges():
+    dom = sample_dom()
+    first_source_id = dom.spans[0].source_id
+    second_source_id = dom.spans[-1].source_id
+    claim = ObservationCard(
+        observation_id="obs_claim",
+        paper_id="p_test",
+        task_id="read_02_claim_inventory",
+        observation_type=ObservationType.CLAIM,
+        statement="The paper proposes a block table method.",
+        source_ids=[first_source_id],
+    )
+    mechanism = ObservationCard(
+        observation_id="obs_mechanism",
+        paper_id="p_test",
+        task_id="read_03_method_mechanism",
+        observation_type=ObservationType.MECHANISM,
+        statement="The block table mechanism organizes serving state.",
+        source_ids=[second_source_id],
+        proposed_links=[
+            {"source_id": "obs_mechanism", "target_id": "obs_claim", "kind": "explain"},
+            {"source_id": "obs_missing", "target_id": "obs_claim", "kind": "explains"},
+            {"source_id": "obs_mechanism", "target_id": "obs_claim", "kind": "unknown"},
+        ],
+    )
+
+    graph = graph_from_observations("p_test", [claim, mechanism])
+
+    relationship_edges = [edge for edge in graph.edges if edge.kind != "supported_by"]
+    assert [(edge.source_id, edge.target_id, edge.kind) for edge in relationship_edges] == [
+        ("mechanism:obs_mechanism", "claim:obs_claim", "explains")
+    ]
+    assert relationship_edges[0].payload == {"proposed_by_observation_id": "obs_mechanism"}
+
+
 def test_audit_blocks_missing_sources_and_unsupported_fact_nodes():
     dom = sample_dom()
     observation = ObservationCard(
@@ -193,6 +228,35 @@ def test_audit_blocks_missing_sources_and_unsupported_fact_nodes():
     findings = audit_claim_graph(graph, dom)
 
     assert {finding.code for finding in findings} >= {"missing_dom_source"}
+    assert publish_status_from_findings(findings) == PublishStatus.BLOCKED
+
+
+def test_audit_blocks_dangling_claim_graph_edges():
+    dom = sample_dom()
+    source_id = dom.spans[0].source_id
+    observation = ObservationCard(
+        observation_id="obs_claim",
+        paper_id="p_test",
+        task_id="read_02_claim_inventory",
+        observation_type=ObservationType.CLAIM,
+        statement="The paper proposes a block table method.",
+        source_ids=[source_id],
+    )
+    graph = graph_from_observations("p_test", [observation])
+    graph.edges.append(
+        GraphEdge(
+            source_id="claim:missing",
+            target_id="evidence:missing",
+            kind="supported_by",
+        )
+    )
+
+    findings = audit_claim_graph(graph, dom)
+
+    assert {finding.code for finding in findings} >= {
+        "dangling_graph_edge_source",
+        "dangling_graph_edge_target",
+    }
     assert publish_status_from_findings(findings) == PublishStatus.BLOCKED
 
 
