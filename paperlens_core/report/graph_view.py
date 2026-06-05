@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from pydantic import BaseModel, Field
 
 from paperlens_core.audit import AuditFinding, AuditSeverity
@@ -34,6 +36,51 @@ SECTION_TITLES = {
     "result": "Results",
     "limitation": "Limitations",
     "concept": "Concept Bridge",
+}
+
+TOKEN_PATTERN = re.compile(r"[a-z0-9][a-z0-9_+./%-]{2,}|[\u4e00-\u9fff]+", re.IGNORECASE)
+CJK_PATTERN = re.compile(r"[\u4e00-\u9fff]+")
+REPORT_GROUNDING_STOPWORDS = {
+    "about",
+    "also",
+    "and",
+    "are",
+    "author",
+    "authors",
+    "based",
+    "been",
+    "being",
+    "claim",
+    "claims",
+    "does",
+    "for",
+    "from",
+    "has",
+    "have",
+    "into",
+    "its",
+    "new",
+    "not",
+    "paper",
+    "propose",
+    "proposed",
+    "proposes",
+    "result",
+    "results",
+    "show",
+    "shows",
+    "study",
+    "that",
+    "the",
+    "their",
+    "these",
+    "this",
+    "those",
+    "using",
+    "was",
+    "were",
+    "with",
+    "work",
 }
 
 
@@ -145,6 +192,26 @@ def audit_report_draft_against_graph(
                             node_id=node_id,
                         )
                     )
+            if known_node_ids and not paragraph_text_overlaps_nodes(
+                paragraph.markdown,
+                [graph.nodes[node_id].label for node_id in known_node_ids],
+            ):
+                findings.append(
+                    AuditFinding(
+                        finding_id=f"paragraph_text_not_grounded:{paragraph.paragraph_id}",
+                        severity=AuditSeverity.ERROR,
+                        code="report_paragraph_text_not_grounded_in_declared_nodes",
+                        message=(
+                            "Report paragraph text does not overlap declared ClaimGraph node labels"
+                        ),
+                        node_id=known_node_ids[0],
+                        source_ids=[
+                            source_id
+                            for evidence_id in known_evidence_ids
+                            for source_id in evidence_source_ids(graph, evidence_id)
+                        ],
+                    )
+                )
             for evidence_id in known_evidence_ids:
                 if not any((node_id, evidence_id) in support_edges for node_id in known_node_ids):
                     findings.append(
@@ -172,3 +239,51 @@ def evidence_source_ids(graph: ClaimGraph, evidence_id: str) -> list[str]:
         return []
     source_id = str(node.payload.get("source_id") or "")
     return [source_id] if source_id else []
+
+
+def paragraph_text_overlaps_nodes(markdown: str, node_labels: list[str]) -> bool:
+    paragraph_tokens = meaningful_tokens(markdown)
+    if not paragraph_tokens:
+        return False
+    normalized_markdown = normalize_for_substring(markdown)
+    for label in node_labels:
+        normalized_label = normalize_for_substring(label)
+        if normalized_label and normalized_label in normalized_markdown:
+            return True
+        label_tokens = meaningful_tokens(label)
+        overlap = paragraph_tokens & label_tokens
+        if len(overlap) >= 2 or any(is_specific_token(token) for token in overlap):
+            return True
+    return False
+
+
+def meaningful_tokens(text: str) -> set[str]:
+    tokens: set[str] = set()
+    for match in TOKEN_PATTERN.findall(text.lower()):
+        if CJK_PATTERN.fullmatch(match):
+            tokens.update(cjk_ngrams(match))
+            continue
+        token = match.strip("._-/")
+        if token and token not in REPORT_GROUNDING_STOPWORDS:
+            tokens.add(token)
+    return tokens
+
+
+def cjk_ngrams(text: str) -> set[str]:
+    if len(text) < 2:
+        return set()
+    tokens = set()
+    for size in (2, 3, 4):
+        if len(text) >= size:
+            tokens.update(text[index : index + size] for index in range(len(text) - size + 1))
+    if len(text) <= 8:
+        tokens.add(text)
+    return tokens
+
+
+def is_specific_token(token: str) -> bool:
+    return len(token) >= 8 or any(character.isdigit() for character in token)
+
+
+def normalize_for_substring(text: str) -> str:
+    return re.sub(r"\s+", " ", text.casefold()).strip()

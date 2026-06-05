@@ -439,6 +439,28 @@ def test_report_draft_is_a_claim_graph_view_with_declared_evidence():
         "report_paragraph_missing_evidence_ids",
     }
 
+    ungrounded = GraphReportDraft(
+        paper_id="p_test",
+        sections=[
+            ReportSection(
+                section_id="bad",
+                title="Bad",
+                paragraphs=[
+                    ReportParagraph(
+                        paragraph_id="bad_02",
+                        markdown="A new unsupported result about 99% accuracy.",
+                        used_node_ids=[paragraph.used_node_ids[0]],
+                        used_evidence_ids=[paragraph.used_evidence_ids[0]],
+                    )
+                ],
+            )
+        ],
+    )
+    ungrounded_findings = audit_report_draft_against_graph(ungrounded, graph)
+    assert {finding.code for finding in ungrounded_findings} == {
+        "report_paragraph_text_not_grounded_in_declared_nodes"
+    }
+
 
 def test_report_audit_rejects_declared_evidence_not_linked_to_declared_node():
     dom = sample_dom()
