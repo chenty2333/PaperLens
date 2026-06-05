@@ -51,6 +51,7 @@ MEMORY_PATCH_SET_SCHEMA: dict[str, Any] = {
                             "set_core_abstraction",
                             "set_mechanism_overview",
                             "upsert_mechanism_step",
+                            "upsert_implementation_component",
                             "set_evaluation_summary",
                             "upsert_evaluation_item",
                             "upsert_concept",
@@ -106,7 +107,9 @@ class PaperMemoryStore:
         existing = self.read(paper.paper_id) if prefer_existing else {}
         if existing:
             return existing
-        memory = initial_memory_v3(paper=paper, skim=skim, decision=decision, card=card, layout=layout)
+        memory = initial_memory_v3(
+            paper=paper, skim=skim, decision=decision, card=card, layout=layout
+        )
         self.write(memory)
         self.append_patch(
             paper.paper_id,
@@ -144,7 +147,9 @@ class PaperMemoryStore:
         )
         return next_memory
 
-    def apply_patch(self, paper_id: str, patch: dict[str, Any], *, source: str = "manual") -> dict[str, Any]:
+    def apply_patch(
+        self, paper_id: str, patch: dict[str, Any], *, source: str = "manual"
+    ) -> dict[str, Any]:
         op = str(patch.get("op") or patch.get("operation") or "")
         payload = dict_value(patch.get("payload"))
         return self.apply_patch_set(
@@ -192,7 +197,9 @@ def apply_memory_patch(memory: dict[str, Any], patch: dict[str, Any]) -> dict[st
     elif operation == "set_core_abstraction":
         set_core_abstraction(result, payload)
     elif operation == "set_mechanism_overview":
-        result.setdefault("mechanism", {})["overview"] = none_if_empty(payload.get("overview") or payload.get("text")) or ""
+        result.setdefault("mechanism", {})["overview"] = (
+            none_if_empty(payload.get("overview") or payload.get("text")) or ""
+        )
     elif operation == "upsert_mechanism_step":
         upsert_numbered_text(
             result.setdefault("mechanism", {}).setdefault("steps", []),
@@ -200,8 +207,12 @@ def apply_memory_patch(memory: dict[str, Any], patch: dict[str, Any]) -> dict[st
             prefix="M",
             limit=32,
         )
+    elif operation == "upsert_implementation_component":
+        upsert_implementation_component(result, payload)
     elif operation == "set_evaluation_summary":
-        result.setdefault("evaluation", {})["summary"] = none_if_empty(payload.get("summary") or payload.get("text")) or ""
+        result.setdefault("evaluation", {})["summary"] = (
+            none_if_empty(payload.get("summary") or payload.get("text")) or ""
+        )
     elif operation == "upsert_evaluation_item":
         upsert_numbered_text(
             result.setdefault("evaluation", {}).setdefault("items", []),
@@ -252,7 +263,9 @@ def apply_memory_patch(memory: dict[str, Any], patch: dict[str, Any]) -> dict[st
 
 def apply_memory_patch_set(memory: dict[str, Any], patch_set: dict[str, Any]) -> dict[str, Any]:
     result = memory
-    operations = patch_set.get("operations") if isinstance(patch_set.get("operations"), list) else []
+    operations = (
+        patch_set.get("operations") if isinstance(patch_set.get("operations"), list) else []
+    )
     for operation in operations:
         if isinstance(operation, dict):
             result = apply_memory_patch(result, operation)
@@ -262,7 +275,9 @@ def apply_memory_patch_set(memory: dict[str, Any], patch_set: dict[str, Any]) ->
 
 def normalize_memory_patch_set(patch_set: dict[str, Any], *, paper_id: str) -> dict[str, Any]:
     operations = []
-    raw_operations = patch_set.get("operations") if isinstance(patch_set.get("operations"), list) else []
+    raw_operations = (
+        patch_set.get("operations") if isinstance(patch_set.get("operations"), list) else []
+    )
     for item in raw_operations:
         if not isinstance(item, dict):
             continue
@@ -281,7 +296,9 @@ def normalize_memory_patch_set(patch_set: dict[str, Any], *, paper_id: str) -> d
     }
 
 
-MEMORY_PATCH_OPERATIONS = set(MEMORY_PATCH_SET_SCHEMA["properties"]["operations"]["items"]["properties"]["op"]["enum"])
+MEMORY_PATCH_OPERATIONS = set(
+    MEMORY_PATCH_SET_SCHEMA["properties"]["operations"]["items"]["properties"]["op"]["enum"]
+)
 
 
 def initial_memory_v3(
@@ -394,14 +411,20 @@ def initial_memory_v3(
     }
 
 
-def initial_evidence_items(*, skim: SkimCard | None, card: PaperCard | None) -> list[dict[str, Any]]:
+def initial_evidence_items(
+    *, skim: SkimCard | None, card: PaperCard | None
+) -> list[dict[str, Any]]:
     items = []
     for ref in [*(skim.evidence_refs if skim else []), *(card.evidence_refs if card else [])]:
         if not any(item.get("page") == ref.page_no for item in items):
             items.append(
                 {
                     "id": f"E{len(items) + 1:03d}",
-                    "source_type": "figure" if ref.figure_id else "table" if ref.table_id else "text_span",
+                    "source_type": "figure"
+                    if ref.figure_id
+                    else "table"
+                    if ref.table_id
+                    else "text_span",
                     "page": ref.page_no,
                     "section": ref.section,
                     "excerpt_or_caption": None,
@@ -426,7 +449,9 @@ def initial_claim_items(
 
     def add(text: str | None, claim_type: str) -> None:
         text = str(text or "").strip()
-        if not text or any(normalize_compare(item.get("text")) == normalize_compare(text) for item in claims):
+        if not text or any(
+            normalize_compare(item.get("text")) == normalize_compare(text) for item in claims
+        ):
             return
         claims.append(
             {
@@ -489,7 +514,9 @@ def normalize_patch_evidence(payload: dict[str, Any], existing: list[Any]) -> di
         "source_type": str(payload.get("source_type") or "text_span").strip(),
         "page": page,
         "section": none_if_empty(payload.get("section")),
-        "excerpt_or_caption": none_if_empty(payload.get("excerpt_or_caption") or payload.get("quote")),
+        "excerpt_or_caption": none_if_empty(
+            payload.get("excerpt_or_caption") or payload.get("quote")
+        ),
         "visual_region": payload.get("visual_region"),
         "interpretation": none_if_empty(payload.get("interpretation") or payload.get("claim")),
         "reliability": reliability,
@@ -562,12 +589,31 @@ def upsert_bridge_term(memory: dict[str, Any], payload: dict[str, Any]) -> None:
     )
 
 
-def upsert_numbered_text(items: list[Any], payload: dict[str, Any], *, prefix: str, limit: int) -> None:
+def upsert_numbered_text(
+    items: list[Any], payload: dict[str, Any], *, prefix: str, limit: int
+) -> None:
     text = none_if_empty(payload.get("text") or payload.get("step") or payload.get("summary"))
     if not text:
         return
     item = {"id": str(payload.get("id") or next_id(items, prefix)), "text": text}
     upsert_by_text(items, item, key="id", limit=limit)
+
+
+def upsert_implementation_component(memory: dict[str, Any], payload: dict[str, Any]) -> None:
+    name = none_if_empty(payload.get("name") or payload.get("component") or payload.get("id"))
+    role = none_if_empty(payload.get("role") or payload.get("text") or payload.get("description"))
+    if not name and not role:
+        return
+    components = memory.setdefault("implementation_details", {}).setdefault("components", [])
+    item = {
+        "name": name or f"component_{len(components) + 1}",
+        "role": role or "",
+    }
+    if payload.get("evidence_refs"):
+        item["evidence_refs"] = string_list(payload.get("evidence_refs"))[:8]
+    if payload.get("notes"):
+        item["notes"] = string_list(payload.get("notes"))[:6]
+    upsert_by_text(components, item, key="name", limit=24)
 
 
 def link_claim_evidence(memory: dict[str, Any], payload: dict[str, Any]) -> None:
@@ -620,7 +666,10 @@ def upsert_by_text(items: list[Any], item: dict[str, Any], *, key: str, limit: i
         return
     for index, existing in enumerate(items):
         if isinstance(existing, dict) and str(existing.get(key) or "").strip() == value:
-            items[index] = {**existing, **{k: v for k, v in item.items() if v not in (None, "", [])}}
+            items[index] = {
+                **existing,
+                **{k: v for k, v in item.items() if v not in (None, "", [])},
+            }
             return
     if len(items) < limit:
         items.append(item)

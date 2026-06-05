@@ -60,12 +60,14 @@ from paperlens_core.workflow.agent import (
     build_report_section_audit_prompt,
     build_report_section_prompt,
     clean_model_markdown,
+    combine_report_and_memory_audits,
     compose_agentic_paper_report,
     ensure_memory_audit_operation,
     fallback_memory_audit,
     final_report_audit_acceptable,
     memory_audit_acceptable,
     normalize_memory_audit,
+    normalize_report_plan,
     readable_model_body,
     render_freeform_paper_report,
     render_paperlens_report,
@@ -429,6 +431,91 @@ def test_report_plan_prompt_uses_memory_and_local_tool_context():
     assert "PAGE FIVE key evaluation evidence" in prompt
     assert '"page_no": 5' in prompt
     assert "whole report" in prompt
+    assert "Completeness contract" in prompt
+
+
+def test_report_plan_normalization_supplements_complete_capsule_profile():
+    paper = PaperRecord(
+        paper_id="p_test", file_path="paper.pdf", file_hash="hash", canonical_title="Test Paper"
+    )
+    decision = ClassificationDecision(
+        paper_id="p_test",
+        class_label="A",
+        confidence=0.9,
+        false_negative_risk=0.1,
+    )
+    memory = {
+        "schema_version": "paper_memory.v3",
+        "paper_id": "p_test",
+        "problem_frame": {"problem": "hard problem", "why_it_matters": "important"},
+        "core_abstractions": [{"id": "A001", "text": "core abstraction"}],
+        "mechanism": {
+            "overview": "mechanism overview",
+            "steps": [{"id": "M001", "text": "step one"}, {"id": "M002", "text": "step two"}],
+        },
+        "evaluation": {
+            "summary": "evaluation summary",
+            "items": [{"id": "V001", "text": "benchmark result"}],
+        },
+        "claims": [
+            {
+                "id": "C001",
+                "text": "mechanism claim",
+                "type": "mechanism",
+                "evidence_refs": ["E001"],
+            },
+            {
+                "id": "C002",
+                "text": "evaluation claim",
+                "type": "evaluation",
+                "evidence_refs": ["E002"],
+            },
+        ],
+        "evidence": [
+            {"id": "E001", "page": 3, "source_type": "figure", "interpretation": "architecture"},
+            {"id": "E002", "page": 7, "source_type": "table", "interpretation": "result table"},
+        ],
+        "limitations": ["limited setting"],
+    }
+
+    plan = normalize_report_plan(
+        {
+            "paper_id": "p_test",
+            "grade": "A",
+            "read_recommendation": "重点关注",
+            "one_line_reason": "reason",
+            "core_takeaway": "takeaway",
+            "sections": [
+                {
+                    "section_id": "idea",
+                    "section_kind": "orientation",
+                    "title": "核心抽象",
+                    "purpose": "explain",
+                    "focus_queries": [],
+                    "claim_ids": [],
+                    "evidence_refs": [],
+                    "target_pages": [],
+                }
+            ],
+        },
+        paper=paper,
+        decision=decision,
+        paper_memory=memory,
+    )
+
+    kinds = [section["section_kind"] for section in plan["sections"]]
+    ids = [section["section_id"] for section in plan["sections"]]
+    assert len(plan["sections"]) >= 6
+    assert "mechanism" in kinds
+    assert "evaluation" in kinds
+    assert "value" in kinds
+    assert "limits" in kinds
+    assert "implementation" in ids
+    evaluation = next(
+        section for section in plan["sections"] if section["section_kind"] == "evaluation"
+    )
+    assert evaluation["evidence_refs"] == ["E002"]
+    assert evaluation["target_pages"] == [7]
 
 
 def test_report_section_prompt_uses_expanded_memory_and_plan():
@@ -463,7 +550,12 @@ def test_report_section_prompt_uses_expanded_memory_and_plan():
                 "summary": "The evaluation summary.",
                 "items": [{"id": "V001", "text": "Benchmark and metric detail."}],
             },
-            "conceptual_bridge": {"needed": False, "reader_gap": "", "bridge_text": "", "terms": []},
+            "conceptual_bridge": {
+                "needed": False,
+                "reader_gap": "",
+                "bridge_text": "",
+                "terms": [],
+            },
             "concepts": [{"term": "KV cache", "explanation": "Background concept for the report."}],
             "claims": [
                 {
@@ -597,6 +689,8 @@ def test_report_section_audit_prompt_checks_only_one_section():
 
     assert "generated_section" in prompt
     assert "Audit one generated report section" in prompt
+    assert "section_detail_contract" in prompt
+    assert "Depth contract" in prompt
     assert "PAGE FIVE raw source text" in prompt
 
 
@@ -728,6 +822,30 @@ def test_final_report_audit_acceptance_gate():
     assert not final_report_audit_acceptable(None)
 
 
+def test_final_report_audit_combines_memory_boundary():
+    combined = combine_report_and_memory_audits(
+        {"verdict": "PASS", "unsupported_items": [], "missing_items": [], "safe_usage_note": ""},
+        {
+            "schema_version": "paper_memory.v3",
+            "audit_trail": {
+                "memory_audit": {
+                    "status": "PASS_WITH_WEAKNESSES",
+                    "unsupported_claims": [],
+                    "missing_items": ["hardware setup needs checking"],
+                    "repair_instructions": [],
+                    "safe_to_generate_capsule": True,
+                    "confidence": "low",
+                }
+            },
+        },
+    )
+
+    assert combined is not None
+    assert combined["verdict"] == "PASS_WITH_WEAKNESSES"
+    assert combined["missing_items"] == ["hardware setup needs checking"]
+    assert "PaperMemory audit confidence is low" in combined["safe_usage_note"]
+
+
 def test_memory_patch_set_updates_capsule_fields(tmp_path):
     data_dir = tmp_path / "out" / ".paperlens" / "data"
     store = PaperMemoryStore(data_dir)
@@ -772,6 +890,14 @@ def test_memory_patch_set_updates_capsule_fields(tmp_path):
                 {
                     "op": "set_mechanism_overview",
                     "payload": {"text": "Use simple queues instead of precise recency tracking."},
+                },
+                {
+                    "op": "upsert_implementation_component",
+                    "payload": {
+                        "name": "queue state",
+                        "role": "Stores eviction candidates without precise recency tracking.",
+                        "evidence_refs": ["E010"],
+                    },
                 },
                 {
                     "op": "set_evaluation_summary",
@@ -834,6 +960,7 @@ def test_memory_patch_set_updates_capsule_fields(tmp_path):
     assert memory["concepts"][0]["term"] == "cache eviction"
     assert memory["conceptual_bridge"]["needed"] is True
     assert memory["conceptual_bridge"]["terms"][0]["provenance"] == "background"
+    assert memory["implementation_details"]["components"][0]["name"] == "queue state"
     assert any(claim["confidence"] == "high" for claim in memory["claims"])
     assert "When does FIFO fail?" in memory["open_questions"]
 
@@ -1187,7 +1314,9 @@ def test_paper_qa_schema_parser_accepts_provider_alias_fields():
                 "content": "HybridGS 主要压缩 3DGS 表示生成后的数据表示阶段，而不是训练阶段。",
                 "cited_pages": [3],
                 "source_attribution": {
-                    "paper_claims": ["The paper frames HybridGS as a 3DGS data compression method."],
+                    "paper_claims": [
+                        "The paper frames HybridGS as a 3DGS data compression method."
+                    ],
                     "paperlens_inferences": [],
                     "background_context": [],
                     "evidence_limits": [],
@@ -1596,7 +1725,7 @@ def test_post_json_writes_attempt_ledger(tmp_path, monkeypatch):
         def read(self) -> bytes:
             return json.dumps(
                 {
-                    "choices": [{"message": {"content": "{\"ok\": true}"}}],
+                    "choices": [{"message": {"content": '{"ok": true}'}}],
                     "usage": {"prompt_tokens": 12, "completion_tokens": 3},
                 }
             ).encode("utf-8")
@@ -1772,7 +1901,9 @@ def test_agent_loop_recovers_when_final_json_is_missing(tmp_path):
 
     loop = AgentLoop(
         client=FakeClient(),
-        tools=PaperToolRegistry(runtime=PaperLensRuntime(artifacts=[]), paper_id="p_test", title="Test"),
+        tools=PaperToolRegistry(
+            runtime=PaperLensRuntime(artifacts=[]), paper_id="p_test", title="Test"
+        ),
         session_name="unit_agent",
         objective="Return final JSON.",
         final_schema_name="unit_final",
@@ -1847,7 +1978,7 @@ def test_json_schema_parser_selects_matching_candidate_after_schema_echo():
 
 
 def test_json_parser_finds_later_json_object_after_inline_braces():
-    text = "Use `{not json}` as prose, then return {\"ok\": true, \"page_seen\": 3}"
+    text = 'Use `{not json}` as prose, then return {"ok": true, "page_seen": 3}'
 
     assert parse_json_text(text) == {"ok": True, "page_seen": 3}
 
@@ -1974,7 +2105,9 @@ def test_library_question_uses_agent_loop_tools(tmp_path, monkeypatch):
                 endpoint="fake",
             )
 
-    monkeypatch.setattr("paperlens_core.library.JsonLlmClient", lambda *_args, **_kwargs: FakeClient())
+    monkeypatch.setattr(
+        "paperlens_core.library.JsonLlmClient", lambda *_args, **_kwargs: FakeClient()
+    )
     answer = answer_library_question(
         output_dir=output_dir,
         config=CoreConfig(
@@ -1993,12 +2126,18 @@ def test_library_question_uses_agent_loop_tools(tmp_path, monkeypatch):
     assert calls[0]["max_tokens"] is None
     trace = [
         json.loads(line)
-        for line in (output_dir / ".paperlens" / "data" / "agent_trace.jsonl").read_text(
-            encoding="utf-8"
-        ).splitlines()
+        for line in (output_dir / ".paperlens" / "data" / "agent_trace.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
     ]
-    assert any(row.get("event") == "tool_observation" and row["request"]["tool"] == "library.search" for row in trace)
-    assert any(row.get("event") == "tool_observation" and row["request"]["tool"] == "library.get_record" for row in trace)
+    assert any(
+        row.get("event") == "tool_observation" and row["request"]["tool"] == "library.search"
+        for row in trace
+    )
+    assert any(
+        row.get("event") == "tool_observation" and row["request"]["tool"] == "library.get_record"
+        for row in trace
+    )
 
 
 def test_library_rejects_old_library_record_schema_in_dev(tmp_path):
@@ -2078,6 +2217,18 @@ def test_memory_audit_status_controls_capsule_safety():
 
     assert not memory_audit_acceptable(weak)
     assert memory_audit_acceptable(ok)
+    contradictory = normalize_memory_audit(
+        {
+            "status": "NEED_HUMAN_REVIEW",
+            "unsupported_claims": [],
+            "missing_items": ["missing evidence"],
+            "repair_instructions": [],
+            "safe_to_generate_capsule": True,
+            "confidence": "low",
+        }
+    )
+    assert contradictory["safe_to_generate_capsule"] is False
+    assert not memory_audit_acceptable(contradictory)
 
 
 def test_fallback_memory_audit_is_visible_but_usable():
@@ -2093,9 +2244,7 @@ def test_missing_memory_audit_operation_gets_conservative_default():
     patch_set = ensure_memory_audit_operation(
         {
             "paper_id": "p_test",
-            "operations": [
-                {"op": "upsert_claim", "payload": {"id": "C001", "text": "claim"}}
-            ],
+            "operations": [{"op": "upsert_claim", "payload": {"id": "C001", "text": "claim"}}],
         },
         paper_id="p_test",
         phase="central_memory_verify",
@@ -2277,7 +2426,7 @@ def test_stage07_partial_chunk_failure_preserves_successful_memory(tmp_path, mon
                 base_url="https://example.invalid",
                 api_key="test-key",
                 model="fake-model",
-            )
+            ),
         ),
         events=EventWriter(
             "run_test",
@@ -2330,6 +2479,7 @@ def test_stage07_partial_chunk_failure_preserves_successful_memory(tmp_path, mon
         }
 
     monkeypatch.setattr(pipeline, "read_rolling_memory_chunk", fake_read_chunk)
+
     def fail_if_verifies_during_read(**_kwargs):
         raise AssertionError("rolling read must not run memory verification")
 
@@ -2532,9 +2682,7 @@ def test_central_memory_verification_applies_one_patch_set(tmp_path, monkeypatch
     )
     pages = [
         SimpleNamespace(page_no=1, text="page 1", captions=[], figures=[], tables=[]),
-        SimpleNamespace(
-            page_no=2, text="evaluation page", captions=[], figures=[], tables=[]
-        ),
+        SimpleNamespace(page_no=2, text="evaluation page", captions=[], figures=[], tables=[]),
     ]
     calls = {"verify": 0}
 
@@ -2603,7 +2751,7 @@ def test_central_memory_verification_failure_keeps_existing_memory(tmp_path, mon
                 base_url="https://example.invalid",
                 api_key="test-key",
                 model="fake-model",
-            )
+            ),
         ),
         events=EventWriter(
             "run_test",
@@ -2741,22 +2889,36 @@ def test_agentic_report_composer_uses_step_cache(tmp_path):
                     "key_visual_pages": [],
                     "uncertainty_note": "",
                 }
-            elif '"session": "report_section_idea"' in prompt:
-                data = {
-                    "section_id": "idea",
-                    "title": "核心抽象",
-                    "paragraphs": ["核心思想是把复杂机制压缩成可执行的系统抽象。"],
-                    "used_claim_ids": [],
-                    "used_evidence_refs": [],
-                    "uncertainty_note": "",
-                }
-            elif '"session": "report_section_audit_idea"' in prompt:
+            elif '"session": "report_section_audit_' in prompt:
                 data = {
                     "verdict": "PASS",
                     "unsupported_items": [],
                     "missing_items": [],
                     "repair_instructions": [],
                     "safe_usage_note": "",
+                }
+            elif '"session": "report_section_' in prompt:
+                section_id = prompt.split('"session": "report_section_', 1)[1].split('"', 1)[0]
+                data = {
+                    "section_id": section_id,
+                    "title": "完整章节",
+                    "paragraphs": [
+                        (
+                            "这一节用足够细的篇幅说明论文的关键问题、机制和证据边界。"
+                            "它不是一句话摘要，而是把读者需要建立的背景、抽象和约束讲清楚，"
+                            "并明确哪些内容来自当前 PaperMemory 中的证据。"
+                        )
+                        * 4,
+                        (
+                            "第二段继续补充实现路径、实验支撑和可迁移价值，使该章节达到"
+                            "完整胶囊所需的解释密度。这样即使计划由流程补齐，写作阶段也"
+                            "能产出可审计、可阅读的自然语言段落。"
+                        )
+                        * 4,
+                    ],
+                    "used_claim_ids": [],
+                    "used_evidence_refs": [],
+                    "uncertainty_note": "",
                 }
             else:
                 raise AssertionError(prompt)
@@ -2793,24 +2955,18 @@ def test_agentic_report_composer_uses_step_cache(tmp_path):
     }
 
     first, first_audit = compose_agentic_paper_report(**kwargs)
+    call_count_after_first = len(calls)
     second, second_audit = compose_agentic_paper_report(**kwargs)
 
-    assert calls == [
-        "paperlens_agent_turn",
-        "paperlens_agent_turn",
-        "paperlens_agent_turn",
-    ]
+    assert call_count_after_first >= 11
+    assert calls == ["paperlens_agent_turn"] * call_count_after_first
     assert first["explanation_markdown"] == second["explanation_markdown"]
     assert first_audit == second_audit
-    assert usages == [
-        {"prompt_tokens": 10, "completion_tokens": 20},
-        {"prompt_tokens": 10, "completion_tokens": 20},
-        {"prompt_tokens": 10, "completion_tokens": 20},
-    ]
+    assert usages == [{"prompt_tokens": 10, "completion_tokens": 20}] * call_count_after_first
     assert agent_runs[-1]["status"] == "CACHE_HIT"
 
 
-def test_report_composer_records_failed_section_boundary_without_fixed_repair(tmp_path):
+def test_report_composer_repairs_failed_section_once(tmp_path):
     output_dir = tmp_path / "out"
     data_dir = output_dir / ".paperlens" / "data"
     for relative in [
@@ -2860,22 +3016,49 @@ def test_report_composer_records_failed_section_boundary_without_fixed_repair(tm
                     "key_visual_pages": [],
                     "uncertainty_note": "",
                 }
-            elif '"session": "report_section_idea"' in prompt:
+            elif '"session": "report_section_audit_' in prompt:
+                if "含有过度结论" in prompt:
+                    data = {
+                        "verdict": "REPAIR",
+                        "unsupported_items": ["overclaim"],
+                        "missing_items": [],
+                        "repair_instructions": ["remove overclaim"],
+                        "safe_usage_note": "Needs section repair.",
+                    }
+                else:
+                    data = {
+                        "verdict": "PASS",
+                        "unsupported_items": [],
+                        "missing_items": [],
+                        "repair_instructions": [],
+                        "safe_usage_note": "",
+                    }
+            elif '"session": "report_section_' in prompt:
+                section_id = prompt.split('"session": "report_section_', 1)[1].split('"', 1)[0]
+                if section_id == "idea" and "previous_section_audit" not in prompt:
+                    paragraphs = ["含有过度结论的分段正文。"]
+                else:
+                    paragraphs = [
+                        (
+                            "修复后的分段正文会保留核心论点，但删除没有证据支撑的过度表述。"
+                            "它用更完整的上下文说明问题、机制和证据边界，并把可验证内容"
+                            "与解释性判断分开。"
+                        )
+                        * 4,
+                        (
+                            "第二段补充该节所需的实现、评估或局限信息，使它不再只是摘要。"
+                            "这种写法让读者可以直接理解论文贡献，同时知道哪些结论仍需"
+                            "回到原文核对。"
+                        )
+                        * 4,
+                    ]
                 data = {
-                    "section_id": "idea",
-                    "title": "核心抽象",
-                    "paragraphs": ["含有过度结论的分段正文。"],
+                    "section_id": section_id,
+                    "title": "完整章节",
+                    "paragraphs": paragraphs,
                     "used_claim_ids": [],
                     "used_evidence_refs": [],
                     "uncertainty_note": "",
-                }
-            elif '"session": "report_section_audit_idea"' in prompt:
-                data = {
-                    "verdict": "REPAIR",
-                    "unsupported_items": ["overclaim"],
-                    "missing_items": [],
-                    "repair_instructions": ["remove overclaim"],
-                    "safe_usage_note": "Needs section repair.",
                 }
             else:
                 raise AssertionError(prompt)
@@ -2914,8 +3097,106 @@ def test_report_composer_records_failed_section_boundary_without_fixed_repair(tm
 
     assert any(path.name == "PaperLens.md" for path in written)
     report = (output_dir / "papers" / "p_test_test_paper.md").read_text(encoding="utf-8")
-    assert "含有过度结论的分段正文" in report
+    assert "含有过度结论的分段正文" not in report
+    assert "修复后的分段正文" in report
     assert not any("final_paper_report_repair" in str(run) for run in agent_runs)
+
+
+def test_export_strict_gate_rejects_unsafe_memory_audit(tmp_path, monkeypatch):
+    monkeypatch.setenv("PAPERLENS_REQUIRE_LLM", "1")
+    output_dir = tmp_path / "out"
+    data_dir = output_dir / ".paperlens" / "data"
+    for relative in [
+        "papers",
+        ".paperlens/data",
+    ]:
+        (output_dir / relative).mkdir(parents=True, exist_ok=True)
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+    )
+    decision = ClassificationDecision(
+        paper_id="p_test",
+        class_label="A",
+        confidence=0.9,
+        false_negative_risk=0.1,
+    )
+    store = PaperMemoryStore(data_dir)
+    store.initialize(
+        paper=paper,
+        skim=None,
+        decision=decision,
+        card=None,
+        layout=None,
+        source="test_seed",
+        prefer_existing=False,
+    )
+    store.apply_patch_set(
+        "p_test",
+        {
+            "paper_id": "p_test",
+            "operations": [
+                {
+                    "op": "set_memory_audit",
+                    "payload": {
+                        "status": "NEED_HUMAN_REVIEW",
+                        "unsupported_claims": [],
+                        "missing_items": ["central verification did not finish"],
+                        "repair_instructions": ["rerun central memory verification"],
+                        "safe_to_generate_capsule": True,
+                        "confidence": "high",
+                    },
+                }
+            ],
+        },
+        source="test_memory_audit",
+    )
+
+    def fake_compose_agentic_paper_report(**_kwargs):
+        return (
+            {
+                "one_line_reason": "核心理由",
+                "core_takeaway": "核心结论",
+                "read_recommendation": "重点关注",
+                "explanation_markdown": "## 核心结论\n\n报告正文。",
+                "uncertainty_note": "",
+            },
+            {
+                "verdict": "PASS",
+                "unsupported_items": [],
+                "missing_items": [],
+                "correction_notes": [],
+                "safe_usage_note": "",
+            },
+        )
+
+    monkeypatch.setattr(
+        "paperlens_core.workflow.agent.compose_agentic_paper_report",
+        fake_compose_agentic_paper_report,
+    )
+
+    with pytest.raises(RuntimeError, match="NEED_HUMAN_REVIEW"):
+        write_final_report_bundle(
+            output_dir=output_dir,
+            data_dir=data_dir,
+            evidence_dir=output_dir / ".paperlens",
+            client=SimpleNamespace(config=SimpleNamespace(kind="fake", model="fake-model")),
+            record_usage=lambda _stage, _usage: None,
+            record_agent_run=lambda _run: None,
+            stage="stage_15_export",
+            papers=[paper],
+            skim_cards=[],
+            decisions=[decision],
+            paper_cards=[],
+            review_items=[],
+            budget={},
+            config={"offline_debug": False},
+            topic=None,
+            idea=None,
+            cache_dir=output_dir / ".paperlens" / "cache",
+        )
 
 
 def test_export_overwrites_existing_paper_report(tmp_path):
@@ -3230,9 +3511,7 @@ def test_resume_requires_active_paper_ids(tmp_path):
     )
     pipeline.prepare_output()
     pipeline.db.upsert_paper(
-        PaperRecord(
-            paper_id="p_old", file_path="old.pdf", file_hash="hash", canonical_title="Old"
-        )
+        PaperRecord(paper_id="p_old", file_path="old.pdf", file_hash="hash", canonical_title="Old")
     )
 
     with pytest.raises(RuntimeError, match="missing active_paper_ids"):
@@ -3305,7 +3584,9 @@ def test_agent_run_records_are_written(tmp_path):
     )
     pipeline.prepare_output()
 
-    pipeline.write_agent_run({"agent_run_id": "unit", "status": "PASS", "usage": {"prompt_tokens": 1}})
+    pipeline.write_agent_run(
+        {"agent_run_id": "unit", "status": "PASS", "usage": {"prompt_tokens": 1}}
+    )
 
     path = output_dir / ".paperlens" / "data" / "agent_runs.jsonl"
     row = json.loads(path.read_text(encoding="utf-8").strip())

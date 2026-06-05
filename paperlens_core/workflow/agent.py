@@ -1060,7 +1060,7 @@ class PaperLensWorkflow:
             self.paper_cards = [
                 paper_card if card.paper_id == paper_card.paper_id else card
                 for card in self.paper_cards
-        ]
+            ]
         self.db.upsert_paper_card(paper_card)
         self.mark_paper_state(paper.paper_id, stage)
 
@@ -1267,15 +1267,15 @@ class PaperLensWorkflow:
                 "pages": pages,
                 "agent_context_pack": agent_context,
                 "rolling_memory_prompt": build_rolling_memory_prompt(
-                paper=paper,
-                skim=skim,
-                decision=decision,
-                memory=memory,
-                agent_context=agent_context,
-                artifacts=artifacts,
-                chunk_index=chunk_index,
-                total_chunks=total_chunks,
-            ),
+                    paper=paper,
+                    skim=skim,
+                    decision=decision,
+                    memory=memory,
+                    agent_context=agent_context,
+                    artifacts=artifacts,
+                    chunk_index=chunk_index,
+                    total_chunks=total_chunks,
+                ),
             }
         )
         self.record_llm_usage(stage, result.usage)
@@ -1465,14 +1465,14 @@ class PaperLensWorkflow:
                 "verification_pages": pages,
                 "agent_context_pack": agent_context,
                 "verify_prompt": build_central_memory_verify_prompt(
-                paper=paper,
-                skim=skim,
-                decision=decision,
-                memory=memory,
-                high_risk_claims=high_risk_claims,
-                agent_context=agent_context,
-                artifacts=artifacts,
-            ),
+                    paper=paper,
+                    skim=skim,
+                    decision=decision,
+                    memory=memory,
+                    high_risk_claims=high_risk_claims,
+                    agent_context=agent_context,
+                    artifacts=artifacts,
+                ),
             }
         )
         self.record_llm_usage(stage, result.usage)
@@ -1675,6 +1675,7 @@ class PaperLensWorkflow:
         self.events.stage_completed(stage, "Manifest written", manifest)
         return manifest
 
+
 SKIM_CLASSIFIER_PROMPT_VERSION = "skim-classifier-v2"
 
 
@@ -1752,10 +1753,10 @@ SKIM_CLASSIFICATION_SCHEMA: dict[str, Any] = {
 
 
 ROLLING_MEMORY_PROMPT_VERSION = "memory-patch-rolling-v2-context"
-CENTRAL_MEMORY_VERIFY_PROMPT_VERSION = "central-memory-verify-v1"
-REPORT_PLAN_PROMPT_VERSION = "report-plan-v3-mechanism-contract"
-REPORT_SECTION_PROMPT_VERSION = "report-section-v5-paragraph-artifact"
-REPORT_SECTION_AUDIT_PROMPT_VERSION = "report-section-audit-v2-repair-unsupported"
+CENTRAL_MEMORY_VERIFY_PROMPT_VERSION = "central-memory-verify-v2-strict-audit"
+REPORT_PLAN_PROMPT_VERSION = "report-plan-v4-complete-capsule-profile"
+REPORT_SECTION_PROMPT_VERSION = "report-section-v6-depth-contract"
+REPORT_SECTION_AUDIT_PROMPT_VERSION = "report-section-audit-v3-depth-and-boundary"
 
 
 ROLLING_MEMORY_SYSTEM_PROMPT = """
@@ -1772,6 +1773,8 @@ You are the PaperLens MemoryVerifier.
 Verify PaperMemoryV3 against local paper evidence.
 Use tools until you can confidently repair memory, weaken unsupported claims, link evidence,
 or record explicit uncertainty.
+The memory audit status is authoritative: use NEED_HUMAN_REVIEW only when the capsule should
+not be presented as reviewed; never mark NEED_HUMAN_REVIEW as safe_to_generate_capsule=true.
 Return final_json as one MemoryPatchSet. Include a memory audit operation when done.
 """.strip()
 
@@ -1937,6 +1940,15 @@ def build_rolling_memory_prompt(
                 "PaperMemoryV3. If these pages change an existing understanding, patch the relevant "
                 "field or claim instead of appending a duplicate."
             ),
+            (
+                "Coverage checklist: preserve enough material for a later Theseus-grade capsule. "
+                "Capture the paper's problem frame, core abstraction, mechanism steps, concrete "
+                "implementation components/equations/runtime or training path, evaluation setup "
+                "and numbers, limitations, concepts a reader needs, and evidence links. Use "
+                "upsert_implementation_component for concrete modules, data structures, losses, "
+                "runtime components, or algorithm stages that should later become an implementation "
+                "detail section."
+            ),
             "current_pages:",
             "\n\n---\n\n".join(page_blocks) if page_blocks else "No usable text excerpts.",
         ]
@@ -1977,7 +1989,9 @@ def build_central_memory_verify_prompt(
                 "Task: verify memory and return a MemoryPatchSet when ready. If a claim is "
                 "supported, add/link evidence and mark it checked. If it is too strong, rewrite it "
                 "with lower confidence or mark it disputed. If something important is missing, use "
-                "tools or record the boundary in set_memory_audit."
+                "tools or record the boundary in set_memory_audit. A complete memory should support "
+                "separate capsule sections for orientation, mechanism, implementation path, evaluation, "
+                "value/tradeoffs, and limitations when the paper contains that material."
             ),
         ]
     )
@@ -1989,6 +2003,7 @@ def memory_patch_protocol_text() -> str:
         "add_read_pages {pages}; set_problem_frame {problem,why_it_matters,scope}; "
         "set_core_abstraction {text,evidence_refs,misunderstanding_guard}; "
         "set_mechanism_overview {overview}; upsert_mechanism_step {id?,text}; "
+        "upsert_implementation_component {name?,component?,role?,text?,evidence_refs?}; "
         "set_evaluation_summary {summary}; upsert_evaluation_item {id?,text}; "
         "upsert_concept {term,explanation}; set_conceptual_bridge {needed,reader_gap,bridge_text}; "
         "upsert_conceptual_bridge_term {term,explanation,paper_role,provenance}; "
@@ -2176,6 +2191,11 @@ def normalize_memory_audit(data: dict[str, Any]) -> dict[str, Any]:
     status = str(data.get("status") or "NEED_HUMAN_REVIEW").upper()
     if status not in {"PASS", "PASS_WITH_WEAKNESSES", "NEED_HUMAN_REVIEW"}:
         status = "NEED_HUMAN_REVIEW"
+    safe_to_generate = (
+        bool(data.get("safe_to_generate_capsule")) if "safe_to_generate_capsule" in data else False
+    )
+    if status == "NEED_HUMAN_REVIEW":
+        safe_to_generate = False
     return {
         "status": status,
         "unsupported_claims": normalized_string_list(data.get("unsupported_claims"))[:6],
@@ -2183,9 +2203,7 @@ def normalize_memory_audit(data: dict[str, Any]) -> dict[str, Any]:
         "repair_instructions": normalized_string_list(
             data.get("repair_instructions") or data.get("correction_notes")
         )[:8],
-        "safe_to_generate_capsule": bool(data.get("safe_to_generate_capsule"))
-        if "safe_to_generate_capsule" in data
-        else False,
+        "safe_to_generate_capsule": safe_to_generate,
         "confidence": str(data.get("confidence") or "low")
         if str(data.get("confidence") or "low") in {"high", "medium", "low"}
         else "low",
@@ -2327,7 +2345,9 @@ def dedupe_artifacts_by_page(artifacts: list[Any]) -> list[Any]:
     return result
 
 
-def select_high_risk_memory_claims(memory: dict[str, Any], *, limit: int = 10) -> list[dict[str, Any]]:
+def select_high_risk_memory_claims(
+    memory: dict[str, Any], *, limit: int = 10
+) -> list[dict[str, Any]]:
     claims = [claim for claim in list_payload(memory.get("claims")) if isinstance(claim, dict)]
     evidence = {
         str(item.get("id")): item
@@ -2347,7 +2367,9 @@ def select_high_risk_memory_claims(memory: dict[str, Any], *, limit: int = 10) -
             value += 4
         if claim.get("provenance") in {"inferred", "background"}:
             value += 2
-        if any(tag in {"needs_evidence", "number_sensitive", "analogy_overreach"} for tag in risk_tags):
+        if any(
+            tag in {"needs_evidence", "number_sensitive", "analogy_overreach"} for tag in risk_tags
+        ):
             value += 3
         if claim.get("type") in {"evaluation", "comparison", "limitation"}:
             value += 2
@@ -2989,6 +3011,10 @@ You are the PaperLens ReportPlanner skill.
 Plan a clear knowledge capsule from PaperMemoryV3.
 Choose the reading order that best explains this paper. Use tools if you need more grounding.
 The report is a derived view; do not invent facts outside memory/evidence.
+Plan for a Theseus-grade capsule: complete, sectioned, and detailed enough to teach the paper.
+For normal A/B/C papers, cover orientation/background, core mechanism, implementation or
+algorithm path, evaluation evidence, value/tradeoffs, and limitations/boundaries. Do not merge
+evaluation, value, and limitations into one thin section when the memory has enough material.
 Return final_json matching the ReportPlan schema.
 """.strip()
 
@@ -3007,12 +3033,15 @@ REPORT_PLAN_SCHEMA: dict[str, Any] = {
     "properties": {
         "paper_id": {"type": "string"},
         "grade": {"type": "string", "enum": ["A", "B", "C", "HOLD"]},
-        "read_recommendation": {"type": "string", "enum": ["重点关注", "标准读", "低优先级", "需确认"]},
+        "read_recommendation": {
+            "type": "string",
+            "enum": ["重点关注", "标准读", "低优先级", "需确认"],
+        },
         "one_line_reason": {"type": "string"},
         "core_takeaway": {"type": "string"},
         "sections": {
             "type": "array",
-            "minItems": 3,
+            "minItems": 5,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
@@ -3090,6 +3119,9 @@ You are the PaperLens ReportComposer skill.
 Write the requested report section as connected prose.
 Use PaperMemory and tools for grounding. Explain mechanisms and background when useful.
 Keep paper claims, interpretation, background knowledge, and evidence limits distinguishable.
+Write at Theseus-grade depth: a section should explain why the idea exists, how the mechanism
+works, what evidence supports it, and what boundary limits it when those are relevant to the
+planned section. Prefer 2-4 compact but substantive paragraphs over a one-paragraph summary.
 Return final_json matching the ReportSection schema.
 """.strip()
 
@@ -3131,6 +3163,9 @@ REPORT_SECTION_AUDITOR_SYSTEM_PROMPT = """
 You are the PaperLens SectionAuditor hook.
 Audit one generated section against PaperMemory and paper evidence.
 Use tools when a claim needs checking. Prefer explicit evidence boundaries over brittle certainty.
+Mark REPAIR when a section is factually unsupported, overclaims, or is too shallow to satisfy
+its planned purpose. Missing reader-critical mechanism, evaluation, or limitation context is a
+real quality defect, not just a style preference.
 Return final_json matching the ReportSectionAudit schema.
 """.strip()
 
@@ -3232,6 +3267,45 @@ def compose_agentic_paper_report(
             read_mode=read_mode,
             cache_dir=cache_dir,
         )
+        if audit.get("verdict") == "REPAIR":
+            repaired_section = generate_report_section(
+                client=client,
+                data_dir=data_dir,
+                stage=stage,
+                paper=paper,
+                paper_memory=memory,
+                layout=layout,
+                plan=plan,
+                section_plan=section_plan,
+                previous_summaries=previous_summaries,
+                output_language=output_language,
+                record_usage=record_usage,
+                record_agent_run=record_agent_run,
+                read_mode=read_mode,
+                cache_dir=cache_dir,
+                section_audit=audit,
+            )
+            repaired_audit = audit_report_section(
+                client=client,
+                data_dir=data_dir,
+                stage=stage,
+                paper=paper,
+                paper_memory=memory,
+                layout=layout,
+                plan=plan,
+                section_plan=section_plan,
+                section=repaired_section,
+                output_language=output_language,
+                record_usage=record_usage,
+                record_agent_run=record_agent_run,
+                read_mode=read_mode,
+                cache_dir=cache_dir,
+            )
+            if repaired_audit.get("verdict") != "REPAIR" or report_section_is_more_substantive(
+                repaired_section, section
+            ):
+                section = repaired_section
+                audit = repaired_audit
         sections.append(section)
         section_audits.append({"section_id": section.get("section_id"), **audit})
         previous_summaries.append(
@@ -3299,7 +3373,9 @@ def generate_report_plan(
     cached = read_llm_cache(cache_path)
     if cached and isinstance(cached.get("data"), dict):
         record_agent_run(cache_agent_run(client, paper.paper_id, stage, "report_plan", cache_path))
-        return normalize_report_plan(cached["data"], paper=paper, decision=decision)
+        return normalize_report_plan(
+            cached["data"], paper=paper, decision=decision, paper_memory=paper_memory
+        )
     with llm_call_context(
         stage=stage,
         paper_id=paper.paper_id,
@@ -3355,9 +3431,17 @@ def generate_report_plan(
     )
     write_llm_cache(
         cache_path,
-        {"key": key_payload, "data": result.final, "usage": result.usage, "request_ids": result.request_ids, "endpoint": "agent_loop"},
+        {
+            "key": key_payload,
+            "data": result.final,
+            "usage": result.usage,
+            "request_ids": result.request_ids,
+            "endpoint": "agent_loop",
+        },
     )
-    return normalize_report_plan(result.final, paper=paper, decision=decision)
+    return normalize_report_plan(
+        result.final, paper=paper, decision=decision, paper_memory=paper_memory
+    )
 
 
 def generate_report_section(
@@ -3407,7 +3491,9 @@ def generate_report_section(
     cached = read_llm_cache(cache_path)
     if cached and isinstance(cached.get("data"), dict):
         record_agent_run(
-            cache_agent_run(client, paper.paper_id, stage, f"report_section_{section_id}", cache_path)
+            cache_agent_run(
+                client, paper.paper_id, stage, f"report_section_{section_id}", cache_path
+            )
         )
         return normalize_report_section(cached["data"], section_plan=section_plan)
     with llm_call_context(
@@ -3465,7 +3551,13 @@ def generate_report_section(
     )
     write_llm_cache(
         cache_path,
-        {"key": key_payload, "data": result.final, "usage": result.usage, "request_ids": result.request_ids, "endpoint": "agent_loop"},
+        {
+            "key": key_payload,
+            "data": result.final,
+            "usage": result.usage,
+            "request_ids": result.request_ids,
+            "endpoint": "agent_loop",
+        },
     )
     return normalize_report_section(result.final, section_plan=section_plan)
 
@@ -3514,9 +3606,15 @@ def audit_report_section(
     cached = read_llm_cache(cache_path)
     if cached and isinstance(cached.get("data"), dict):
         record_agent_run(
-            cache_agent_run(client, paper.paper_id, stage, f"report_section_audit_{section_id}", cache_path)
+            cache_agent_run(
+                client, paper.paper_id, stage, f"report_section_audit_{section_id}", cache_path
+            )
         )
-        return normalize_report_section_audit(cached["data"])
+        return enforce_section_depth_audit(
+            normalize_report_section_audit(cached["data"]),
+            section=section,
+            section_plan=section_plan,
+        )
     with llm_call_context(
         stage=stage,
         paper_id=paper.paper_id,
@@ -3571,9 +3669,19 @@ def audit_report_section(
     )
     write_llm_cache(
         cache_path,
-        {"key": key_payload, "data": result.final, "usage": result.usage, "request_ids": result.request_ids, "endpoint": "agent_loop"},
+        {
+            "key": key_payload,
+            "data": result.final,
+            "usage": result.usage,
+            "request_ids": result.request_ids,
+            "endpoint": "agent_loop",
+        },
     )
-    return normalize_report_section_audit(result.final)
+    return enforce_section_depth_audit(
+        normalize_report_section_audit(result.final),
+        section=section,
+        section_plan=section_plan,
+    )
 
 
 def build_report_plan_prompt(
@@ -3634,6 +3742,13 @@ def build_report_plan_prompt(
                 "Task: create a report plan for a Standard PaperLens capsule. The plan should let "
                 "later section calls explain the paper clearly without any single call writing the "
                 "whole report."
+            ),
+            (
+                "Completeness contract: plan 5-7 focused sections for A/B/C papers when evidence "
+                "exists. Keep mechanism, implementation path, evaluation, value/tradeoffs, and "
+                "limitations as separate sections unless the memory is truly too sparse. Each "
+                "section needs concrete focus queries, claim ids, evidence refs, or target pages "
+                "when available."
             ),
         ]
     )
@@ -3703,7 +3818,11 @@ def build_report_section_prompt(
             ]
         )
     else:
-        parts.append("Task: write only this planned section. Do not include the heading.")
+        parts.append(
+            "Task: write only this planned section. Do not include the heading. Produce "
+            "2-4 substantive paragraphs when the memory contains enough material; do not return "
+            "a thin abstract-style summary."
+        )
     return "\n\n".join(parts)
 
 
@@ -3751,6 +3870,8 @@ def build_report_section_audit_prompt(
             json.dumps(compact_report_plan(plan), ensure_ascii=False),
             "section_plan:",
             json.dumps(section_plan, ensure_ascii=False),
+            "section_detail_contract:",
+            report_section_detail_contract(section_plan),
             "generated_section:",
             json.dumps(section, ensure_ascii=False),
             "agent_context_pack:",
@@ -3759,12 +3880,20 @@ def build_report_section_audit_prompt(
                 "Task: audit this section. Focus on unsupported facts, overclaims, missing "
                 "reader-critical context, and whether used_claim_ids/used_evidence_refs match the prose."
             ),
+            (
+                "Depth contract: if the section does not answer its section_detail_contract or is "
+                "too shallow to teach the planned topic, return REPAIR with concrete repair instructions."
+            ),
         ]
     )
 
 
 def normalize_report_plan(
-    data: dict[str, Any], *, paper: PaperRecord, decision: ClassificationDecision | None
+    data: dict[str, Any],
+    *,
+    paper: PaperRecord,
+    decision: ClassificationDecision | None,
+    paper_memory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     grade = str(data.get("grade") or (decision.class_label if decision else "HOLD")).upper()
     if grade not in {"A", "B", "C", "HOLD"}:
@@ -3779,6 +3908,9 @@ def normalize_report_plan(
     ]
     if not sections:
         sections = default_report_sections()
+    sections = ensure_report_plan_coverage(
+        sections, grade=grade, paper_memory=dict_value(paper_memory)
+    )
     return {
         "paper_id": str(data.get("paper_id") or paper.paper_id),
         "grade": grade,
@@ -3789,6 +3921,423 @@ def normalize_report_plan(
         "key_visual_pages": normalize_key_visual_pages(data.get("key_visual_pages")),
         "uncertainty_note": clean_model_markdown(data.get("uncertainty_note")),
     }
+
+
+def ensure_report_plan_coverage(
+    sections: list[dict[str, Any]], *, grade: str, paper_memory: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Supplement thin model plans with a complete PaperLens capsule profile."""
+    normalized = [normalize_report_section_plan(section) for section in sections]
+    if len(normalized) >= 7:
+        return order_report_sections(normalized)[:7]
+    desired = desired_report_section_templates(grade=grade, paper_memory=paper_memory)
+    for template in desired:
+        if len(normalized) >= 7:
+            break
+        if report_plan_template_is_covered(template, normalized):
+            continue
+        normalized.append(build_supplemental_report_section(template, paper_memory))
+    minimum = minimum_report_sections_for_grade(grade)
+    if len(normalized) < minimum:
+        for template in default_report_section_templates():
+            if len(normalized) >= minimum or len(normalized) >= 7:
+                break
+            if report_plan_template_is_covered(template, normalized):
+                continue
+            normalized.append(build_supplemental_report_section(template, paper_memory))
+    return order_report_sections(normalized)[:7]
+
+
+def order_report_sections(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    indexed = list(enumerate(sections))
+    indexed.sort(key=lambda item: (report_section_order_index(item[1]), item[0]))
+    return [section for _index, section in indexed]
+
+
+def report_section_order_index(section: dict[str, Any]) -> int:
+    kind = str(section.get("section_kind") or "")
+    text = " ".join(
+        [
+            str(section.get("section_id") or ""),
+            str(section.get("title") or ""),
+            str(section.get("purpose") or ""),
+        ]
+    ).lower()
+    if kind in {"orientation", "background"}:
+        return 0
+    if kind == "mechanism" and any(
+        token in text
+        for token in [
+            "implementation",
+            "runtime",
+            "training",
+            "inference",
+            "实现",
+            "细节",
+            "路径",
+            "训练",
+            "推理",
+        ]
+    ):
+        return 2
+    if kind == "mechanism":
+        return 1
+    if kind == "evaluation":
+        return 3
+    if kind == "value":
+        return 4
+    if kind == "limits":
+        return 5
+    return 6
+
+
+def minimum_report_sections_for_grade(grade: str) -> int:
+    if grade in {"A", "B", "C"}:
+        return 5
+    return 4
+
+
+def desired_report_section_templates(
+    *, grade: str, paper_memory: dict[str, Any]
+) -> list[dict[str, Any]]:
+    templates = default_report_section_templates()
+    if grade in {"A", "B", "C"} and should_add_implementation_section(paper_memory):
+        return templates
+    return [template for template in templates if template["section_id"] != "implementation"]
+
+
+def default_report_section_templates() -> list[dict[str, Any]]:
+    return [
+        {
+            "section_id": "orientation",
+            "section_kind": "orientation",
+            "title": "论文概览与核心问题",
+            "purpose": "Explain the paper's problem, why it matters, and the core abstraction.",
+            "coverage_group": "orientation",
+            "detail_questions": [
+                "What concrete problem or bottleneck is the paper attacking?",
+                "Why do prior approaches fail or leave a gap?",
+                "What is the paper's core abstraction or thesis?",
+                "What should readers not over-claim from this paper?",
+            ],
+        },
+        {
+            "section_id": "mechanism",
+            "section_kind": "mechanism",
+            "title": "核心机制与设计结构",
+            "purpose": "Explain the main mechanism in reader order.",
+            "coverage_group": "mechanism",
+            "detail_questions": [
+                "What state, representation, or model view exists before the mechanism?",
+                "What new abstraction or component changes that state?",
+                "How do the main components connect?",
+                "Why should this mechanism improve the target metric or behavior?",
+            ],
+        },
+        {
+            "section_id": "implementation",
+            "section_kind": "mechanism",
+            "title": "关键实现路径与细节",
+            "purpose": "Walk through the implementation, algorithm, runtime path, or training/inference path.",
+            "coverage_group": "implementation",
+            "detail_questions": [
+                "What data structures, equations, modules, or runtime components make it concrete?",
+                "Walk through one request, object, sample, or inference lifecycle step by step.",
+                "Which parameters, losses, schedules, or invariants matter?",
+                "Where are the main overheads or fragile assumptions introduced?",
+            ],
+        },
+        {
+            "section_id": "evaluation",
+            "section_kind": "evaluation",
+            "title": "实验评估与证据",
+            "purpose": "Explain datasets/workloads, metrics, baselines, headline results, and evidence limits.",
+            "coverage_group": "evaluation",
+            "detail_questions": [
+                "What datasets, workloads, metrics, and baselines are used?",
+                "What are the headline quantitative results?",
+                "Which ablations or qualitative results support the mechanism?",
+                "What exact result boundaries should readers keep in mind?",
+            ],
+        },
+        {
+            "section_id": "value",
+            "section_kind": "value",
+            "title": "价值、适用场景与权衡",
+            "purpose": "Explain why the result is useful, where it transfers, and what tradeoff it chooses.",
+            "coverage_group": "value",
+            "detail_questions": [
+                "What practical or conceptual lesson transfers beyond this paper?",
+                "Which users, systems, tasks, or research directions benefit most?",
+                "What tradeoff does the paper choose instead of optimizing everything?",
+                "When would this idea be less useful?",
+            ],
+        },
+        {
+            "section_id": "limits",
+            "section_kind": "limits",
+            "title": "局限性与可信边界",
+            "purpose": "State scope, assumptions, missing evidence, and open questions without burying them.",
+            "coverage_group": "limits",
+            "detail_questions": [
+                "What evaluation scope, assumptions, or missing details limit the conclusion?",
+                "Which claims require going back to the source before citation?",
+                "What deployment, reproducibility, scaling, or generalization risks remain?",
+                "What follow-up questions should a reader ask?",
+            ],
+        },
+    ]
+
+
+def should_add_implementation_section(paper_memory: dict[str, Any]) -> bool:
+    memory = paper_memory_v3_dict(paper_memory)
+    mechanism = dict_value(memory.get("mechanism"))
+    implementation = dict_value(memory.get("implementation_details"))
+    if len(list_payload(mechanism.get("steps"))) >= 2:
+        return True
+    if list_payload(implementation.get("components")):
+        return True
+    if list_payload(memory.get("figures_tables")):
+        return True
+    return bool(dict_value(memory.get("evaluation")).get("summary"))
+
+
+def report_plan_template_is_covered(
+    template: dict[str, Any], sections: list[dict[str, Any]]
+) -> bool:
+    group = str(template.get("coverage_group") or template.get("section_kind") or "")
+    if group == "orientation":
+        return any(
+            section.get("section_kind") in {"orientation", "background"} for section in sections
+        )
+    if group == "implementation":
+        mechanism_sections = [
+            section for section in sections if section.get("section_kind") == "mechanism"
+        ]
+        if len(mechanism_sections) >= 2:
+            return True
+        return any(
+            any(
+                token
+                in " ".join(
+                    [
+                        str(section.get("section_id") or ""),
+                        str(section.get("title") or ""),
+                        str(section.get("purpose") or ""),
+                    ]
+                ).lower()
+                for token in [
+                    "implementation",
+                    "runtime",
+                    "algorithm",
+                    "training",
+                    "inference",
+                    "实现",
+                    "细节",
+                    "运行",
+                    "训练",
+                    "推理",
+                    "路径",
+                ]
+            )
+            for section in sections
+        )
+    return any(section.get("section_kind") == group for section in sections)
+
+
+def build_supplemental_report_section(
+    template: dict[str, Any], paper_memory: dict[str, Any]
+) -> dict[str, Any]:
+    group = str(template.get("coverage_group") or template.get("section_kind") or "other")
+    seed = report_section_seed_context(group, paper_memory)
+    return normalize_report_section_plan(
+        {
+            "section_id": template["section_id"],
+            "section_kind": template["section_kind"],
+            "title": template["title"],
+            "purpose": template["purpose"],
+            "focus_queries": seed["focus_queries"],
+            "claim_ids": seed["claim_ids"],
+            "evidence_refs": seed["evidence_refs"],
+            "target_pages": seed["target_pages"],
+            "detail_questions": template["detail_questions"],
+            "avoid": [],
+        }
+    )
+
+
+def report_section_seed_context(group: str, paper_memory: dict[str, Any]) -> dict[str, Any]:
+    memory = paper_memory_v3_dict(paper_memory)
+    claims = [claim for claim in list_payload(memory.get("claims")) if isinstance(claim, dict)]
+    evidence = [item for item in list_payload(memory.get("evidence")) if isinstance(item, dict)]
+    claim_ids: list[str] = []
+    evidence_refs: list[str] = []
+    focus_queries: list[str] = []
+    target_pages: list[int] = []
+
+    def add_claim(claim: dict[str, Any]) -> None:
+        claim_id = string_or_none(claim.get("id"))
+        if claim_id and claim_id not in claim_ids:
+            claim_ids.append(claim_id)
+        text = string_or_none(claim.get("text"))
+        if text:
+            focus_queries.append(text)
+        for ref in normalized_string_list(claim.get("evidence_refs")):
+            if ref not in evidence_refs:
+                evidence_refs.append(ref)
+
+    def claim_matches(claim: dict[str, Any]) -> bool:
+        text = " ".join(
+            [
+                str(claim.get("type") or ""),
+                str(claim.get("text") or ""),
+                " ".join(normalized_string_list(claim.get("risk_tags"))),
+            ]
+        ).lower()
+        if group in {"mechanism", "implementation"}:
+            return any(
+                token in text
+                for token in [
+                    "mechanism",
+                    "design",
+                    "algorithm",
+                    "architecture",
+                    "implementation",
+                    "implication",
+                    "机制",
+                    "设计",
+                    "算法",
+                    "架构",
+                    "实现",
+                ]
+            )
+        if group == "evaluation":
+            return any(
+                token in text
+                for token in [
+                    "evaluation",
+                    "comparison",
+                    "benchmark",
+                    "metric",
+                    "performance",
+                    "实验",
+                    "评估",
+                    "基线",
+                    "性能",
+                ]
+            )
+        if group == "limits":
+            return any(
+                token in text
+                for token in [
+                    "limitation",
+                    "scope",
+                    "risk",
+                    "assumption",
+                    "boundary",
+                    "局限",
+                    "边界",
+                    "假设",
+                ]
+            )
+        if group == "value":
+            return any(
+                token in text
+                for token in [
+                    "value",
+                    "tradeoff",
+                    "application",
+                    "deployment",
+                    "efficiency",
+                    "robustness",
+                    "价值",
+                    "权衡",
+                    "适用",
+                    "部署",
+                ]
+            )
+        return True
+
+    for claim in claims:
+        if claim_matches(claim):
+            add_claim(claim)
+        if len(claim_ids) >= 6:
+            break
+    if not claim_ids and group in {"orientation", "value"}:
+        for claim in claims[:4]:
+            add_claim(claim)
+
+    evidence_by_id = {str(item.get("id")): item for item in evidence if item.get("id")}
+    for ref in evidence_refs:
+        item = evidence_by_id.get(ref)
+        if item:
+            page = safe_int(item.get("page"))
+            if page and page not in target_pages:
+                target_pages.append(page)
+    for item in evidence:
+        text = " ".join(
+            [
+                str(item.get("source_type") or ""),
+                str(item.get("section") or ""),
+                str(item.get("interpretation") or ""),
+                str(item.get("excerpt_or_caption") or ""),
+            ]
+        ).lower()
+        if group == "evaluation" and not any(
+            token in text for token in ["table", "result", "metric", "baseline", "实验", "评估"]
+        ):
+            continue
+        if group in {"mechanism", "implementation"} and not any(
+            token in text
+            for token in ["figure", "design", "architecture", "equation", "module", "机制", "架构"]
+        ):
+            continue
+        evidence_id = string_or_none(item.get("id"))
+        if evidence_id and evidence_id not in evidence_refs:
+            evidence_refs.append(evidence_id)
+        page = safe_int(item.get("page"))
+        if page and page not in target_pages:
+            target_pages.append(page)
+        if len(evidence_refs) >= 8 and len(target_pages) >= 4:
+            break
+
+    frame = dict_value(memory.get("problem_frame"))
+    mechanism = dict_value(memory.get("mechanism"))
+    evaluation = dict_value(memory.get("evaluation"))
+    if group == "orientation":
+        focus_queries.extend([frame.get("problem"), frame.get("why_it_matters")])
+        for item in list_payload(memory.get("core_abstractions"))[:2]:
+            if isinstance(item, dict):
+                focus_queries.append(str(item.get("text") or ""))
+    elif group in {"mechanism", "implementation"}:
+        focus_queries.append(str(mechanism.get("overview") or ""))
+        for step in list_payload(mechanism.get("steps"))[:5]:
+            if isinstance(step, dict):
+                focus_queries.append(str(step.get("text") or ""))
+    elif group == "evaluation":
+        focus_queries.append(str(evaluation.get("summary") or ""))
+        for item in list_payload(evaluation.get("items"))[:4]:
+            if isinstance(item, dict):
+                focus_queries.append(str(item.get("text") or ""))
+    elif group == "limits":
+        focus_queries.extend(normalized_string_list(memory.get("limitations"))[:5])
+        focus_queries.extend(normalized_string_list(memory.get("open_questions"))[:4])
+
+    return {
+        "focus_queries": compact_string_list(focus_queries, limit=5, max_chars=180),
+        "claim_ids": claim_ids[:8],
+        "evidence_refs": evidence_refs[:10],
+        "target_pages": target_pages[:6],
+    }
+
+
+def paper_memory_v3_dict(memory: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(memory, dict):
+        return {}
+    if memory.get("schema_version") == "paper_memory.v3":
+        return memory
+    nested = dict_value(memory.get("paper_memory_v3"))
+    return nested if nested.get("schema_version") == "paper_memory.v3" else {}
 
 
 def normalize_report_section_plan(data: dict[str, Any]) -> dict[str, Any]:
@@ -3806,7 +4355,9 @@ def normalize_report_section_plan(data: dict[str, Any]) -> dict[str, Any]:
         "limits",
         "other",
     }:
-        section_kind = infer_report_section_kind(section_id=section_id, title=title, purpose=data.get("purpose"))
+        section_kind = infer_report_section_kind(
+            section_id=section_id, title=title, purpose=data.get("purpose")
+        )
     return {
         "section_id": section_id[:40],
         "section_kind": section_kind,
@@ -3815,7 +4366,11 @@ def normalize_report_section_plan(data: dict[str, Any]) -> dict[str, Any]:
         "focus_queries": compact_string_list(data.get("focus_queries"), limit=5, max_chars=180),
         "claim_ids": compact_string_list(data.get("claim_ids"), limit=8, max_chars=40),
         "evidence_refs": compact_string_list(data.get("evidence_refs"), limit=10, max_chars=40),
-        "target_pages": [page for page in (safe_int(value) for value in list_payload(data.get("target_pages"))) if page],
+        "target_pages": [
+            page
+            for page in (safe_int(value) for value in list_payload(data.get("target_pages")))
+            if page
+        ],
         "detail_questions": compact_string_list(
             data.get("detail_questions"), limit=8, max_chars=180
         ),
@@ -3823,29 +4378,52 @@ def normalize_report_section_plan(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def normalize_report_section(data: dict[str, Any], *, section_plan: dict[str, Any]) -> dict[str, Any]:
+def normalize_report_section(
+    data: dict[str, Any], *, section_plan: dict[str, Any]
+) -> dict[str, Any]:
     paragraphs = compact_string_list(data.get("paragraphs"), limit=12, max_chars=1800)
     markdown_source = "\n\n".join(paragraphs) if paragraphs else data.get("markdown")
     return {
         "section_id": str(data.get("section_id") or section_plan.get("section_id") or "section"),
-        "title": clean_model_inline_text(data.get("title")) or str(section_plan.get("title") or "正文"),
+        "title": clean_model_inline_text(data.get("title"))
+        or str(section_plan.get("title") or "正文"),
         "paragraphs": paragraphs,
         "markdown": sanitize_reader_hostile_text(readable_model_body(markdown_source)),
         "used_claim_ids": compact_string_list(data.get("used_claim_ids"), limit=12, max_chars=40),
-        "used_evidence_refs": compact_string_list(data.get("used_evidence_refs"), limit=16, max_chars=40),
+        "used_evidence_refs": compact_string_list(
+            data.get("used_evidence_refs"), limit=16, max_chars=40
+        ),
         "uncertainty_note": clean_model_markdown(data.get("uncertainty_note")),
     }
 
 
 def infer_report_section_kind(*, section_id: str, title: str, purpose: Any) -> str:
     text = " ".join([section_id, title, str(purpose or "")]).lower()
-    if any(token in text for token in ["mechanism", "algorithm", "design", "architecture", "system", "机制", "算法", "架构", "系统", "如何工作"]):
+    if any(
+        token in text
+        for token in [
+            "mechanism",
+            "algorithm",
+            "design",
+            "architecture",
+            "system",
+            "机制",
+            "算法",
+            "架构",
+            "系统",
+            "如何工作",
+        ]
+    ):
         return "mechanism"
-    if any(token in text for token in ["evaluation", "result", "benchmark", "实验", "评估", "性能"]):
+    if any(
+        token in text for token in ["evaluation", "result", "benchmark", "实验", "评估", "性能"]
+    ):
         return "evaluation"
     if any(token in text for token in ["limit", "scope", "boundary", "局限", "边界", "适用"]):
         return "limits"
-    if any(token in text for token in ["background", "problem", "motivation", "背景", "问题", "动机"]):
+    if any(
+        token in text for token in ["background", "problem", "motivation", "背景", "问题", "动机"]
+    ):
         return "background"
     if any(token in text for token in ["value", "transfer", "价值", "启发"]):
         return "value"
@@ -3880,6 +4458,53 @@ def report_section_detail_contract(section_plan: dict[str, Any]) -> str:
             "PaperMemory/evidence and local observations. Do not turn this into a bullet checklist: "
             + json.dumps(merged, ensure_ascii=False)
         )
+    section_kind = str(section_plan.get("section_kind") or "")
+    if section_kind in {"orientation", "background"}:
+        defaults = [
+            "Name the paper's concrete problem or bottleneck, not just the broad area.",
+            "Explain why prior approaches are insufficient in this paper's framing.",
+            "State the paper's core abstraction and the main misunderstanding to avoid.",
+            "Keep background concepts separate from claims the paper actually proves.",
+        ]
+        merged = merge_string_lists(questions, defaults, limit=8)
+        return (
+            "Orientation section contract: answer these questions in connected prose: "
+            + json.dumps(merged, ensure_ascii=False)
+        )
+    if section_kind == "evaluation":
+        defaults = [
+            "Describe datasets/workloads, metrics, baselines, and hardware or setting when available.",
+            "Report the headline numbers or qualitative findings that directly support the claim.",
+            "Explain which result supports which mechanism or value claim.",
+            "State what the evaluation does not prove.",
+        ]
+        merged = merge_string_lists(questions, defaults, limit=8)
+        return (
+            "Evaluation section contract: answer these questions in connected prose: "
+            + json.dumps(merged, ensure_ascii=False)
+        )
+    if section_kind == "value":
+        defaults = [
+            "Explain the transferable lesson or product/research value.",
+            "Name the scenario where the idea is strongest.",
+            "Name the tradeoff the paper chooses and what it gives up.",
+            "Avoid generic praise; tie value to evidence and mechanism.",
+        ]
+        merged = merge_string_lists(questions, defaults, limit=8)
+        return "Value section contract: answer these questions in connected prose: " + json.dumps(
+            merged, ensure_ascii=False
+        )
+    if section_kind == "limits":
+        defaults = [
+            "List the paper's actual evaluation scope and assumptions.",
+            "Identify exact numbers, baselines, or implementation details that need source checking.",
+            "Explain deployment, reproducibility, scaling, or generalization risks when relevant.",
+            "End with open questions that would affect whether a reader should trust or use the result.",
+        ]
+        merged = merge_string_lists(questions, defaults, limit=8)
+        return "Limits section contract: answer these questions in connected prose: " + json.dumps(
+            merged, ensure_ascii=False
+        )
     if questions:
         return "Section-specific questions to answer: " + json.dumps(questions, ensure_ascii=False)
     return "No additional section-specific detail contract."
@@ -3889,18 +4514,81 @@ def normalize_report_section_audit(data: dict[str, Any]) -> dict[str, Any]:
     verdict = str(data.get("verdict") or "REPAIR").upper()
     if verdict not in {"PASS", "PASS_WITH_WEAKNESSES", "REPAIR"}:
         verdict = "REPAIR"
-    unsupported_items = compact_string_list(
-        data.get("unsupported_items"), limit=6, max_chars=240
-    )
+    unsupported_items = compact_string_list(data.get("unsupported_items"), limit=6, max_chars=240)
     if unsupported_items:
         verdict = "REPAIR"
     return {
         "verdict": verdict,
         "unsupported_items": unsupported_items,
         "missing_items": compact_string_list(data.get("missing_items"), limit=6, max_chars=240),
-        "repair_instructions": compact_string_list(data.get("repair_instructions"), limit=6, max_chars=240),
+        "repair_instructions": compact_string_list(
+            data.get("repair_instructions"), limit=6, max_chars=240
+        ),
         "safe_usage_note": clean_model_markdown(data.get("safe_usage_note")),
     }
+
+
+def enforce_section_depth_audit(
+    audit: dict[str, Any], *, section: dict[str, Any], section_plan: dict[str, Any]
+) -> dict[str, Any]:
+    issue = section_depth_issue(section, section_plan)
+    if not issue:
+        return audit
+    result = dict(audit)
+    result["missing_items"] = compact_string_list(
+        list_payload(result.get("missing_items")) + [issue], limit=6, max_chars=240
+    )
+    result["repair_instructions"] = compact_string_list(
+        list_payload(result.get("repair_instructions"))
+        + [
+            "Rewrite this section with concrete mechanism/evidence/boundary detail from PaperMemory and focused pages."
+        ],
+        limit=6,
+        max_chars=240,
+    )
+    result["verdict"] = "REPAIR"
+    if not result.get("safe_usage_note"):
+        result["safe_usage_note"] = "Section is too thin for its planned purpose."
+    return result
+
+
+def section_depth_issue(section: dict[str, Any], section_plan: dict[str, Any]) -> str:
+    markdown = readable_model_body(section.get("markdown"))
+    normalized = re.sub(r"\s+", "", markdown)
+    char_count = len(normalized)
+    kind = str(section_plan.get("section_kind") or "other")
+    thresholds = {
+        "orientation": 420,
+        "background": 420,
+        "mechanism": 650,
+        "evaluation": 560,
+        "value": 430,
+        "limits": 380,
+        "other": 360,
+    }
+    minimum = thresholds.get(kind, thresholds["other"])
+    section_id = section_plan.get("section_id") or section.get("section_id")
+    if char_count < minimum:
+        return (
+            f"Section '{section_id}' is too thin for {kind} coverage "
+            f"({char_count} chars; expected at least {minimum})."
+        )
+    paragraphs = [
+        paragraph
+        for paragraph in re.split(r"\n\s*\n", markdown)
+        if clean_model_inline_text(paragraph)
+    ]
+    if kind in {"mechanism", "evaluation"} and len(paragraphs) < 2:
+        return (
+            f"Section '{section_id}' needs at least two substantive paragraphs for {kind} coverage."
+        )
+    return ""
+
+
+def report_section_is_more_substantive(candidate: dict[str, Any], current: dict[str, Any]) -> bool:
+    candidate_text = re.sub(r"\s+", "", readable_model_body(candidate.get("markdown")))
+    current_text = re.sub(r"\s+", "", readable_model_body(current.get("markdown")))
+    return len(candidate_text) >= max(len(current_text) + 120, int(len(current_text) * 1.2))
 
 
 def assemble_agentic_report(
@@ -3927,7 +4615,9 @@ def assemble_agentic_report(
             body_parts.append(markdown)
     if not body_parts:
         body_parts.append(
-            "模型没有生成可用的分段讲解。" if output_language == "zh" else "No usable section draft was generated."
+            "模型没有生成可用的分段讲解。"
+            if output_language == "zh"
+            else "No usable section draft was generated."
         )
     uncertainty_parts = [user_facing_uncertainty_note(plan.get("uncertainty_note"))]
     if any(audit.get("verdict") != "PASS" for audit in section_audits):
@@ -3941,7 +4631,9 @@ def assemble_agentic_report(
         "review_status": section_review_status(section_audits, output_language=output_language),
         "read_recommendation": plan.get("read_recommendation") or recommendation_for_grade(grade),
         "one_line_reason": clean_model_inline_text(plan.get("one_line_reason"))
-        or compact_reason(str(plan.get("core_takeaway") or paper.canonical_title or paper.paper_id)),
+        or compact_reason(
+            str(plan.get("core_takeaway") or paper.canonical_title or paper.paper_id)
+        ),
         "core_takeaway": clean_model_markdown(plan.get("core_takeaway")),
         "explanation_markdown": "\n\n".join(body_parts),
         "uncertainty_note": "; ".join(item for item in uncertainty_parts if item),
@@ -3967,7 +4659,11 @@ def aggregate_section_audits(section_audits: list[dict[str, Any]]) -> dict[str, 
     return {
         "verdict": verdict,
         "unsupported_items": compact_string_list(
-            [item for audit in section_audits for item in list_payload(audit.get("unsupported_items"))],
+            [
+                item
+                for audit in section_audits
+                for item in list_payload(audit.get("unsupported_items"))
+            ],
             limit=5,
             max_chars=240,
         ),
@@ -3977,7 +4673,11 @@ def aggregate_section_audits(section_audits: list[dict[str, Any]]) -> dict[str, 
             max_chars=240,
         ),
         "correction_notes": compact_string_list(
-            [item for audit in section_audits for item in list_payload(audit.get("repair_instructions"))],
+            [
+                item
+                for audit in section_audits
+                for item in list_payload(audit.get("repair_instructions"))
+            ],
             limit=5,
             max_chars=240,
         ),
@@ -4033,7 +4733,11 @@ def section_review_status(section_audits: list[dict[str, Any]], *, output_langua
             else "section-audited with unresolved boundaries"
         )
     if any(audit.get("verdict") == "PASS_WITH_WEAKNESSES" for audit in section_audits):
-        return "已分段复核（有证据边界）" if output_language == "zh" else "section-audited with evidence boundaries"
+        return (
+            "已分段复核（有证据边界）"
+            if output_language == "zh"
+            else "section-audited with evidence boundaries"
+        )
     return "已分段复核" if output_language == "zh" else "section-audited"
 
 
@@ -4104,47 +4808,8 @@ def report_focus_pages(
 
 def default_report_sections() -> list[dict[str, Any]]:
     return [
-        {
-            "section_id": "idea",
-            "section_kind": "orientation",
-            "title": "核心问题和抽象",
-            "purpose": "Explain the paper's main problem and abstraction.",
-            "focus_queries": [],
-            "claim_ids": [],
-            "evidence_refs": [],
-            "target_pages": [],
-            "detail_questions": [],
-            "avoid": [],
-        },
-        {
-            "section_id": "mechanism",
-            "section_kind": "mechanism",
-            "title": "机制如何工作",
-            "purpose": "Explain the mechanism in reader order.",
-            "focus_queries": [],
-            "claim_ids": [],
-            "evidence_refs": [],
-            "target_pages": [],
-            "detail_questions": [
-                "What state or bottleneck exists before the mechanism?",
-                "What data structures/components make the mechanism work?",
-                "What happens during one request or object lifecycle?",
-                "What tradeoffs or overheads bound the mechanism?",
-            ],
-            "avoid": [],
-        },
-        {
-            "section_id": "evidence",
-            "section_kind": "evaluation",
-            "title": "证据、价值和边界",
-            "purpose": "Explain evaluation, transferable value, and limits.",
-            "focus_queries": [],
-            "claim_ids": [],
-            "evidence_refs": [],
-            "target_pages": [],
-            "detail_questions": [],
-            "avoid": [],
-        },
+        build_supplemental_report_section(template, {})
+        for template in default_report_section_templates()
     ]
 
 
@@ -4353,7 +5018,11 @@ def compact_string_list(value: Any, *, limit: int, max_chars: int) -> list[str]:
 def compact_paper_memory_for_report(memory: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(memory, dict):
         return {}
-    v3 = dict_value(memory.get("paper_memory_v3")) if "paper_memory_v3" in memory else dict_value(memory)
+    v3 = (
+        dict_value(memory.get("paper_memory_v3"))
+        if "paper_memory_v3" in memory
+        else dict_value(memory)
+    )
     if v3.get("schema_version") != "paper_memory.v3":
         return {}
     audit_trail = dict_value(v3.get("audit_trail"))
@@ -4456,7 +5125,11 @@ def select_focused_report_pages(
         selected.append(page_no)
 
     memory = paper_memory if isinstance(paper_memory, dict) else {}
-    v3 = dict_value(memory.get("paper_memory_v3")) if "paper_memory_v3" in memory else dict_value(memory)
+    v3 = (
+        dict_value(memory.get("paper_memory_v3"))
+        if "paper_memory_v3" in memory
+        else dict_value(memory)
+    )
     evidence_id_to_page = {
         item.get("id"): item.get("page")
         for item in list_payload(v3.get("evidence"))
@@ -4675,7 +5348,9 @@ def compact_conceptual_bridge(value: Any) -> dict[str, Any]:
     return {
         "needed": bool(bridge.get("needed") or terms or string_or_none(bridge.get("bridge_text"))),
         "reader_gap": compact_reason(string_or_none(bridge.get("reader_gap")) or "", max_chars=160),
-        "bridge_text": compact_reason(string_or_none(bridge.get("bridge_text")) or "", max_chars=320),
+        "bridge_text": compact_reason(
+            string_or_none(bridge.get("bridge_text")) or "", max_chars=320
+        ),
         "terms": terms,
     }
 
@@ -4851,10 +5526,15 @@ def write_final_report_bundle(
                     "correction_notes": [f"report_generation_failed: {exc}"],
                     "safe_usage_note": "This report used a deterministic fallback and needs human review before citation.",
                 }
+            report_audit = combine_report_and_memory_audits(report_audit, paper_memory_v3)
             if require_report_success and not final_report_audit_acceptable(report_audit):
+                safe_usage_note = compact_reason(
+                    str((report_audit or {}).get("safe_usage_note") or ""), max_chars=220
+                )
+                suffix = f" ({safe_usage_note})" if safe_usage_note else ""
                 raise RuntimeError(
-                    f"Section report audit did not produce a usable report for {paper.paper_id}: "
-                    f"{(report_audit or {}).get('verdict')}"
+                    f"Final report audit did not produce a usable report for {paper.paper_id}: "
+                    f"{(report_audit or {}).get('verdict')}{suffix}"
                 )
         if report_audit is not None:
             paper_memory_v3 = memory_store.apply_patch_set(
@@ -4935,6 +5615,65 @@ def final_report_audit_acceptable(report_audit: dict[str, Any] | None) -> bool:
     if not report_audit:
         return False
     return report_audit.get("verdict") in {"PASS", "PASS_WITH_WEAKNESSES"}
+
+
+def combine_report_and_memory_audits(
+    report_audit: dict[str, Any] | None, paper_memory: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    if report_audit is None:
+        return None
+    memory = paper_memory_v3_dict(dict_value(paper_memory))
+    memory_audit = dict_value(dict_value(memory.get("audit_trail")).get("memory_audit"))
+    if not memory_audit:
+        return report_audit
+    result = dict(report_audit)
+    verdict = str(result.get("verdict") or "NEED_HUMAN_REVIEW")
+    memory_status = str(memory_audit.get("status") or "").upper()
+    memory_safe = bool(memory_audit.get("safe_to_generate_capsule"))
+    memory_confidence = str(memory_audit.get("confidence") or "low")
+    if memory_status == "NEED_HUMAN_REVIEW" or not memory_safe:
+        verdict = "NEED_HUMAN_REVIEW"
+    elif memory_status == "PASS_WITH_WEAKNESSES" or memory_confidence == "low":
+        if verdict == "PASS":
+            verdict = "PASS_WITH_WEAKNESSES"
+    result["verdict"] = verdict
+    result["unsupported_items"] = compact_string_list(
+        list_payload(result.get("unsupported_items"))
+        + normalized_string_list(memory_audit.get("unsupported_claims")),
+        limit=5,
+        max_chars=240,
+    )
+    result["missing_items"] = compact_string_list(
+        list_payload(result.get("missing_items"))
+        + normalized_string_list(memory_audit.get("missing_items")),
+        limit=5,
+        max_chars=240,
+    )
+    result["correction_notes"] = compact_string_list(
+        list_payload(result.get("correction_notes"))
+        + normalized_string_list(memory_audit.get("repair_instructions")),
+        limit=5,
+        max_chars=240,
+    )
+    notes = compact_string_list(
+        [result.get("safe_usage_note"), memory_audit_safe_usage_note(memory_audit)],
+        limit=2,
+        max_chars=260,
+    )
+    result["safe_usage_note"] = "; ".join(notes)
+    return result
+
+
+def memory_audit_safe_usage_note(memory_audit: dict[str, Any]) -> str:
+    status = str(memory_audit.get("status") or "").upper()
+    confidence = str(memory_audit.get("confidence") or "low")
+    if status == "PASS":
+        return ""
+    if status == "NEED_HUMAN_REVIEW" or not memory_audit.get("safe_to_generate_capsule"):
+        return "PaperMemory audit requires human review before treating this capsule as reviewed."
+    if confidence == "low":
+        return "PaperMemory audit confidence is low; keep evidence boundaries visible."
+    return "PaperMemory audit passed with evidence boundaries."
 
 
 def render_paperlens_report(
@@ -5087,9 +5826,7 @@ def validate_paperlens_output(
     if not paper_reports:
         issues.append("No per-paper Markdown reports were written")
     empty_reports = [
-        report.name
-        for report in paper_reports
-        if not report.read_text(encoding="utf-8").strip()
+        report.name for report in paper_reports if not report.read_text(encoding="utf-8").strip()
     ]
     for report in empty_reports:
         issues.append(f"Empty paper report: papers/{report}")
@@ -5119,7 +5856,9 @@ def validate_paperlens_output(
             f"{paper_id}.paper_memory.v3.json" for paper_id in expected_paper_ids
         }
         memory_v3_files = [
-            memory_file for memory_file in memory_v3_files if memory_file.name in expected_memory_names
+            memory_file
+            for memory_file in memory_v3_files
+            if memory_file.name in expected_memory_names
         ]
     if paper_reports and len(memory_v3_files) < len(paper_reports):
         issues.append("PaperMemoryV3 file count is lower than paper report count")
