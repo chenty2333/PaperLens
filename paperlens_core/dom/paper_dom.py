@@ -101,10 +101,11 @@ def build_paper_dom_from_layout(
     warnings: list[str] = []
 
     current_section_id: str | None = None
-    for page in pages:
+    for page_index, page in enumerate(pages, start=1):
         if not isinstance(page, dict):
             continue
         page_no = safe_int(page.get("page_no"))
+        page_key = f"p{page_no}" if page_no is not None else f"page{page_index}"
         section_candidates = [
             item for item in list_value(page.get("section_candidates")) if isinstance(item, dict)
         ]
@@ -113,7 +114,7 @@ def build_paper_dom_from_layout(
             title_text = str(candidate.get("title") or candidate.get("text") or "").strip()
             if title_text:
                 current_section_id = stable_source_id(
-                    paper_id, "section", f"p{page_no or 0}", len(sections) + 1
+                    paper_id, "section", page_key, len(sections) + 1
                 )
                 sections.append(
                     PaperSection(
@@ -137,7 +138,7 @@ def build_paper_dom_from_layout(
             )
         text = str(page.get("text") or "")
         for index, paragraph in enumerate(split_paragraphs(text), start=1):
-            source_id = stable_source_id(paper_id, "span", f"p{page_no or 0}", index)
+            source_id = stable_source_id(paper_id, "span", page_key, index)
             span = PaperSpan(
                 source_id=source_id,
                 paper_id=paper_id,
@@ -150,9 +151,18 @@ def build_paper_dom_from_layout(
                 if section.source_id == current_section_id:
                     section.span_ids.append(source_id)
                     break
-            equations.extend(extract_equations(paper_id, page_no, current_section_id, paragraph))
-        figures.extend(extract_visual_nodes(paper_id, page_no, page, key="figures"))
-        tables.extend(extract_visual_nodes(paper_id, page_no, page, key="tables"))
+            equations.extend(
+                extract_equations(
+                    paper_id,
+                    page_key,
+                    page_no,
+                    current_section_id,
+                    paragraph_index=index,
+                    paragraph=paragraph,
+                )
+            )
+        figures.extend(extract_visual_nodes(paper_id, page_key, page_no, page, key="figures"))
+        tables.extend(extract_visual_nodes(paper_id, page_key, page_no, page, key="tables"))
         if page_no is None:
             warnings.append("page_missing_number")
 
@@ -172,6 +182,7 @@ def build_paper_dom_from_layout(
 
 def extract_visual_nodes(
     paper_id: str,
+    page_key: str,
     page_no: int | None,
     page: dict[str, Any],
     *,
@@ -185,7 +196,7 @@ def extract_visual_nodes(
         caption = str(item.get("caption") or item.get("text") or "").strip() or None
         bbox = item.get("bbox") if isinstance(item.get("bbox"), list) else None
         payload = {
-            "source_id": stable_source_id(paper_id, kind, f"p{page_no or 0}", index),
+            "source_id": stable_source_id(paper_id, kind, page_key, index),
             "paper_id": paper_id,
             "page_no": page_no,
             "caption": caption,
@@ -197,8 +208,11 @@ def extract_visual_nodes(
 
 def extract_equations(
     paper_id: str,
+    page_key: str,
     page_no: int | None,
     section_id: str | None,
+    *,
+    paragraph_index: int,
     paragraph: str,
 ) -> list[PaperEquation]:
     equations = []
@@ -207,7 +221,9 @@ def extract_equations(
     ):
         equations.append(
             PaperEquation(
-                source_id=stable_source_id(paper_id, "equation", f"p{page_no or 0}", index),
+                source_id=stable_source_id(
+                    paper_id, "equation", page_key, f"s{paragraph_index}", index
+                ),
                 paper_id=paper_id,
                 page_no=page_no,
                 section_id=section_id,

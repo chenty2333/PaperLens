@@ -93,12 +93,44 @@ def test_paper_dom_assigns_stable_source_ids():
     dom = sample_dom()
 
     assert dom.schema_version == "paper_dom.v1"
+    node_count = (
+        len(dom.sections) + len(dom.spans) + len(dom.figures) + len(dom.tables) + len(dom.equations)
+    )
+    assert len(dom.source_ids()) == node_count
     assert {span.page_no for span in dom.spans} == {1, 2}
     assert all(span.source_id.startswith("span:p_test:") for span in dom.spans)
     assert all(section.span_ids for section in dom.sections)
     assert dom.source_exists(dom.spans[0].source_id)
     assert dom.figures[0].source_id.startswith("figure:p_test:")
     assert dom.tables[0].source_id.startswith("table:p_test:")
+
+
+def test_paper_dom_assigns_unique_equation_and_missing_page_source_ids():
+    dom = build_paper_dom_from_layout(
+        paper_id="p_math",
+        title="Math Paper",
+        layout={
+            "pages": [
+                {
+                    "text": "Method\n\nFirst equation $x_i = y_i$.\n\nSecond equation $z_i = x_i$.",
+                    "section_candidates": [{"title": "Method", "level": 1}],
+                    "figures": [{"caption": "First visual"}],
+                },
+                {
+                    "text": "Appendix\n\nThird equation $a_i = b_i$.",
+                    "section_candidates": [{"title": "Appendix", "level": 1}],
+                    "figures": [{"caption": "Second visual"}],
+                },
+            ]
+        },
+    )
+
+    assert len(dom.equations) == 3
+    assert len({item.source_id for item in dom.equations}) == 3
+    assert len({item.source_id for item in dom.spans}) == len(dom.spans)
+    assert len({item.source_id for item in dom.figures}) == 2
+    assert all("p0" not in item.source_id for item in [*dom.spans, *dom.figures, *dom.equations])
+    assert "page_missing_number" in dom.parse_warnings
 
 
 def test_reading_plan_is_structured_and_source_bound():
