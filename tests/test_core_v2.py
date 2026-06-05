@@ -35,6 +35,8 @@ from paperlens_core.reading import (
     ObservationCard,
     ObservationLog,
     ObservationType,
+    ReadingPlan,
+    ReadingTask,
     ReadingTaskType,
     build_initial_reading_plan,
     make_observation_id,
@@ -205,6 +207,78 @@ def test_reading_plan_targets_equation_sources_for_mechanism_tasks():
     assert any(
         item["kind"] == "equation" for item in source_pack(dom, method_task.target_source_ids)
     )
+
+
+def test_reading_task_contract_normalizes_sources_and_requires_outputs():
+    task = ReadingTask(
+        task_id=" read_01_orientation ",
+        task_type=ReadingTaskType.ORIENTATION,
+        target_source_ids=[" span:p_test:p1:1 ", "span:p_test:p1:1", ""],
+        required_outputs=["problem", " problem ", ""],
+        allowed_observation_types=["problem", "problem", ""],
+    )
+
+    assert task.task_id == "read_01_orientation"
+    assert task.target_source_ids == ["span:p_test:p1:1"]
+    assert task.required_outputs == ["problem"]
+    assert task.allowed_observation_types == ["problem"]
+    with pytest.raises(ValueError, match="must declare required_outputs"):
+        ReadingTask(
+            task_id="read_bad",
+            task_type=ReadingTaskType.ORIENTATION,
+            target_source_ids=["span:p_test:p1:1"],
+            required_outputs=[],
+            allowed_observation_types=["problem"],
+        )
+
+
+def test_reading_task_contract_rejects_invalid_budget_policy_and_observation_types():
+    with pytest.raises(ValueError, match="invalid allowed_observation_types"):
+        ReadingTask(
+            task_id="read_bad_type",
+            task_type=ReadingTaskType.METHOD_MECHANISM,
+            target_source_ids=["span:p_test:p1:1"],
+            required_outputs=["mechanism"],
+            allowed_observation_types=["claim"],
+        )
+    with pytest.raises(ValueError, match="max_model_calls must be >= 1"):
+        ReadingTask(
+            task_id="read_bad_calls",
+            task_type=ReadingTaskType.ORIENTATION,
+            target_source_ids=["span:p_test:p1:1"],
+            required_outputs=["problem"],
+            allowed_observation_types=["problem"],
+            max_model_calls=0,
+        )
+    with pytest.raises(ValueError, match="evidence_policy must be"):
+        ReadingTask(
+            task_id="read_bad_policy",
+            task_type=ReadingTaskType.ORIENTATION,
+            target_source_ids=["span:p_test:p1:1"],
+            required_outputs=["problem"],
+            allowed_observation_types=["problem"],
+            evidence_policy="cite_pages",
+        )
+
+
+def test_reading_plan_contract_rejects_duplicate_task_ids():
+    first = ReadingTask(
+        task_id="read_same",
+        task_type=ReadingTaskType.ORIENTATION,
+        target_source_ids=["span:p_test:p1:1"],
+        required_outputs=["problem"],
+        allowed_observation_types=["problem"],
+    )
+    second = ReadingTask(
+        task_id="read_same",
+        task_type=ReadingTaskType.CLAIM_INVENTORY,
+        target_source_ids=["span:p_test:p1:2"],
+        required_outputs=["claim"],
+        allowed_observation_types=["claim"],
+    )
+
+    with pytest.raises(ValueError, match="duplicate task_id"):
+        ReadingPlan(paper_id="p_test", tasks=[first, second])
 
 
 def test_observation_log_is_append_only_and_requires_sources():

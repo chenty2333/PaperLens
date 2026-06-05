@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from paperlens_core.dom.paper_dom import PaperDOM
 
@@ -31,11 +31,74 @@ class ReadingTask(BaseModel):
     max_tokens: int = 16000
     evidence_policy: str = "must_cite_paper_dom_source_ids"
 
+    @field_validator("task_id", "evidence_policy")
+    @classmethod
+    def nonempty_text(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("reading task text fields cannot be blank")
+        return text
+
+    @field_validator("target_source_ids", "required_outputs", "allowed_observation_types")
+    @classmethod
+    def normalized_string_list(cls, value: list[str]) -> list[str]:
+        result = []
+        for item in value:
+            text = str(item or "").strip()
+            if text and text not in result:
+                result.append(text)
+        return result
+
+    @model_validator(mode="after")
+    def validate_task_contract(self) -> "ReadingTask":
+        if not self.required_outputs:
+            raise ValueError(f"reading task {self.task_id} must declare required_outputs")
+        if not self.allowed_observation_types:
+            raise ValueError(f"reading task {self.task_id} must declare allowed_observation_types")
+        expected_types = set(allowed_observation_types_for_task(self.task_type))
+        unknown_types = [
+            item for item in self.allowed_observation_types if item not in expected_types
+        ]
+        if unknown_types:
+            raise ValueError(
+                f"reading task {self.task_id} has invalid allowed_observation_types: "
+                + ", ".join(unknown_types)
+            )
+        if self.max_model_calls < 1:
+            raise ValueError(f"reading task {self.task_id} max_model_calls must be >= 1")
+        if self.max_tokens < 1:
+            raise ValueError(f"reading task {self.task_id} max_tokens must be >= 1")
+        if self.evidence_policy != "must_cite_paper_dom_source_ids":
+            raise ValueError(
+                f"reading task {self.task_id} evidence_policy must be "
+                "must_cite_paper_dom_source_ids"
+            )
+        return self
+
 
 class ReadingPlan(BaseModel):
     schema_version: str = "reading_plan.v1"
     paper_id: str
     tasks: list[ReadingTask]
+
+    @field_validator("paper_id")
+    @classmethod
+    def nonempty_paper_id(cls, value: str) -> str:
+        text = value.strip()
+        if not text:
+            raise ValueError("reading plan paper_id cannot be blank")
+        return text
+
+    @model_validator(mode="after")
+    def validate_plan_contract(self) -> "ReadingPlan":
+        if not self.tasks:
+            raise ValueError("reading plan must contain at least one task")
+        task_ids = []
+        for task in self.tasks:
+            if task.task_id in task_ids:
+                raise ValueError(f"reading plan contains duplicate task_id: {task.task_id}")
+            task_ids.append(task.task_id)
+        return self
 
 
 TASK_KEYWORDS: dict[ReadingTaskType, tuple[str, ...]] = {
