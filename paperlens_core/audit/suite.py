@@ -76,6 +76,34 @@ def audit_claim_graph(graph: ClaimGraph, dom: PaperDOM) -> list[AuditFinding]:
                     node_id=edge.source_id,
                 )
             )
+        if (
+            edge.kind != "supported_by"
+            and source_node is not None
+            and source_node.kind == "evidence"
+        ):
+            findings.append(
+                AuditFinding(
+                    finding_id=f"relationship_edge_source_is_evidence:{index}:{edge.source_id}",
+                    severity=AuditSeverity.ERROR,
+                    code="relationship_edge_source_is_evidence",
+                    message="ClaimGraph relationship edge source cannot be an evidence node",
+                    node_id=edge.source_id,
+                )
+            )
+        if (
+            edge.kind != "supported_by"
+            and target_node is not None
+            and target_node.kind == "evidence"
+        ):
+            findings.append(
+                AuditFinding(
+                    finding_id=f"relationship_edge_target_is_evidence:{index}:{edge.target_id}",
+                    severity=AuditSeverity.ERROR,
+                    code="relationship_edge_target_is_evidence",
+                    message="ClaimGraph relationship edge target cannot be an evidence node",
+                    node_id=edge.target_id,
+                )
+            )
     for node in graph.nodes.values():
         if node.kind == "evidence":
             source_id = str(node.payload.get("source_id") or "")

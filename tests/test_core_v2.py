@@ -284,6 +284,46 @@ def test_claim_graph_keeps_valid_observation_relationship_edges():
     assert relationship_edges[0].payload == {"proposed_by_observation_id": "obs_mechanism"}
 
 
+def test_claim_graph_ignores_observation_relationship_edges_to_evidence_nodes():
+    dom = sample_dom()
+    first_source_id = next(
+        span.source_id for span in dom.spans if "block table method" in span.text
+    )
+    second_source_id = next(span.source_id for span in dom.spans if "improves latency" in span.text)
+    claim = ObservationCard(
+        observation_id="obs_claim",
+        paper_id="p_test",
+        task_id="read_02_claim_inventory",
+        observation_type=ObservationType.CLAIM,
+        statement="The paper proposes a block table method.",
+        source_ids=[first_source_id],
+    )
+    result = ObservationCard(
+        observation_id="obs_result",
+        paper_id="p_test",
+        task_id="read_06_result_extraction",
+        observation_type=ObservationType.RESULT,
+        statement="The method improves latency by 27% on Dataset-A.",
+        source_ids=[second_source_id],
+        proposed_links=[
+            {
+                "source_id": "obs_result",
+                "target_id": f"evidence:{first_source_id}",
+                "kind": "explains",
+            },
+            {
+                "source_id": f"evidence:{second_source_id}",
+                "target_id": "obs_claim",
+                "kind": "explains",
+            },
+        ],
+    )
+
+    graph = graph_from_observations("p_test", [claim, result])
+
+    assert [edge for edge in graph.edges if edge.kind != "supported_by"] == []
+
+
 def test_paper_memory_view_materializes_claim_graph_relationship_edges():
     dom = sample_dom()
     claim = ObservationCard(
@@ -350,6 +390,53 @@ def test_audit_blocks_supported_by_edges_that_do_not_target_evidence():
 
     assert "mechanism:obs_mechanism" not in graph.evidence_ids_for("claim:obs_claim")
     assert {finding.code for finding in findings} >= {"support_edge_target_not_evidence"}
+    assert publish_status_from_findings(findings) == PublishStatus.BLOCKED
+
+
+def test_audit_blocks_relationship_edges_that_touch_evidence_nodes():
+    dom = sample_dom()
+    first_source_id = next(
+        span.source_id for span in dom.spans if "block table method" in span.text
+    )
+    second_source_id = next(span.source_id for span in dom.spans if "improves latency" in span.text)
+    claim = ObservationCard(
+        observation_id="obs_claim",
+        paper_id="p_test",
+        task_id="read_02_claim_inventory",
+        observation_type=ObservationType.CLAIM,
+        statement="The paper proposes a block table method.",
+        source_ids=[first_source_id],
+    )
+    result = ObservationCard(
+        observation_id="obs_result",
+        paper_id="p_test",
+        task_id="read_06_result_extraction",
+        observation_type=ObservationType.RESULT,
+        statement="The method improves latency by 27% on Dataset-A.",
+        source_ids=[second_source_id],
+    )
+    graph = graph_from_observations("p_test", [claim, result])
+    graph.edges.append(
+        GraphEdge(
+            source_id="claim:obs_claim",
+            target_id=f"evidence:{second_source_id}",
+            kind="explains",
+        )
+    )
+    graph.edges.append(
+        GraphEdge(
+            source_id=f"evidence:{first_source_id}",
+            target_id="result:obs_result",
+            kind="explains",
+        )
+    )
+
+    findings = audit_claim_graph(graph, dom)
+
+    assert {finding.code for finding in findings} >= {
+        "relationship_edge_source_is_evidence",
+        "relationship_edge_target_is_evidence",
+    }
     assert publish_status_from_findings(findings) == PublishStatus.BLOCKED
 
 

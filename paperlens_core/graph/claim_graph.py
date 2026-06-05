@@ -188,7 +188,7 @@ def resolve_graph_endpoint(
 ) -> str | None:
     endpoint = value.strip()
     if endpoint in graph.nodes:
-        return endpoint
+        return endpoint if graph.nodes[endpoint].kind != "evidence" else None
     if endpoint in observation_node_ids:
         return observation_node_ids[endpoint]
     return None
