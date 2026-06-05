@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+from paperlens_core.memory.audit_policy import (
+    apply_memory_audit_patch,
+    ensure_memory_audit_operation,
+    fallback_memory_audit,
+    memory_audit_acceptable,
+    memory_without_audit,
+    normalize_memory_audit,
+)
 from paperlens_core.memory.paper_memory import (
     PaperMemoryEvaluationItem,
     PaperMemoryEvidenceSource,
@@ -15,5 +23,11 @@ __all__ = [
     "PaperMemoryFactNode",
     "PaperMemoryRelationshipEdge",
     "PaperMemoryView",
+    "apply_memory_audit_patch",
+    "ensure_memory_audit_operation",
+    "fallback_memory_audit",
+    "memory_audit_acceptable",
+    "memory_without_audit",
     "materialize_paper_memory",
+    "normalize_memory_audit",
 ]

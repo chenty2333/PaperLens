@@ -54,6 +54,12 @@ from paperlens_core.memory_v3 import (
     validate_paper_memory_v3,
     write_paper_memory_v3_file,
 )
+from paperlens_core.memory import (
+    ensure_memory_audit_operation,
+    fallback_memory_audit,
+    memory_audit_acceptable,
+    normalize_memory_audit,
+)
 from paperlens_core.memory_store import MEMORY_PATCH_SCHEMA_VERSION, PaperMemoryStore
 from paperlens_core.protocol import RunRequest
 from paperlens_core.workflow.agent import (
@@ -66,10 +72,6 @@ from paperlens_core.workflow.agent import (
     build_report_section_prompt,
     clean_model_markdown,
     compose_agentic_paper_report,
-    ensure_memory_audit_operation,
-    fallback_memory_audit,
-    memory_audit_acceptable,
-    normalize_memory_audit,
     normalize_report_plan,
     readable_model_body,
     render_freeform_paper_report,
@@ -2361,6 +2363,31 @@ def test_missing_memory_audit_operation_gets_conservative_default():
     assert len(audit_ops) == 1
     assert audit_ops[0]["payload"]["status"] == "PASS_WITH_WEAKNESSES"
     assert "central_memory_verify" in audit_ops[0]["payload"]["missing_items"][0]
+
+
+def test_existing_memory_audit_operation_is_normalized():
+    patch_set = ensure_memory_audit_operation(
+        {
+            "paper_id": "p_test",
+            "operations": [
+                {
+                    "op": "set_memory_audit",
+                    "payload": {
+                        "status": "unknown",
+                        "safe_to_generate_capsule": True,
+                        "confidence": "certain",
+                    },
+                }
+            ],
+        },
+        paper_id="p_test",
+        phase="central_memory_verify",
+    )
+
+    audit = patch_set["operations"][0]["payload"]
+    assert audit["status"] == "NEED_HUMAN_REVIEW"
+    assert audit["safe_to_generate_capsule"] is False
+    assert audit["confidence"] == "low"
 
 
 def test_central_verification_selects_evidence_risk_and_map_pages(monkeypatch):
