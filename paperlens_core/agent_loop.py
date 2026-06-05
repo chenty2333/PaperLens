@@ -16,7 +16,9 @@ from paperlens_core.runtime import (
     page_captions,
     page_list_field,
     page_no,
+    page_source_ids,
     page_text,
+    source_ids_from_results,
 )
 
 
@@ -75,14 +77,17 @@ class AgentToolObservation:
     result: dict[str, Any]
     ok: bool = True
     error: str | None = None
+    source_ids: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
+        source_ids = self.source_ids or tool_result_source_ids(self.result)
         payload = {
             "id": self.id,
             "tool": self.tool,
             "arguments": self.arguments,
             "ok": self.ok,
             "result": self.result,
+            "source_ids": source_ids,
         }
         if self.error:
             payload["error"] = self.error
@@ -132,8 +137,16 @@ class PaperToolRegistry:
             },
             {
                 "name": "paper.read_pages",
-                "description": "Read specific page numbers from parsed text/captions/figure metadata.",
+                "description": "Read specific page numbers from parsed text/captions/figure metadata. Prefer paper.read_sources when source_ids are available.",
                 "arguments": {"pages": "array of page numbers", "text_limit": "optional integer"},
+            },
+            {
+                "name": "paper.read_sources",
+                "description": "Read PaperDOM source IDs returned by paper.search_text, paper.map, paper.find_figures, memory.search, or evidence.lookup.",
+                "arguments": {
+                    "source_ids": "array of PaperDOM source IDs",
+                    "text_limit": "optional integer",
+                },
             },
             {
                 "name": "paper.find_figures",
@@ -171,6 +184,8 @@ class PaperToolRegistry:
                     request.arguments.get("pages") or request.arguments.get("page_numbers") or [],
                     text_limit=positive_int(request.arguments.get("text_limit"), default=2200),
                 ).as_dict()
+            elif request.tool == "paper.read_sources":
+                result = self._paper_read_sources(request.arguments)
             elif request.tool == "paper.find_figures":
                 result = self.runtime.find_figures(
                     str(request.arguments.get("query") or ""),
@@ -189,6 +204,7 @@ class PaperToolRegistry:
                 tool=request.tool,
                 arguments=request.arguments,
                 result=result,
+                source_ids=tool_result_source_ids(result),
             )
         except Exception as exc:
             return AgentToolObservation(
@@ -217,6 +233,7 @@ class PaperToolRegistry:
             pages.append(
                 {
                     "page_no": page_no(page),
+                    "source_ids": page_source_ids(page),
                     "text_hint": compact_text(text, limit=360),
                     "captions": captions[:3],
                     "figures": page_list_field(page, "figures")[:2],
@@ -226,6 +243,50 @@ class PaperToolRegistry:
         if not pages and query_terms:
             return self._paper_map({})
         return {"tool": "paper.map", "query": arguments.get("query") or "", "results": pages}
+
+    def _paper_read_sources(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        requested = [
+            str(item).strip()
+            for item in list_payload(arguments.get("source_ids") or arguments.get("refs"))
+            if str(item).strip()
+        ]
+        text_limit = positive_int(arguments.get("text_limit"), default=2200)
+        results = []
+        matched_ids = []
+        for source_id in requested:
+            page = self._page_for_source_id(source_id)
+            if page is None:
+                continue
+            if source_id not in matched_ids:
+                matched_ids.append(source_id)
+            results.append(
+                {
+                    "source_id": source_id,
+                    "source_ids": [source_id],
+                    "page_no": page_no(page),
+                    "text": source_text_for_page(page, source_id, limit=text_limit),
+                    "captions": page_captions(page)[:5],
+                    "figures": page_list_field(page, "figures")[:4],
+                    "tables": page_list_field(page, "tables")[:4],
+                }
+            )
+        return {
+            "tool": "paper.read_sources",
+            "query": requested,
+            "results": results,
+            "source_ids": matched_ids,
+        }
+
+    def _page_for_source_id(self, source_id: str) -> Any | None:
+        for page in self.layout_pages:
+            if source_id in page_source_ids(page):
+                return page
+        page_number = page_no_from_source_id(source_id)
+        if page_number is not None:
+            for page in self.layout_pages:
+                if page_no(page) == page_number:
+                    return page
+        return None
 
     def _memory_search(self, query: str) -> dict[str, Any]:
         terms = tokenize(query)
@@ -579,6 +640,67 @@ def json_text_value(value: Any) -> str:
     if isinstance(value, (dict, list)):
         return json.dumps(value, ensure_ascii=False)
     return str(value or "").strip()
+
+
+def tool_result_source_ids(result: dict[str, Any]) -> list[str]:
+    explicit = [
+        str(item).strip()
+        for item in list_payload(result.get("source_ids"))
+        if str(item).strip()
+    ]
+    nested = source_ids_from_results(list_payload(result.get("results")))
+    return dedupe_strings([*explicit, *nested])
+
+
+def source_text_for_page(page: Any, source_id: str, *, limit: int) -> str:
+    for block in page_list_field(page, "blocks"):
+        if not isinstance(block, dict):
+            continue
+        block_source = str(block.get("source_id") or block.get("text_span_id") or "").strip()
+        if block_source == source_id:
+            return compact_text(str(block.get("text") or ""), limit=limit)
+    index = source_index(source_id) if source_id.startswith("span:") else None
+    if index is not None:
+        paragraphs = split_text_paragraphs(page_text(page))
+        if 0 < index <= len(paragraphs):
+            return compact_text(paragraphs[index - 1], limit=limit)
+    return compact_text(page_text(page), limit=limit)
+
+
+def page_no_from_source_id(source_id: str) -> int | None:
+    match = re.search(r":p(\d+)(?::|$)", source_id)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def source_index(source_id: str) -> int | None:
+    match = re.search(r":(\d+)$", source_id)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def split_text_paragraphs(text: str) -> list[str]:
+    chunks = [re.sub(r"\s+", " ", item).strip() for item in re.split(r"\n\s*\n", text)]
+    if len(chunks) <= 1:
+        chunks = [re.sub(r"\s+", " ", item).strip() for item in text.splitlines()]
+    return [item for item in chunks if item]
+
+
+def dedupe_strings(values: Iterable[Any]) -> list[str]:
+    result = []
+    for value in values:
+        item = str(value or "").strip()
+        if item and item not in result:
+            result.append(item)
+    return result
 
 
 def positive_int(value: Any, *, default: int) -> int:

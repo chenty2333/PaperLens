@@ -26,6 +26,7 @@ from paperlens_core.agent_loop import (
     AGENT_TURN_SCHEMA,
     AgentLoop,
     AgentLoopStepLimitExceeded,
+    AgentToolRequest,
     PaperToolRegistry,
     normalize_agent_turn,
     parse_arguments_json,
@@ -1880,7 +1881,13 @@ def test_agent_loop_executes_paper_tool_before_final(tmp_path):
             )
 
     runtime = PaperLensRuntime(
-        artifacts=[{"page_no": 1, "text": "PagedAttention stores KV cache in blocks."}]
+        artifacts=[
+            {
+                "paper_id": "p_test",
+                "page_no": 1,
+                "text": "PagedAttention stores KV cache in blocks.",
+            }
+        ]
     )
     loop = AgentLoop(
         client=FakeClient(),
@@ -1904,7 +1911,38 @@ def test_agent_loop_executes_paper_tool_before_final(tmp_path):
     assert len(calls) == 2
     assert calls[0]["max_tokens"] is None
     trace = [json.loads(line) for line in (tmp_path / "agent_trace.jsonl").read_text().splitlines()]
-    assert any(row.get("event") == "tool_observation" for row in trace)
+    observation_rows = [row for row in trace if row.get("event") == "tool_observation"]
+    assert observation_rows
+    assert observation_rows[0]["observation"]["source_ids"] == ["span:p_test:p1:1"]
+
+
+def test_paper_tool_registry_reads_stable_source_ids():
+    runtime = PaperLensRuntime(
+        artifacts=[
+            {
+                "paper_id": "p_test",
+                "page_no": 1,
+                "text": "First paragraph.\n\nSecond paragraph has the target mechanism.",
+                "captions": [],
+            }
+        ]
+    )
+    registry = PaperToolRegistry(runtime=runtime, paper_id="p_test", title="Test")
+
+    source_id = "span:p_test:p1:2"
+    observation = registry.execute(
+        AgentToolRequest(
+            id="read_source",
+            tool="paper.read_sources",
+            arguments={"source_ids": [source_id]},
+            reason="Read exact evidence.",
+        )
+    ).as_dict()
+
+    assert observation["source_ids"] == [source_id]
+    assert observation["result"]["source_ids"] == [source_id]
+    assert observation["result"]["results"][0]["source_id"] == source_id
+    assert observation["result"]["results"][0]["text"] == "Second paragraph has the target mechanism."
 
 
 def test_agent_turn_schema_uses_typed_payloads_not_nested_json_strings():
