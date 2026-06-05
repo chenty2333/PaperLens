@@ -13,6 +13,7 @@ from paperlens_core.memory_v3 import (
     safe_int,
     string_or_none,
 )
+from paperlens_core.report.text import compact_string_list
 from paperlens_core.runtime import read_typed_artifact
 from paperlens_core.schemas import PaperCard, PaperRecord, SkimCard
 
@@ -443,13 +444,6 @@ def compact_conceptual_bridge(value: Any) -> dict[str, Any]:
         ),
         "terms": terms,
     }
-
-
-def compact_string_list(value: Any, *, limit: int, max_chars: int) -> list[str]:
-    return [
-        _compact_text(item, max_chars=max_chars)
-        for item in normalized_string_list(value)[:limit]
-    ]
 
 
 def _compact_text(text: str, *, max_chars: int) -> str:

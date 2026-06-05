@@ -5,6 +5,12 @@ from paperlens_core.report.audit_policy import (
     final_report_audit_acceptable,
     memory_audit_safe_usage_note,
 )
+from paperlens_core.report.composer_context import (
+    compact_decision_for_report,
+    compact_paper_card_for_report,
+    compact_skim_for_report,
+    fallback_model_paper_report,
+)
 from paperlens_core.report.graph_export import (
     core_graph_report_filename,
     write_core_graph_report_view,
@@ -64,6 +70,7 @@ from paperlens_core.report.text import (
     clean_model_markdown,
     compact_compare_text,
     compact_reason,
+    compact_string_list,
     readable_model_body,
     recommendation_for_grade,
     sanitize_reader_hostile_text,
@@ -84,8 +91,12 @@ __all__ = [
     "combine_report_and_memory_audits",
     "compact_core_memory_view_for_report",
     "compact_compare_text",
+    "compact_decision_for_report",
+    "compact_paper_card_for_report",
     "compact_paper_memory_for_report",
     "compact_reason",
+    "compact_skim_for_report",
+    "compact_string_list",
     "core_graph_report_filename",
     "core_graph_report_link",
     "core_memory_pages",
@@ -95,6 +106,7 @@ __all__ = [
     "display_paper_title",
     "display_review_status",
     "display_row_title",
+    "fallback_model_paper_report",
     "final_report_audit_acceptable",
     "higher_read_effort_label",
     "humanize_display_title",

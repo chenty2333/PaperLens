@@ -19,6 +19,13 @@ def compact_reason(text: str, *, max_chars: int = 160) -> str:
     return cleaned[:max_chars].rstrip() + "..."
 
 
+def compact_string_list(value: Any, *, limit: int, max_chars: int) -> list[str]:
+    return [
+        compact_reason(item, max_chars=max_chars)
+        for item in _normalized_string_list(value)[:limit]
+    ]
+
+
 def clean_model_markdown(value: Any) -> str:
     text = value.strip() if isinstance(value, str) else ""
     text = text.replace("\\r\\n", "\n").replace("\\n", "\n")
@@ -148,3 +155,16 @@ def user_facing_uncertainty_note(value: Any) -> str:
             continue
         kept.append(cleaned)
     return "; ".join(kept)
+
+
+def _normalized_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        cleaned = re.sub(r"\s+", " ", item).strip()
+        if cleaned:
+            result.append(cleaned)
+    return result
