@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from paperlens_core.schemas import ClassificationDecision, EvidenceRef, PaperRecord, SkimCard
 from paperlens_core.workflow.agent import paper_report_filename as compat_paper_report_filename
-from paperlens_core.workflow.report_rows import (
+from paperlens_core.report.rows import (
     classification_counts,
     dedupe_evidence_refs,
     novelty_risk,

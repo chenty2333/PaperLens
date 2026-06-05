@@ -51,8 +51,19 @@ from paperlens_core.pdf.qa import parse_quality
 from paperlens_core.quality_snapshot import write_core_quality_snapshot
 from paperlens_core.reading import select_rolling_read_pages
 from paperlens_core.report import (
+    classification_counts,
+    cluster_rows_by_scope,
     combine_report_and_memory_audits,
+    dedupe_evidence_refs,
+    describe_rows,
     final_report_audit_acceptable,
+    novelty_risk,
+    paper_report_filename,
+    read_decision,
+    reading_priority_key,
+    report_link_lines,
+    row_decision,
+    row_relation,
     write_core_graph_report_view,
 )
 from paperlens_core.report.memory_context import (
@@ -76,21 +87,6 @@ from paperlens_core.state import transition_state
 from paperlens_core.workflow.manifest import (
     summarize_model_calls,
     validate_paperlens_output,
-)
-from paperlens_core.workflow.report_rows import (
-    classification_counts as classification_counts,
-    cluster_rows_by_scope as cluster_rows_by_scope,
-    dedupe_evidence_refs as dedupe_evidence_refs,
-    describe_rows as describe_rows,
-    higher_read_effort_label as higher_read_effort_label,
-    novelty_risk as novelty_risk,
-    paper_report_filename as paper_report_filename,
-    read_decision as read_decision,
-    read_effort_rank as read_effort_rank,
-    reading_priority_key as reading_priority_key,
-    report_link_lines as report_link_lines,
-    row_decision as row_decision,
-    row_relation as row_relation,
 )
 from paperlens_core.workflow.stages import (
     WORKFLOW_STAGE_ORDER,
