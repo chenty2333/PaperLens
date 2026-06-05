@@ -53,7 +53,10 @@ from paperlens_core.workflow.stages import (
     normalize_workflow_stage,
     resolve_workflow_stages,
 )
-from paperlens_core.workflow.core_v2 import write_core_v2_artifacts
+from paperlens_core.workflow.core_v2 import (
+    run_core_v2_model_observation_tasks,
+    write_core_v2_artifacts,
+)
 
 
 class PaperLensWorkflow:
@@ -1045,6 +1048,11 @@ class PaperLensWorkflow:
                     data={"paper_id": paper.paper_id, "read_mode": self.config.read_mode},
                 )
                 try:
+                    self.run_core_v2_observation_read(
+                        client=client,
+                        stage=stage,
+                        paper=paper,
+                    )
                     paper_card = self.run_rolling_paper_read(
                         client=client,
                         stage=stage,
@@ -1090,6 +1098,65 @@ class PaperLensWorkflow:
         self.events.stage_completed(
             stage, "PaperCard generation completed", {"paper_cards": len(self.paper_cards)}
         )
+
+    def run_core_v2_observation_read(
+        self,
+        *,
+        client: JsonLlmClient,
+        stage: str,
+        paper: PaperRecord,
+    ) -> None:
+        try:
+            result = run_core_v2_model_observation_tasks(
+                client=client,
+                data_dir=self.data_dir,
+                paper=paper,
+                stage=stage,
+                record_usage=self.record_llm_usage,
+                record_agent_run=self.write_agent_run,
+            )
+            for artifact_type, path in result["paths"].items():
+                self.register_file_artifact(
+                    path,
+                    paper_id=paper.paper_id,
+                    artifact_type=f"core_v2_model_{artifact_type}",
+                    depends_on=[f"core_v2_reading_plan:{paper.paper_id}"],
+                )
+            self.events.emit(
+                "core_v2_observation_read_completed",
+                stage=stage,
+                message=f"Core v2 observation read completed for {paper.paper_id}",
+                data={
+                    "paper_id": paper.paper_id,
+                    "tasks": result["tasks"],
+                    "cards": result["cards"],
+                },
+            )
+        except Exception as exc:
+            self.write_agent_run(
+                {
+                    "agent_run_id": f"core_v2_observe_{paper.paper_id}_failed",
+                    "paper_id": paper.paper_id,
+                    "stage": stage,
+                    "operation": "core_v2_observation_read",
+                    "provider_kind": client.config.kind,
+                    "model": client.config.model,
+                    "status": "FAIL" if self.require_llm_success() else "FALLBACK",
+                    "error": str(exc),
+                }
+            )
+            if self.require_llm_success():
+                raise
+            self.events.emit(
+                "agent_run_fallback",
+                stage=stage,
+                level="warning",
+                message=(
+                    f"Core v2 observation read failed for {paper.paper_id}; "
+                    "keeping existing core v2 bootstrap artifacts"
+                ),
+                data={"paper_id": paper.paper_id, "error": str(exc)},
+            )
 
     def persist_paper_card(self, stage: str, paper: PaperRecord, paper_card: PaperCard) -> None:
         if not any(card.paper_id == paper_card.paper_id for card in self.paper_cards):

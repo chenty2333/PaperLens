@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -37,8 +38,19 @@ from paperlens_core.runtime import (
 from paperlens_core.config import CoreConfig
 from paperlens_core.control import ControlState
 from paperlens_core.events import EventWriter
-from paperlens_core.schemas import PageArtifact, PaperRecord
+from paperlens_core.schemas import (
+    ClassificationDecision,
+    PageArtifact,
+    PaperCard,
+    PaperRecord,
+    SkimCard,
+)
 from paperlens_core.workflow.agent import PaperLensWorkflow
+from paperlens_core.workflow.core_v2 import (
+    observation_cards_from_model_envelope,
+    run_core_v2_model_observation_tasks,
+    write_core_v2_artifacts,
+)
 
 
 def sample_dom():
@@ -339,5 +351,187 @@ def test_stage03_writes_core_v2_artifact_envelopes(tmp_path):
             item.artifact_type == "core_v2_paper_dom"
             for item in pipeline.db.list_artifact_versions()
         )
+    finally:
+        pipeline.db.close()
+
+
+def test_core_v2_model_observer_rewrites_observation_graph_artifacts(tmp_path):
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    layout = {
+        "pages": [
+            {
+                "page_no": 1,
+                "text": "Abstract\n\nWe propose a block table method for serving.",
+                "section_candidates": [{"title": "Abstract", "level": 1}],
+            }
+        ]
+    }
+    write_core_v2_artifacts(
+        data_dir=tmp_path,
+        paper=paper,
+        layout=layout,
+    )
+    calls = {"count": 0}
+
+    class FakeClient:
+        config = SimpleNamespace(kind="openai-compatible", model="fake-model")
+
+        def invoke_json(self, *, user_prompt, **_kwargs):
+            calls["count"] += 1
+            prompt = json.loads(user_prompt)
+            source_id = prompt["evidence_pack"][0]["source_id"]
+            task_type = prompt["task_spec"]["task_type"]
+            return SimpleNamespace(
+                data={
+                    "artifact_type": "observation_cards",
+                    "artifact_version": "v1",
+                    "producer": "fake-model",
+                    "data": {
+                        "cards": [
+                            {
+                                "observation_type": "claim",
+                                "statement": f"{task_type} observation from a source-bound card.",
+                                "source_ids": [source_id],
+                                "confidence": "high",
+                                "provenance": "explicit",
+                                "uncertainty": None,
+                                "extracted_numbers": [],
+                                "proposed_links": [],
+                            }
+                        ]
+                    },
+                },
+                usage={"prompt_tokens": 10, "completion_tokens": 2},
+                request_id=f"req_{calls['count']}",
+            )
+
+    usage_rows = []
+    agent_runs = []
+    result = run_core_v2_model_observation_tasks(
+        client=FakeClient(),
+        data_dir=tmp_path,
+        paper=paper,
+        stage="stage_07_normal_read",
+        record_usage=lambda _stage, usage: usage_rows.append(usage),
+        record_agent_run=agent_runs.append,
+    )
+
+    root = tmp_path / "core" / "v2" / "p_test"
+    observation_log = json.loads((root / "observation_log.v1.json").read_text(encoding="utf-8"))
+    graph = json.loads((root / "claim_graph.v1.json").read_text(encoding="utf-8"))
+    metrics = json.loads((root / "quality_metrics.v1.json").read_text(encoding="utf-8"))
+
+    assert result["tasks"] == calls["count"]
+    assert result["cards"] == calls["count"]
+    assert observation_log["producer"] == "paperlens_core_v2_model_observer"
+    assert len(observation_log["data"]["cards"]) == calls["count"]
+    assert graph["producer"] == "paperlens_core_v2_model_observer"
+    assert metrics["data"]["publish_status"] == PublishStatus.REVIEWED
+    assert len(usage_rows) == calls["count"]
+    assert all(row["status"] == "PASS" for row in agent_runs)
+
+
+def test_model_observation_cards_reject_unknown_source_ids():
+    envelope = ArtifactEnvelope(
+        artifact_type="observation_cards",
+        producer="fake",
+        data={
+            "cards": [
+                {
+                    "observation_type": "claim",
+                    "statement": "Unsupported source id.",
+                    "source_ids": ["page:1"],
+                    "confidence": "high",
+                    "provenance": "explicit",
+                    "uncertainty": None,
+                    "extracted_numbers": [],
+                    "proposed_links": [],
+                }
+            ]
+        },
+    )
+
+    with pytest.raises(ValueError, match="did not cite valid source_ids"):
+        observation_cards_from_model_envelope(
+            envelope,
+            paper_id="p_test",
+            task=build_initial_reading_plan(sample_dom()).tasks[0],
+            valid_source_ids=sample_dom().source_ids(),
+        )
+
+
+def test_stage07_runs_core_v2_observation_read_before_legacy_rolling(tmp_path, monkeypatch):
+    output_dir = tmp_path / "out"
+    input_dir = tmp_path / "in"
+    input_dir.mkdir()
+    pipeline = PaperLensWorkflow(
+        input_dir=input_dir,
+        output_dir=output_dir,
+        config=CoreConfig(offline_debug=False),
+        events=EventWriter(
+            "run_test",
+            output_dir / ".paperlens" / "data" / "events.jsonl",
+            output_dir / ".paperlens" / "data" / "errors.jsonl",
+        ),
+        control=ControlState(),
+    )
+    try:
+        pipeline.prepare_output()
+        paper = PaperRecord(
+            paper_id="p_test",
+            file_path="paper.pdf",
+            file_hash="hash",
+            canonical_title="Test Paper",
+            page_count=1,
+        )
+        skim = SkimCard(paper_id="p_test", problem="problem")
+        decision = ClassificationDecision(
+            paper_id="p_test",
+            class_label="A",
+            confidence=0.9,
+            false_negative_risk=0.1,
+        )
+        page = PageArtifact(
+            paper_id="p_test",
+            page_no=1,
+            text="Abstract\n\nWe propose a block table method.",
+        )
+        pipeline.papers = [paper]
+        pipeline.skim_cards = [skim]
+        pipeline.classifications = [decision]
+        pipeline.db.upsert_paper(paper)
+        pipeline.db.insert_page_artifacts([page])
+        calls = []
+
+        monkeypatch.setattr(pipeline, "llm_enabled", lambda: True)
+        monkeypatch.setattr(
+            pipeline,
+            "new_llm_client",
+            lambda: SimpleNamespace(config=SimpleNamespace(kind="fake", model="fake-model")),
+        )
+
+        def fake_core_v2_read(**kwargs):
+            calls.append(("core_v2", kwargs["paper"].paper_id))
+
+        def fake_rolling(**kwargs):
+            calls.append(("legacy_rolling", kwargs["paper"].paper_id))
+            return PaperCard(
+                paper_id=kwargs["paper"].paper_id,
+                contribution_claims=["legacy card"],
+            )
+
+        monkeypatch.setattr(pipeline, "run_core_v2_observation_read", fake_core_v2_read)
+        monkeypatch.setattr(pipeline, "run_rolling_paper_read", fake_rolling)
+
+        pipeline.stage_07_normal_read()
+
+        assert calls == [("core_v2", "p_test"), ("legacy_rolling", "p_test")]
+        assert pipeline.paper_cards[0].contribution_claims == ["legacy card"]
     finally:
         pipeline.db.close()

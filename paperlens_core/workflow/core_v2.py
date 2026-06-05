@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from paperlens_core.audit import audit_claim_graph, compute_core_quality_metrics
+from paperlens_core.agents.llm import JsonLlmClient, llm_call_context
 from paperlens_core.dom import PaperDOM, PaperSpan, build_paper_dom_from_layout
 from paperlens_core.events import write_json
 from paperlens_core.graph import graph_from_observations
@@ -21,11 +22,94 @@ from paperlens_core.reading import (
     make_observation_id,
 )
 from paperlens_core.report import audit_report_draft_against_graph, build_report_draft_from_graph
-from paperlens_core.runtime import ArtifactEnvelope
+from paperlens_core.runtime import ArtifactEnvelope, NodeSpec, NodeStatus, run_finite_node
 from paperlens_core.schemas import ClassificationDecision, PaperRecord, SkimCard
 
 
 CORE_V2_SCHEMA_VERSION = "paperlens_core.v2.bootstrap"
+CORE_V2_MODEL_OBSERVER_VERSION = "paperlens_core.v2.model_observer"
+
+CORE_V2_OBSERVER_SYSTEM_PROMPT = """
+You are PaperLens ObservationReader.
+Record only source-bound observations from the supplied evidence pack.
+Do not write summaries, memory, audits, or report prose.
+Return JSON only.
+""".strip()
+
+OBSERVATION_CARDS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["artifact_type", "artifact_version", "producer", "data"],
+    "properties": {
+        "artifact_type": {"type": "string", "enum": ["observation_cards"]},
+        "artifact_version": {"type": "string"},
+        "producer": {"type": "string"},
+        "data": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["cards"],
+            "properties": {
+                "cards": {
+                    "type": "array",
+                    "maxItems": 8,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": [
+                            "observation_type",
+                            "statement",
+                            "source_ids",
+                            "confidence",
+                            "provenance",
+                            "uncertainty",
+                            "extracted_numbers",
+                            "proposed_links",
+                        ],
+                        "properties": {
+                            "observation_type": {
+                                "type": "string",
+                                "enum": [item.value for item in ObservationType],
+                            },
+                            "statement": {"type": "string"},
+                            "source_ids": {"type": "array", "items": {"type": "string"}},
+                            "confidence": {
+                                "type": "string",
+                                "enum": ["high", "medium", "low"],
+                            },
+                            "provenance": {
+                                "type": "string",
+                                "enum": ["explicit", "inferred", "background"],
+                            },
+                            "uncertainty": {"type": ["string", "null"]},
+                            "extracted_numbers": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": ["text"],
+                                    "properties": {"text": {"type": "string"}},
+                                },
+                            },
+                            "proposed_links": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": ["source_id", "target_id", "kind"],
+                                    "properties": {
+                                        "source_id": {"type": "string"},
+                                        "target_id": {"type": "string"},
+                                        "kind": {"type": "string"},
+                                    },
+                                },
+                            },
+                        },
+                    },
+                }
+            },
+        },
+    },
+}
 
 
 def write_core_v2_artifacts(
@@ -118,6 +202,214 @@ def write_core_v2_artifacts(
         "report_audit_findings",
         paper.paper_id,
         [finding.model_dump() for finding in report_audit_findings],
+    )
+    return paths
+
+
+def run_core_v2_model_observation_tasks(
+    *,
+    client: JsonLlmClient,
+    data_dir: Path,
+    paper: PaperRecord,
+    stage: str,
+    record_usage: Any,
+    record_agent_run: Any,
+) -> dict[str, Any]:
+    dom, reading_plan = load_core_v2_dom_and_plan(data_dir, paper.paper_id)
+    log = ObservationLog(paper_id=paper.paper_id)
+    total_usage: dict[str, Any] = {}
+    request_ids: list[str] = []
+    completed_tasks = 0
+    for task in reading_plan.tasks:
+        if not task.target_source_ids:
+            continue
+        raw_results: list[Any] = []
+        spec = NodeSpec(
+            node_id=f"core_v2_observe_{task.task_id}",
+            input_artifact_types=("paper_dom", "reading_plan"),
+            output_artifact_type="observation_cards",
+            allowed_tools=("paper_dom.read_sources",),
+            max_steps=1,
+            max_model_calls=task.max_model_calls,
+            timeout_seconds=180.0,
+        )
+        inputs = [
+            ArtifactEnvelope(
+                artifact_type="paper_dom",
+                data=dom.model_dump(),
+                producer="paperlens_core",
+            ),
+            ArtifactEnvelope(
+                artifact_type="reading_plan",
+                data=reading_plan.model_dump(),
+                producer="paperlens_core",
+            ),
+        ]
+
+        def handler(context: Any) -> ArtifactEnvelope:
+            context.record_model_call()
+            with llm_call_context(
+                stage=stage,
+                paper_id=paper.paper_id,
+                operation="core_v2_observation_task",
+                task_id=task.task_id,
+                schema_name="paperlens_core_v2_observation_cards",
+            ):
+                raw = client.invoke_json(
+                    system_prompt=CORE_V2_OBSERVER_SYSTEM_PROMPT,
+                    user_prompt=build_observation_task_prompt(
+                        paper=paper,
+                        dom=dom,
+                        task=task,
+                    ),
+                    schema_name="paperlens_core_v2_observation_cards",
+                    schema=OBSERVATION_CARDS_SCHEMA,
+                    max_tokens=None,
+                )
+            raw_results.append(raw)
+            return ArtifactEnvelope.model_validate(raw.data).require_type("observation_cards")
+
+        node_result = run_finite_node(spec, inputs, handler)
+        raw = raw_results[0] if raw_results else None
+        usage = dict(getattr(raw, "usage", {}) or {})
+        merge_usage(total_usage, usage)
+        request_id = getattr(raw, "request_id", None)
+        if request_id:
+            request_ids.append(request_id)
+        record_usage(stage, usage)
+        record_agent_run(
+            {
+                "agent_run_id": f"core_v2_observe_{paper.paper_id}_{task.task_id}",
+                "paper_id": paper.paper_id,
+                "stage": stage,
+                "operation": "core_v2_observation_task",
+                "task_id": task.task_id,
+                "provider_kind": client.config.kind,
+                "model": client.config.model,
+                "usage": usage,
+                "request_id": request_id,
+                "status": node_result.status.value,
+                "issues": node_result.issues,
+                "model_calls_used": node_result.model_calls_used,
+            }
+        )
+        if node_result.status != NodeStatus.PASS or node_result.output is None:
+            raise RuntimeError(
+                f"Core v2 observation task failed for {paper.paper_id}/{task.task_id}: "
+                + "; ".join(node_result.issues)
+            )
+        for card in observation_cards_from_model_envelope(
+            node_result.output,
+            paper_id=paper.paper_id,
+            task=task,
+            valid_source_ids=dom.source_ids(),
+        ):
+            log = log.append(card)
+        completed_tasks += 1
+
+    paths = write_core_v2_from_observation_log(
+        data_dir=data_dir,
+        paper=paper,
+        dom=dom,
+        reading_plan=reading_plan,
+        observation_log=log,
+        producer="paperlens_core_v2_model_observer",
+    )
+    return {
+        "paths": paths,
+        "cards": len(log.cards),
+        "tasks": completed_tasks,
+        "usage": total_usage,
+        "request_ids": request_ids,
+    }
+
+
+def write_core_v2_from_observation_log(
+    *,
+    data_dir: Path,
+    paper: PaperRecord,
+    dom: PaperDOM,
+    reading_plan: ReadingPlan,
+    observation_log: ObservationLog,
+    producer: str,
+) -> dict[str, Path]:
+    claim_graph = graph_from_observations(paper.paper_id, list(observation_log.cards))
+    audit_findings = audit_claim_graph(claim_graph, dom)
+    quality_metrics = compute_core_quality_metrics(
+        dom=dom,
+        graph=claim_graph,
+        findings=audit_findings,
+    )
+    report_draft = build_report_draft_from_graph(claim_graph)
+    report_audit_findings = audit_report_draft_against_graph(report_draft, claim_graph)
+    memory_view = materialize_paper_memory(
+        claim_graph,
+        metadata={
+            "title": paper.canonical_title,
+            "observer_schema_version": CORE_V2_MODEL_OBSERVER_VERSION,
+        },
+        unresolved_audit_findings=[finding.finding_id for finding in audit_findings],
+        report_readiness=quality_metrics.publish_status,
+    )
+    root = data_dir / "core" / "v2" / paper.paper_id
+    paths = {
+        "observation_log": root / "observation_log.v1.json",
+        "claim_graph": root / "claim_graph.v1.json",
+        "audit_findings": root / "audit_findings.v1.json",
+        "quality_metrics": root / "quality_metrics.v1.json",
+        "paper_memory_view": root / "paper_memory_view.v1.json",
+        "report_draft": root / "report_draft.v1.json",
+        "report_audit_findings": root / "report_audit_findings.v1.json",
+    }
+    write_envelope(
+        paths["observation_log"],
+        "observation_log",
+        paper.paper_id,
+        observation_log.model_dump(),
+        source_ids=sorted(dom.source_ids()),
+        producer=producer,
+    )
+    write_envelope(
+        paths["claim_graph"],
+        "claim_graph",
+        paper.paper_id,
+        claim_graph.model_dump(),
+        producer=producer,
+    )
+    write_envelope(
+        paths["audit_findings"],
+        "audit_findings",
+        paper.paper_id,
+        [finding.model_dump() for finding in audit_findings],
+        producer=producer,
+    )
+    write_envelope(
+        paths["quality_metrics"],
+        "core_quality_metrics",
+        paper.paper_id,
+        quality_metrics.model_dump(),
+        producer=producer,
+    )
+    write_envelope(
+        paths["paper_memory_view"],
+        "paper_memory_view",
+        paper.paper_id,
+        memory_view.model_dump(),
+        producer=producer,
+    )
+    write_envelope(
+        paths["report_draft"],
+        "graph_report_draft",
+        paper.paper_id,
+        report_draft.model_dump(),
+        producer=producer,
+    )
+    write_envelope(
+        paths["report_audit_findings"],
+        "report_audit_findings",
+        paper.paper_id,
+        [finding.model_dump() for finding in report_audit_findings],
+        producer=producer,
     )
     return paths
 
@@ -222,13 +514,196 @@ def write_envelope(
     data: dict[str, Any] | list[Any],
     *,
     source_ids: list[str] | None = None,
+    producer: str = "paperlens_core_v2_bootstrap",
 ) -> None:
     envelope = ArtifactEnvelope(
         artifact_type=artifact_type,
         artifact_version="v1",
         data=data,
-        producer="paperlens_core_v2_bootstrap",
+        producer=producer,
         source_ids=source_ids or [],
         metadata={"paper_id": paper_id, "schema_version": CORE_V2_SCHEMA_VERSION},
     )
     write_json(path, json.loads(envelope.model_dump_json()))
+
+
+def load_core_v2_dom_and_plan(data_dir: Path, paper_id: str) -> tuple[PaperDOM, ReadingPlan]:
+    root = data_dir / "core" / "v2" / paper_id
+    dom_envelope = read_envelope(root / "paper_dom.v1.json", expected_type="paper_dom")
+    plan_envelope = read_envelope(root / "reading_plan.v1.json", expected_type="reading_plan")
+    if not isinstance(dom_envelope.data, dict) or not isinstance(plan_envelope.data, dict):
+        raise ValueError(f"Core v2 paper_dom/reading_plan artifacts are invalid for {paper_id}")
+    return PaperDOM.model_validate(dom_envelope.data), ReadingPlan.model_validate(
+        plan_envelope.data
+    )
+
+
+def read_envelope(path: Path, *, expected_type: str) -> ArtifactEnvelope:
+    if not path.exists():
+        raise FileNotFoundError(f"Missing core v2 artifact: {path}")
+    try:
+        envelope = ArtifactEnvelope.model_validate_json(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"Invalid core v2 artifact envelope: {path}") from exc
+    return envelope.require_type(expected_type)
+
+
+def build_observation_task_prompt(
+    *,
+    paper: PaperRecord,
+    dom: PaperDOM,
+    task: ReadingTask,
+) -> str:
+    payload = {
+        "prompt_version": CORE_V2_MODEL_OBSERVER_VERSION,
+        "paper": {
+            "paper_id": paper.paper_id,
+            "title": paper.canonical_title,
+        },
+        "task_spec": {
+            "task_id": task.task_id,
+            "task_type": task.task_type.value,
+            "required_outputs": task.required_outputs,
+            "evidence_policy": task.evidence_policy,
+            "max_model_calls": task.max_model_calls,
+        },
+        "evidence_pack": source_pack(dom, task.target_source_ids),
+        "output_contract": {
+            "artifact_type": "observation_cards",
+            "rule": (
+                "Return an ArtifactEnvelope with data.cards. Each card must cite source_ids from "
+                "the evidence_pack. Do not cite page numbers as evidence. Do not write memory, "
+                "audit verdicts, or report prose."
+            ),
+        },
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def source_pack(dom: PaperDOM, source_ids: list[str]) -> list[dict[str, Any]]:
+    by_source: dict[str, dict[str, Any]] = {}
+    for section in dom.sections:
+        by_source[section.source_id] = {
+            "source_id": section.source_id,
+            "kind": section.kind,
+            "page_no": section.page_no,
+            "title": section.title,
+        }
+    for span in dom.spans:
+        by_source[span.source_id] = {
+            "source_id": span.source_id,
+            "kind": span.kind,
+            "page_no": span.page_no,
+            "section_id": span.section_id,
+            "text": span.text[:1800],
+        }
+    for figure in dom.figures:
+        by_source[figure.source_id] = {
+            "source_id": figure.source_id,
+            "kind": figure.kind,
+            "page_no": figure.page_no,
+            "caption": figure.caption,
+            "bbox": figure.bbox,
+        }
+    for table in dom.tables:
+        by_source[table.source_id] = {
+            "source_id": table.source_id,
+            "kind": table.kind,
+            "page_no": table.page_no,
+            "caption": table.caption,
+            "bbox": table.bbox,
+        }
+    for equation in dom.equations:
+        by_source[equation.source_id] = {
+            "source_id": equation.source_id,
+            "kind": equation.kind,
+            "page_no": equation.page_no,
+            "section_id": equation.section_id,
+            "text": equation.latex_or_text,
+        }
+    result = []
+    for source_id in source_ids:
+        if source_id in by_source:
+            result.append(by_source[source_id])
+    return result
+
+
+def observation_cards_from_model_envelope(
+    envelope: ArtifactEnvelope,
+    *,
+    paper_id: str,
+    task: ReadingTask,
+    valid_source_ids: set[str],
+) -> list[ObservationCard]:
+    payload = envelope.data if isinstance(envelope.data, dict) else {}
+    cards = payload.get("cards") if isinstance(payload.get("cards"), list) else []
+    result = []
+    for item in cards:
+        if not isinstance(item, dict):
+            continue
+        source_ids = clean_model_source_ids(item.get("source_ids"), valid_source_ids)
+        if not source_ids:
+            raise ValueError(f"Observation card for {task.task_id} did not cite valid source_ids")
+        statement = str(item.get("statement") or "").strip()
+        observation_type = str(item.get("observation_type") or "").strip()
+        if not statement or observation_type not in {kind.value for kind in ObservationType}:
+            continue
+        observation_id = make_observation_id(
+            task_id=task.task_id,
+            observation_type=observation_type,
+            statement=statement,
+            source_ids=source_ids,
+        )
+        result.append(
+            ObservationCard(
+                observation_id=observation_id,
+                paper_id=paper_id,
+                task_id=task.task_id,
+                observation_type=ObservationType(observation_type),
+                statement=statement,
+                source_ids=source_ids,
+                confidence=str(item.get("confidence") or "medium"),
+                provenance=str(item.get("provenance") or "explicit"),
+                uncertainty=none_if_blank(item.get("uncertainty")),
+                extracted_numbers=[
+                    number
+                    for number in list_payload(item.get("extracted_numbers"))
+                    if isinstance(number, dict)
+                ][:8],
+                proposed_links=[
+                    link
+                    for link in list_payload(item.get("proposed_links"))
+                    if isinstance(link, dict)
+                ][:8],
+            )
+        )
+    return result
+
+
+def clean_model_source_ids(value: Any, valid_source_ids: set[str]) -> list[str]:
+    result = []
+    for item in list_payload(value):
+        source_id = str(item or "").strip()
+        if source_id in valid_source_ids and source_id not in result:
+            result.append(source_id)
+    return result
+
+
+def list_payload(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def none_if_blank(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def merge_usage(target: dict[str, Any], source: dict[str, Any]) -> None:
+    for key, value in source.items():
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            previous = target.get(key)
+            target[key] = (previous if isinstance(previous, (int, float)) else 0) + value
+        elif isinstance(value, dict):
+            nested = target.setdefault(key, {})
+            if isinstance(nested, dict):
+                merge_usage(nested, value)
