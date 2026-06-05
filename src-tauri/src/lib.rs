@@ -203,6 +203,18 @@ fn workspace_artifacts(output_dir: &Path) -> Vec<PathBuf> {
     .collect()
 }
 
+#[tauri::command]
+fn default_workspace_dir(app: tauri::AppHandle) -> Result<String, String> {
+    let root = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|err| format!("Unable to resolve PaperLens data directory: {err}"))?;
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace)
+        .map_err(|err| format!("Unable to create PaperLens workspace directory: {err}"))?;
+    Ok(path_label(&workspace))
+}
+
 fn build_core_command(app: &tauri::AppHandle, args: &[String]) -> Command {
     if let Some(sidecar) = find_core_sidecar(app) {
         let mut command = Command::new(sidecar);
@@ -420,6 +432,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            default_workspace_dir,
             ensure_core_service,
             shutdown_core_service,
             clear_local_app_data,

@@ -709,6 +709,21 @@ function App() {
   }, [])
 
   useEffect(() => {
+    let cancelled = false
+    invoke<string>('default_workspace_dir')
+      .then((dir) => {
+        if (cancelled || !dir) return
+        setSettings((current) => (current.outputDir ? current : { ...current, outputDir: dir }))
+      })
+      .catch(() => {
+        // Browser-only dev sessions can run without Tauri path commands.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
     invoke<ServiceInfo>('ensure_core_service')
       .then((info) => setService(info))
       .catch((err) => setError(String(err)))
@@ -904,7 +919,12 @@ function App() {
     if (!ok) return
     clearPaperLensLocalStorage()
     const report = await invoke<CleanupReport>('clear_local_app_data')
-    setSettings(defaultSettings)
+    try {
+      const outputDir = await invoke<string>('default_workspace_dir')
+      setSettings({ ...defaultSettings, outputDir })
+    } catch {
+      setSettings(defaultSettings)
+    }
     setChatStore({ threads: {}, activeBySubject: {} })
     setMaintenanceStatus(cleanupSummary(report))
     if (report.errors.length) setError(report.errors.join('\n'))
