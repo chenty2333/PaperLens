@@ -771,18 +771,60 @@ def test_core_v2_qa_reads_claim_graph_without_final_markdown_report(tmp_path):
         canonical_title="Test Paper",
         page_count=1,
     )
+    layout = {
+        "pages": [
+            {
+                "page_no": 1,
+                "text": "Abstract\n\nWe propose a block table method for faster serving.",
+                "section_candidates": [{"title": "Abstract", "level": 1}],
+            },
+            {
+                "page_no": 2,
+                "text": "Method\n\nThe block table mechanism organizes serving state.",
+                "section_candidates": [{"title": "Method", "level": 1}],
+            },
+        ]
+    }
     write_core_v2_artifacts(
         data_dir=output_dir / ".paperlens" / "data",
         paper=paper,
-        layout={
-            "pages": [
-                {
-                    "page_no": 1,
-                    "text": "Abstract\n\nWe propose a block table method for faster serving.",
-                    "section_candidates": [{"title": "Abstract", "level": 1}],
-                }
-            ]
-        },
+        layout=layout,
+    )
+    dom = build_paper_dom_from_layout(
+        paper_id=paper.paper_id,
+        title=paper.canonical_title,
+        layout=layout,
+    )
+    write_core_v2_from_observation_log(
+        data_dir=output_dir / ".paperlens" / "data",
+        paper=paper,
+        dom=dom,
+        reading_plan=build_initial_reading_plan(dom),
+        observation_log=ObservationLog(paper_id="p_test")
+        .append(
+            ObservationCard(
+                observation_id="obs_claim",
+                paper_id="p_test",
+                task_id="read_02_claim_inventory",
+                observation_type=ObservationType.CLAIM,
+                statement="The paper proposes a block table method.",
+                source_ids=[dom.spans[0].source_id],
+            )
+        )
+        .append(
+            ObservationCard(
+                observation_id="obs_mechanism",
+                paper_id="p_test",
+                task_id="read_03_method_mechanism",
+                observation_type=ObservationType.MECHANISM,
+                statement="The block table mechanism organizes serving state.",
+                source_ids=[dom.spans[-1].source_id],
+                proposed_links=[
+                    {"source_id": "obs_mechanism", "target_id": "obs_claim", "kind": "explains"}
+                ],
+            )
+        ),
+        producer="unit_test",
     )
 
     context = load_core_v2_qa_context(
@@ -799,9 +841,12 @@ def test_core_v2_qa_reads_claim_graph_without_final_markdown_report(tmp_path):
 
     assert context["matches"]
     assert context["matches"][0]["source_ids"][0].startswith("span:p_test:")
+    assert context["matches"][0]["relationships"][0]["kind"] == "explains"
+    assert context["matches"][0]["relationships"][0]["source_ids"]
     assert answer["cited_source_ids"][0].startswith("span:p_test:")
-    assert answer["cited_pages"] == [1]
+    assert set(answer["cited_pages"]) == {1, 2}
     assert "ClaimGraph" in answer["answer_markdown"]
+    assert "relation:" in answer["answer_markdown"]
     assert answer["source_attribution"]["paper_claims"]
 
 

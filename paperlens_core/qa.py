@@ -314,6 +314,11 @@ def search_core_v2_graph(
                     "evidence_ids": evidence_ids,
                     "source_ids": source_ids,
                     "evidence_spans": evidence_spans[:4],
+                    "relationships": relationships_for_node(
+                        graph=graph,
+                        node_id=node.node_id,
+                        source_index=source_index,
+                    ),
                 },
             )
         )
@@ -335,10 +340,72 @@ def search_core_v2_graph(
                             "evidence_ids": graph.evidence_ids_for(node.node_id),
                             "source_ids": [],
                             "evidence_spans": [],
+                            "relationships": relationships_for_node(
+                                graph=graph,
+                                node_id=node.node_id,
+                                source_index=source_index,
+                            ),
                         },
                     )
                 )
     return [item for _score, _node_id, item in scored[: max(1, limit)]]
+
+
+def relationships_for_node(
+    *,
+    graph: ClaimGraph,
+    node_id: str,
+    source_index: dict[str, dict[str, Any]],
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    result = []
+    for edge in graph.edges:
+        if edge.kind == "supported_by":
+            continue
+        if edge.source_id != node_id and edge.target_id != node_id:
+            continue
+        source_node = graph.nodes.get(edge.source_id)
+        target_node = graph.nodes.get(edge.target_id)
+        if source_node is None or target_node is None:
+            continue
+        result.append(
+            {
+                "direction": "outgoing" if edge.source_id == node_id else "incoming",
+                "kind": edge.kind,
+                "source_id": edge.source_id,
+                "source_kind": source_node.kind,
+                "source_label": source_node.label,
+                "target_id": edge.target_id,
+                "target_kind": target_node.kind,
+                "target_label": target_node.label,
+                "source_ids": relationship_source_ids(
+                    graph=graph,
+                    source_index=source_index,
+                    node_ids=[edge.source_id, edge.target_id],
+                ),
+            }
+        )
+        if len(result) >= limit:
+            break
+    return result
+
+
+def relationship_source_ids(
+    *,
+    graph: ClaimGraph,
+    source_index: dict[str, dict[str, Any]],
+    node_ids: list[str],
+) -> list[str]:
+    result = []
+    for node_id in node_ids:
+        for evidence_id in graph.evidence_ids_for(node_id):
+            evidence_node = graph.nodes.get(evidence_id)
+            paper_source_id = str(
+                (evidence_node.payload if evidence_node else {}).get("source_id") or ""
+            )
+            if paper_source_id in source_index and paper_source_id not in result:
+                result.append(paper_source_id)
+    return result
 
 
 def core_v2_source_index(dom: PaperDOM) -> dict[str, dict[str, Any]]:
@@ -434,6 +501,20 @@ def offline_qa_answer(
             source_hint = ", ".join(item.get("source_ids", [])[:3])
             suffix = f"（source_ids: {source_hint}）" if source_hint else ""
             lines.append(f"- [{item.get('kind')}] {item.get('label')}{suffix}")
+            for relation in list_of_dicts(item.get("relationships"))[:3]:
+                relation_sources = [
+                    source_id
+                    for source_id in relation.get("source_ids", [])
+                    if isinstance(source_id, str)
+                ][:3]
+                relation_suffix = (
+                    f"（source_ids: {', '.join(relation_sources)}）" if relation_sources else ""
+                )
+                lines.append(
+                    "  - relation: "
+                    f"{relation.get('source_id')} --{relation.get('kind')}--> "
+                    f"{relation.get('target_id')}{relation_suffix}"
+                )
         return {
             "paper_id": paper_id,
             "answer_markdown": "\n".join(lines),
