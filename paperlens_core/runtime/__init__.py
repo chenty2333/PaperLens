@@ -16,6 +16,13 @@ from paperlens_core.runtime.executor import (
     RuntimeBudgetExceeded,
     run_finite_node,
 )
+from paperlens_core.runtime.llm_cache import (
+    hash_json_payload,
+    llm_cache_path,
+    read_llm_cache,
+    safe_cache_segment,
+    write_llm_cache,
+)
 from paperlens_core.runtime.legacy import (
     CONTEXT_PACK_SCHEMA_VERSION,
     ContextPack,
@@ -53,6 +60,8 @@ __all__ = [
     "compact_text",
     "context_pack_prompt",
     "dedupe_queries",
+    "hash_json_payload",
+    "llm_cache_path",
     "memory_uncertainty",
     "make_artifact_envelope",
     "page_captions",
@@ -62,10 +71,13 @@ __all__ = [
     "page_text",
     "pages_from_memory",
     "read_artifact_envelope",
+    "read_llm_cache",
     "read_typed_artifact",
     "run_finite_node",
+    "safe_cache_segment",
     "tokenize",
     "unique_pages",
     "write_artifact_envelope",
+    "write_llm_cache",
     "write_typed_artifact",
 ]

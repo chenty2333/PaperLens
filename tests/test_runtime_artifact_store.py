@@ -3,8 +3,13 @@ from __future__ import annotations
 import pytest
 
 from paperlens_core.runtime import (
+    hash_json_payload,
+    llm_cache_path,
     read_artifact_envelope,
+    read_llm_cache,
     read_typed_artifact,
+    safe_cache_segment,
+    write_llm_cache,
     write_typed_artifact,
 )
 
@@ -47,3 +52,17 @@ def test_artifact_store_rejects_invalid_json(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="Invalid artifact envelope"):
         read_artifact_envelope(path)
+
+
+def test_llm_cache_helpers_round_trip_stable_payloads(tmp_path) -> None:
+    assert hash_json_payload({"b": 2, "a": 1}) == hash_json_payload({"a": 1, "b": 2})
+    assert safe_cache_segment("stage 01/read") == "stage_01_read"
+
+    path = llm_cache_path(tmp_path, "stage 01/read", "paper/id", {"b": 2, "a": 1})
+    assert path is not None
+    assert path.parent.relative_to(tmp_path).parts == ("stage_01_read", "paper_id")
+
+    write_llm_cache(path, {"data": {"ok": True}})
+
+    assert read_llm_cache(path) == {"data": {"ok": True}}
+    assert read_llm_cache(tmp_path / "missing.json") is None

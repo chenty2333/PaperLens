@@ -89,7 +89,14 @@ from paperlens_core.report.memory_context import (
     build_report_memory_context,
     compact_paper_memory_for_report,
 )
-from paperlens_core.runtime import PaperLensRuntime, context_pack_prompt
+from paperlens_core.runtime import (
+    PaperLensRuntime,
+    context_pack_prompt,
+    hash_json_payload,
+    llm_cache_path,
+    read_llm_cache,
+    write_llm_cache,
+)
 from paperlens_core.schemas import (
     ArtifactVersion,
     ClassificationDecision,
@@ -1036,25 +1043,16 @@ class PaperLensWorkflow:
         )
 
     def cache_path(self, stage: str, paper_id: str, key_payload: dict[str, Any]) -> Path:
-        key = hashlib.sha256(
-            json.dumps(key_payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
-        ).hexdigest()[:24]
-        safe_stage = re.sub(r"[^a-zA-Z0-9_.-]+", "_", stage)
-        safe_paper = re.sub(r"[^a-zA-Z0-9_.-]+", "_", paper_id)
-        return self.cache_dir / safe_stage / safe_paper / f"{key}.json"
+        path = llm_cache_path(self.cache_dir, stage, paper_id, key_payload)
+        if path is None:
+            raise RuntimeError("PaperLens workflow cache directory is not configured")
+        return path
 
     def read_cache_payload(self, path: Path) -> dict[str, Any] | None:
-        if not path.exists():
-            return None
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
-        return payload if isinstance(payload, dict) else None
+        return read_llm_cache(path)
 
     def write_cache_payload(self, path: Path, payload: dict[str, Any]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        write_json(path, payload)
+        write_llm_cache(path, payload)
 
     def stage_07_normal_read(self) -> None:
         stage = "stage_07_normal_read"
@@ -2367,42 +2365,6 @@ def tokenize_memory_query(text: str) -> list[str]:
         for token in re.findall(r"[a-zA-Z0-9_]{4,}|[\u4e00-\u9fff]{2,}", normalize_for_search(text))
         if token not in {"paper", "memory", "claim", "claims", "missing", "needs", "need"}
     ][:12]
-
-
-def hash_json_payload(payload: Any) -> str:
-    return hashlib.sha256(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
-    ).hexdigest()[:16]
-
-
-def llm_cache_path(
-    cache_dir: Path | None, stage: str, paper_id: str, key_payload: dict[str, Any]
-) -> Path | None:
-    if cache_dir is None:
-        return None
-    key = hashlib.sha256(
-        json.dumps(key_payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
-    ).hexdigest()[:24]
-    safe_stage = re.sub(r"[^a-zA-Z0-9_.-]+", "_", stage)
-    safe_paper = re.sub(r"[^a-zA-Z0-9_.-]+", "_", paper_id)
-    return cache_dir / safe_stage / safe_paper / f"{key}.json"
-
-
-def read_llm_cache(path: Path | None) -> dict[str, Any] | None:
-    if path is None or not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-def write_llm_cache(path: Path | None, payload: dict[str, Any]) -> None:
-    if path is None:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_json(path, payload)
 
 
 def hash_file_bytes(path: Path) -> str:
