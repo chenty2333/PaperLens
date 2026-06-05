@@ -304,6 +304,7 @@ def run_core_v2_model_observation_tasks(
                 "model_calls_used": node_result.model_calls_used,
                 "tool_calls_used": node_result.tool_calls_used,
                 "used_tools": node_result.used_tools,
+                "tool_source_ids": node_result.tool_source_ids,
                 "tokens_used": node_result.tokens_used,
                 "token_usage": node_result.token_usage,
             }
@@ -317,7 +318,7 @@ def run_core_v2_model_observation_tasks(
             node_result.output,
             paper_id=paper.paper_id,
             task=task,
-            valid_source_ids=dom.source_ids(),
+            allowed_source_ids=set(node_result.tool_source_ids.get("paper_dom.read_sources", [])),
         )
         log = log.append_many(cards)
         completed_tasks += 1
@@ -825,7 +826,7 @@ def observation_cards_from_model_envelope(
     *,
     paper_id: str,
     task: ReadingTask,
-    valid_source_ids: set[str],
+    allowed_source_ids: set[str],
 ) -> list[ObservationCard]:
     payload = envelope.data if isinstance(envelope.data, dict) else {}
     cards = payload.get("cards") if isinstance(payload.get("cards"), list) else []
@@ -833,7 +834,7 @@ def observation_cards_from_model_envelope(
     for item in cards:
         if not isinstance(item, dict):
             continue
-        source_ids = clean_model_source_ids(item.get("source_ids"), valid_source_ids)
+        source_ids = clean_model_source_ids(item.get("source_ids"), allowed_source_ids)
         if not source_ids:
             raise ValueError(f"Observation card for {task.task_id} did not cite valid source_ids")
         statement = str(item.get("statement") or "").strip()
@@ -893,12 +894,23 @@ def task_allowed_observation_types(task: ReadingTask) -> list[str]:
     return task.allowed_observation_types or allowed_observation_types_for_task(task.task_type)
 
 
-def clean_model_source_ids(value: Any, valid_source_ids: set[str]) -> list[str]:
+def clean_model_source_ids(value: Any, allowed_source_ids: set[str]) -> list[str]:
     result = []
+    invalid = []
     for item in list_payload(value):
         source_id = str(item or "").strip()
-        if source_id in valid_source_ids and source_id not in result:
+        if not source_id:
+            continue
+        if source_id not in allowed_source_ids:
+            invalid.append(source_id)
+            continue
+        if source_id not in result:
             result.append(source_id)
+    if invalid:
+        raise ValueError(
+            "Observation card cited source_ids outside this task evidence pack: "
+            + ", ".join(dict.fromkeys(invalid))
+        )
     return result
 
 

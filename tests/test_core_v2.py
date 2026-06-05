@@ -1278,6 +1278,7 @@ def test_core_v2_model_observer_rewrites_observation_graph_artifacts(tmp_path):
     assert all(row["status"] == "PASS" for row in agent_runs)
     assert all(row["tool_calls_used"] == 1 for row in agent_runs)
     assert all(row["used_tools"] == ["paper_dom.read_sources"] for row in agent_runs)
+    assert all(row["tool_source_ids"].get("paper_dom.read_sources") for row in agent_runs)
     assert all(row["tokens_used"] == 12 for row in agent_runs)
     assert all(
         row["token_usage"] == {"prompt_tokens": 10, "completion_tokens": 2} for row in agent_runs
@@ -1452,16 +1453,23 @@ def test_model_observation_cards_reject_unknown_source_ids():
         },
     )
 
-    with pytest.raises(ValueError, match="did not cite valid source_ids"):
+    with pytest.raises(ValueError, match="outside this task evidence pack"):
         observation_cards_from_model_envelope(
             envelope,
             paper_id="p_test",
             task=build_initial_reading_plan(sample_dom()).tasks[0],
-            valid_source_ids=sample_dom().source_ids(),
+            allowed_source_ids=set(
+                build_initial_reading_plan(sample_dom()).tasks[0].target_source_ids
+            ),
         )
 
 
 def test_model_observation_cards_reject_disallowed_observation_type():
+    task = next(
+        task
+        for task in build_initial_reading_plan(sample_dom()).tasks
+        if task.task_type == ReadingTaskType.METHOD_MECHANISM
+    )
     envelope = ArtifactEnvelope(
         artifact_type="observation_cards",
         producer="fake",
@@ -1470,7 +1478,7 @@ def test_model_observation_cards_reject_disallowed_observation_type():
                 {
                     "observation_type": "claim",
                     "statement": "A claim emitted from a mechanism task.",
-                    "source_ids": [sample_dom().spans[0].source_id],
+                    "source_ids": [task.target_source_ids[0]],
                     "confidence": "high",
                     "provenance": "explicit",
                     "uncertainty": None,
@@ -1480,18 +1488,48 @@ def test_model_observation_cards_reject_disallowed_observation_type():
             ]
         },
     )
-    task = next(
-        task
-        for task in build_initial_reading_plan(sample_dom()).tasks
-        if task.task_type == ReadingTaskType.METHOD_MECHANISM
-    )
 
     with pytest.raises(ValueError, match="disallowed observation_type=claim"):
         observation_cards_from_model_envelope(
             envelope,
             paper_id="p_test",
             task=task,
-            valid_source_ids=sample_dom().source_ids(),
+            allowed_source_ids=set(task.target_source_ids),
+        )
+
+
+def test_model_observation_cards_reject_source_ids_outside_task_evidence_pack():
+    dom = sample_dom()
+    task = build_initial_reading_plan(dom).tasks[0]
+    outside_source_id = next(
+        source_id for source_id in dom.source_ids() if source_id not in set(task.target_source_ids)
+    )
+    envelope = ArtifactEnvelope(
+        artifact_type="observation_cards",
+        producer="fake",
+        data={
+            "cards": [
+                {
+                    "observation_type": task.allowed_observation_types[0],
+                    "statement": "A card that cites another task source.",
+                    "source_ids": [task.target_source_ids[0], outside_source_id],
+                    "confidence": "high",
+                    "provenance": "explicit",
+                    "uncertainty": None,
+                    "extracted_numbers": [],
+                    "proposed_links": [],
+                }
+            ]
+        },
+    )
+
+    assert outside_source_id in dom.source_ids()
+    with pytest.raises(ValueError, match="outside this task evidence pack"):
+        observation_cards_from_model_envelope(
+            envelope,
+            paper_id="p_test",
+            task=task,
+            allowed_source_ids=set(task.target_source_ids),
         )
 
 
@@ -1507,7 +1545,7 @@ def test_model_observation_cards_reject_background_provenance():
                 {
                     "observation_type": observation_type,
                     "statement": "A card that tries to store background knowledge as a paper fact.",
-                    "source_ids": [dom.spans[0].source_id],
+                    "source_ids": [task.target_source_ids[0]],
                     "confidence": "high",
                     "provenance": "background",
                     "uncertainty": None,
@@ -1527,7 +1565,7 @@ def test_model_observation_cards_reject_background_provenance():
             envelope,
             paper_id="p_test",
             task=task,
-            valid_source_ids=dom.source_ids(),
+            allowed_source_ids=set(task.target_source_ids),
         )
 
 
