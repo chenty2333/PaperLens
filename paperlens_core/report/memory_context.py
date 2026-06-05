@@ -175,12 +175,10 @@ def compact_core_memory_view_for_report(memory: dict[str, Any]) -> dict[str, Any
                 "provenance": item.get("provenance"),
                 "evidence_ids": normalized_string_list(item.get("evidence_ids"))[:8],
                 "source_ids": normalized_string_list(item.get("source_ids"))[:8],
-                "pages": [
-                    page
-                    for page in (safe_int(value) for value in list_payload(item.get("pages")))
-                    if page
-                ][:8],
+                "pages": normalized_int_list(item.get("pages"))[:8],
                 "extracted_numbers": list_payload(item.get("extracted_numbers"))[:8],
+                "audit_status": item.get("audit_status"),
+                "audit_issue_ids": normalized_string_list(item.get("audit_issue_ids"))[:8],
             }
             for item in list_payload(memory.get("fact_nodes"))[:16]
             if isinstance(item, dict)
@@ -191,12 +189,10 @@ def compact_core_memory_view_for_report(memory: dict[str, Any]) -> dict[str, Any
                 "kind": item.get("kind"),
                 "label": _compact_text(string_or_none(item.get("label")) or "", max_chars=420),
                 "source_ids": normalized_string_list(item.get("source_ids"))[:8],
-                "pages": [
-                    page
-                    for page in (safe_int(value) for value in list_payload(item.get("pages")))
-                    if page
-                ][:8],
+                "pages": normalized_int_list(item.get("pages"))[:8],
                 "extracted_numbers": list_payload(item.get("extracted_numbers"))[:8],
+                "audit_status": item.get("audit_status"),
+                "audit_issue_ids": normalized_string_list(item.get("audit_issue_ids"))[:8],
             }
             for item in list_payload(memory.get("evaluation_matrix"))[:10]
             if isinstance(item, dict)
@@ -206,6 +202,7 @@ def compact_core_memory_view_for_report(memory: dict[str, Any]) -> dict[str, Any
         "unresolved_audit_findings": normalized_string_list(
             memory.get("unresolved_audit_findings")
         )[:12],
+        "audit_issues": compact_core_audit_issues(memory.get("audit_issues")),
     }
 
 
@@ -237,9 +234,8 @@ def core_memory_pages(core: dict[str, Any]) -> list[int]:
         *list_payload(core.get("fact_nodes")),
         *list_payload(core.get("evaluation_matrix")),
     ]:
-        for value in list_payload(node.get("pages")):
-            page = safe_int(value)
-            if page and page not in pages:
+        for page in normalized_int_list(node.get("pages")):
+            if page not in pages:
                 pages.append(page)
     sources = dict_value(core.get("evidence_sources"))
     for source in sources.values():
@@ -248,6 +244,36 @@ def core_memory_pages(core: dict[str, Any]) -> list[int]:
             if page and page not in pages:
                 pages.append(page)
     return pages[:16]
+
+
+def compact_core_audit_issues(value: Any) -> list[dict[str, Any]]:
+    result = []
+    for item in list_payload(value)[:16]:
+        if not isinstance(item, dict):
+            continue
+        result.append(
+            {
+                "finding_id": item.get("finding_id"),
+                "severity": item.get("severity"),
+                "code": item.get("code"),
+                "node_id": item.get("node_id"),
+                "source_ids": normalized_string_list(item.get("source_ids"))[:8],
+                "message": _compact_text(
+                    string_or_none(item.get("message")) or "", max_chars=220
+                ),
+            }
+        )
+    return result
+
+
+def normalized_int_list(value: Any) -> list[int]:
+    result: list[int] = []
+    raw_values = value if isinstance(value, list) else []
+    for item in raw_values:
+        page = safe_int(item)
+        if page and page not in result:
+            result.append(page)
+    return result
 
 
 def compact_memory_audit_for_report(audit: dict[str, Any]) -> dict[str, Any]:

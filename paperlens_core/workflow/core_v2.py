@@ -581,6 +581,7 @@ def build_core_v2_derived_views(
         dom=dom,
         metadata=metadata,
         unresolved_audit_findings=[finding.finding_id for finding in all_findings],
+        audit_findings=all_findings,
         report_readiness=quality_metrics.publish_status,
     )
     return {

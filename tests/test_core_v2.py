@@ -515,9 +515,13 @@ def test_claim_graph_memory_and_audit_flow_from_observations():
     assert memory.fact_nodes[0].node_id == memory.result_nodes[0]
     assert memory.fact_nodes[0].source_ids == [result_span.source_id]
     assert memory.fact_nodes[0].pages == [result_span.page_no]
+    assert memory.fact_nodes[0].audit_status == PublishStatus.REVIEWED
+    assert memory.fact_nodes[0].audit_issue_ids == []
+    assert memory.audit_issues == []
     assert memory.evidence_sources[result_span.source_id].excerpt.startswith("The method")
     assert memory.evaluation_matrix[0].node_id == memory.result_nodes[0]
     assert memory.evaluation_matrix[0].extracted_numbers == [{"text": "27%"}]
+    assert memory.evaluation_matrix[0].audit_status == PublishStatus.REVIEWED
     metrics = compute_core_quality_metrics(dom=dom, graph=graph, findings=findings)
     assert metrics.evidence_coverage == 1.0
     assert metrics.numeric_fact_node_count == 1
@@ -783,8 +787,17 @@ def test_audit_blocks_missing_sources_and_unsupported_fact_nodes():
 
     graph = graph_from_observations("p_test", [observation])
     findings = audit_claim_graph(graph, dom)
+    memory = materialize_paper_memory(
+        graph,
+        dom=dom,
+        audit_findings=findings,
+        report_readiness=publish_status_from_findings(findings).value,
+    )
+    claim_node = next(node for node in memory.fact_nodes if node.kind == "claim")
 
     assert {finding.code for finding in findings} >= {"missing_dom_source"}
+    assert claim_node.audit_status == PublishStatus.BLOCKED
+    assert claim_node.audit_issue_ids
     assert publish_status_from_findings(findings) == PublishStatus.BLOCKED
 
 
@@ -830,12 +843,22 @@ def test_audit_flags_extracted_numbers_not_located_in_declared_sources():
 
     graph = graph_from_observations("p_test", [observation])
     findings = audit_claim_graph(graph, dom)
+    memory = materialize_paper_memory(
+        graph,
+        dom=dom,
+        audit_findings=findings,
+        report_readiness=publish_status_from_findings(findings).value,
+    )
     metrics = compute_core_quality_metrics(dom=dom, graph=graph, findings=findings)
+    result_node = next(node for node in memory.fact_nodes if node.kind == "result")
 
     assert {finding.code for finding in findings} >= {
         "extracted_number_not_located_in_source"
     }
     assert "number_not_located_in_source" not in {finding.code for finding in findings}
+    assert result_node.audit_status == PublishStatus.REVIEWED_WITH_LIMITS
+    assert result_node.audit_issue_ids == [findings[0].finding_id]
+    assert memory.audit_issues_by_node[result_node.node_id] == result_node.audit_issue_ids
     assert metrics.extracted_number_count == 1
     assert metrics.extracted_number_not_located_count == 1
     assert metrics.extracted_number_locatable_rate == 0.0
@@ -2223,6 +2246,9 @@ def test_report_memory_context_prefers_reviewed_core_memory_view(tmp_path):
     assert compact["source_of_truth"] == "core_v2_paper_memory_view"
     assert compact["core_memory_view"]["fact_nodes"][0]["node_id"] == "claim:obs_claim"
     assert compact["core_memory_view"]["fact_nodes"][0]["source_ids"] == [source_id]
+    assert compact["core_memory_view"]["fact_nodes"][0]["pages"] == [1]
+    assert compact["core_memory_view"]["fact_nodes"][0]["audit_status"] == PublishStatus.REVIEWED
+    assert compact["core_memory_view"]["audit_issues"] == []
     assert report_focus_pages(context, skim=None, card=None) == [1]
     assert any(
         "block table method" in query
