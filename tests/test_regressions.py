@@ -52,6 +52,7 @@ from paperlens_core.report import (
     build_report_section_prompt,
     clean_model_markdown,
     combine_report_and_memory_audits,
+    compose_agentic_paper_report,
     final_report_audit_acceptable,
     normalize_report_plan,
     readable_model_body,
@@ -82,7 +83,6 @@ from paperlens_core.protocol import RunRequest
 from paperlens_core.workflow.agent import (
     PaperLensWorkflow,
     build_central_memory_verify_prompt,
-    compose_agentic_paper_report,
     summarize_model_calls,
     validate_paperlens_output,
     write_final_report_bundle,
