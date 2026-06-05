@@ -1261,6 +1261,62 @@ def test_core_v2_qa_context_does_not_use_draft_weak_bootstrap_graph(tmp_path):
     assert context["matches"] == []
 
 
+def test_core_v2_qa_context_requires_quality_metrics_gate(tmp_path):
+    output_dir = tmp_path / "out"
+    data_dir = output_dir / ".paperlens" / "data"
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    layout = {
+        "pages": [
+            {
+                "page_no": 1,
+                "text": "Abstract\n\nWe propose a block table method for serving.",
+                "section_candidates": [{"title": "Abstract", "level": 1}],
+            }
+        ]
+    }
+    write_core_v2_artifacts(data_dir=data_dir, paper=paper, layout=layout)
+    dom = build_paper_dom_from_layout(
+        paper_id=paper.paper_id,
+        title=paper.canonical_title,
+        layout=layout,
+    )
+    claim_span = next(span for span in dom.spans if "block table method" in span.text)
+    write_core_v2_from_observation_log(
+        data_dir=data_dir,
+        paper=paper,
+        dom=dom,
+        reading_plan=build_initial_reading_plan(dom),
+        observation_log=ObservationLog(paper_id="p_test").append(
+            ObservationCard(
+                observation_id="obs_claim",
+                paper_id="p_test",
+                task_id="read_02_claim_inventory",
+                observation_type=ObservationType.CLAIM,
+                statement="The paper proposes a block table method.",
+                source_ids=[claim_span.source_id],
+            )
+        ),
+        producer="unit_test",
+    )
+    (data_dir / "core" / "v2" / "p_test" / "quality_metrics.v1.json").unlink()
+
+    context = load_core_v2_qa_context(
+        output_dir=output_dir,
+        paper_id="p_test",
+        question="block table method 是什么？",
+    )
+
+    assert context["retrieval_policy"] == "missing_core_v2_quality_metrics"
+    assert context["quality"]["publish_status"] is None
+    assert context["matches"] == []
+
+
 def test_library_rebuild_indexes_core_v2_claim_graph_without_memory_v3(tmp_path):
     output_dir = tmp_path / "out"
     paper = PaperRecord(
@@ -1430,6 +1486,64 @@ def test_library_rebuild_does_not_index_draft_weak_bootstrap_graph(tmp_path):
     assert records[0]["quality"]["graph_publish_status"] == PublishStatus.DRAFT_WEAK
     assert records[0]["graph_summary"]["graph_access"] == "not_reviewed_by_core_v2_audit"
     assert records[0]["graph_summary"]["claim_nodes"] == []
+    assert records[0]["memory"]["claims"] == []
+    assert result["matches"] == []
+
+
+def test_library_rebuild_requires_quality_metrics_gate_for_core_v2_graph(tmp_path):
+    output_dir = tmp_path / "out"
+    data_dir = output_dir / ".paperlens" / "data"
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    layout = {
+        "pages": [
+            {
+                "page_no": 1,
+                "text": "Abstract\n\nWe propose a block table method for serving.",
+                "section_candidates": [{"title": "Abstract", "level": 1}],
+            }
+        ]
+    }
+    write_core_v2_artifacts(data_dir=data_dir, paper=paper, layout=layout)
+    dom = build_paper_dom_from_layout(
+        paper_id=paper.paper_id,
+        title=paper.canonical_title,
+        layout=layout,
+    )
+    claim_span = next(span for span in dom.spans if "block table method" in span.text)
+    write_core_v2_from_observation_log(
+        data_dir=data_dir,
+        paper=paper,
+        dom=dom,
+        reading_plan=build_initial_reading_plan(dom),
+        observation_log=ObservationLog(paper_id="p_test").append(
+            ObservationCard(
+                observation_id="obs_claim",
+                paper_id="p_test",
+                task_id="read_02_claim_inventory",
+                observation_type=ObservationType.CLAIM,
+                statement="The paper proposes a block table method.",
+                source_ids=[claim_span.source_id],
+            )
+        ),
+        producer="unit_test",
+    )
+    (data_dir / "core" / "v2" / "p_test" / "quality_metrics.v1.json").unlink()
+
+    rebuild_library_from_output(output_dir)
+    records = read_library_records(output_dir)
+    result = search_library(output_dir=output_dir, query="block table serving", limit=3)
+
+    assert records[0]["graph_summary"]["graph_access"] == "missing_core_v2_quality_metrics"
+    assert records[0]["graph_summary"]["quality"]["publish_status"] is None
+    assert (
+        records[0]["graph_summary"]["quality"]["memory_report_readiness"] == PublishStatus.REVIEWED
+    )
     assert records[0]["memory"]["claims"] == []
     assert result["matches"] == []
 

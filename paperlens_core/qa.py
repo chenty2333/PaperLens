@@ -260,7 +260,7 @@ def load_core_v2_qa_context(
         return {}
     quality = load_core_v2_quality_metrics(data_dir, paper_id)
     publish_status = str(quality.get("publish_status") or "")
-    if publish_status and publish_status not in CORE_V2_CONSUMABLE_STATUSES:
+    if publish_status not in CORE_V2_CONSUMABLE_STATUSES:
         return {
             "schema_version": CORE_V2_QA_CONTEXT_VERSION,
             "paper_id": paper_id,
@@ -298,6 +298,8 @@ def core_v2_quality_context(quality: dict[str, Any]) -> dict[str, Any]:
 
 
 def core_v2_non_consumable_policy(publish_status: str) -> str:
+    if not publish_status:
+        return "missing_core_v2_quality_metrics"
     if publish_status == "BLOCKED":
         return "blocked_by_core_v2_audit"
     return "not_reviewed_by_core_v2_audit"

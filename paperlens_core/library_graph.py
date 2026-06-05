@@ -178,7 +178,8 @@ def graph_quality_summary(
     *, quality: dict[str, Any], memory_view: dict[str, Any]
 ) -> dict[str, Any]:
     return {
-        "publish_status": quality.get("publish_status") or memory_view.get("report_readiness"),
+        "publish_status": quality.get("publish_status"),
+        "memory_report_readiness": memory_view.get("report_readiness"),
         "evidence_coverage": quality.get("evidence_coverage"),
         "fact_node_count": quality.get("fact_node_count"),
         "supported_fact_node_count": quality.get("supported_fact_node_count"),
@@ -189,11 +190,13 @@ def graph_quality_summary(
 
 def graph_summary_is_consumable(quality_summary: dict[str, Any]) -> bool:
     publish_status = str(quality_summary.get("publish_status") or "")
-    return not publish_status or publish_status in CONSUMABLE_GRAPH_STATUSES
+    return publish_status in CONSUMABLE_GRAPH_STATUSES
 
 
 def graph_non_consumable_policy(quality_summary: dict[str, Any]) -> str:
     publish_status = str(quality_summary.get("publish_status") or "")
+    if not publish_status:
+        return "missing_core_v2_quality_metrics"
     if publish_status == "BLOCKED":
         return "blocked_by_core_v2_audit"
     return "not_reviewed_by_core_v2_audit"
