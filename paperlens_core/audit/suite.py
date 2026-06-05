@@ -22,6 +22,15 @@ FACT_NODE_KINDS = {
 def audit_claim_graph(graph: ClaimGraph, dom: PaperDOM) -> list[AuditFinding]:
     findings: list[AuditFinding] = []
     dom_source_ids = dom.source_ids()
+    if graph.paper_id != dom.paper_id:
+        findings.append(
+            AuditFinding(
+                finding_id=f"claim_graph_paper_id_mismatch:{graph.paper_id}:{dom.paper_id}",
+                severity=AuditSeverity.ERROR,
+                code="claim_graph_paper_id_mismatch",
+                message=f"ClaimGraph paper_id does not match PaperDOM: {graph.paper_id} != {dom.paper_id}",
+            )
+        )
     for index, edge in enumerate(graph.edges, start=1):
         source_node = graph.nodes.get(edge.source_id)
         target_node = graph.nodes.get(edge.target_id)

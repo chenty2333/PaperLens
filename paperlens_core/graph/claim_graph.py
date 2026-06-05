@@ -74,6 +74,11 @@ class ClaimGraph(BaseModel):
     edges: list[GraphEdge] = Field(default_factory=list)
 
     def add_node(self, node: GraphNode) -> None:
+        existing = self.nodes.get(node.node_id)
+        if existing is not None:
+            if graph_node_identity_payload(existing) != graph_node_identity_payload(node):
+                raise ValueError(f"conflicting graph node_id: {node.node_id}")
+            return
         self.nodes[node.node_id] = node
 
     def add_edge(self, edge: GraphEdge) -> None:
@@ -112,6 +117,8 @@ def graph_from_observations(paper_id: str, observations: list[ObservationCard]) 
     graph = ClaimGraph(paper_id=paper_id)
     observation_node_ids: dict[str, str] = {}
     for card in observations:
+        if card.paper_id != paper_id:
+            raise ValueError(f"observation paper_id mismatch: {card.paper_id} != {paper_id}")
         node_kind = OBSERVATION_NODE_KIND[card.observation_type]
         node_id = observation_node_id(card)
         observation_node_ids[card.observation_id] = node_id
@@ -143,6 +150,10 @@ def graph_from_observations(paper_id: str, observations: list[ObservationCard]) 
             graph.add_edge(GraphEdge(source_id=node_id, target_id=evidence_id, kind="supported_by"))
     add_proposed_observation_links(graph, observations, observation_node_ids)
     return graph
+
+
+def graph_node_identity_payload(node: GraphNode) -> dict[str, Any]:
+    return node.model_dump(mode="json")
 
 
 def observation_node_id(card: ObservationCard) -> str:

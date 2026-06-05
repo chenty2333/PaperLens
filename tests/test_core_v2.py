@@ -13,7 +13,7 @@ from paperlens_core.audit import (
 )
 from paperlens_core.agent_loop import PaperToolRegistry
 from paperlens_core.dom import build_paper_dom_from_layout
-from paperlens_core.graph import GraphEdge, graph_from_observations
+from paperlens_core.graph import GraphEdge, GraphNode, graph_from_observations
 from paperlens_core.library import (
     doctor_library,
     rebuild_library_from_output,
@@ -392,6 +392,43 @@ def test_claim_graph_keeps_valid_observation_relationship_edges():
     assert relationship_edges[0].payload == {"proposed_by_observation_id": "obs_mechanism"}
 
 
+def test_claim_graph_rejects_observations_from_other_paper():
+    dom = sample_dom()
+    observation = ObservationCard(
+        observation_id="obs_other",
+        paper_id="p_other",
+        task_id="read_02_claim_inventory",
+        observation_type=ObservationType.CLAIM,
+        statement="The paper proposes a block table method.",
+        source_ids=[dom.spans[0].source_id],
+    )
+
+    with pytest.raises(ValueError, match="observation paper_id mismatch"):
+        graph_from_observations("p_test", [observation])
+
+
+def test_claim_graph_add_node_is_idempotent_but_rejects_conflicting_payloads():
+    graph = graph_from_observations("p_test", [])
+    node = GraphNode(
+        node_id="claim:obs_same",
+        kind="claim",
+        label="A claim.",
+        payload={"observation_id": "obs_same"},
+    )
+    graph.add_node(node)
+    graph.add_node(node.model_copy())
+
+    with pytest.raises(ValueError, match="conflicting graph node_id"):
+        graph.add_node(
+            GraphNode(
+                node_id="claim:obs_same",
+                kind="claim",
+                label="A different claim.",
+                payload={"observation_id": "obs_same"},
+            )
+        )
+
+
 def test_claim_graph_ignores_observation_relationship_edges_to_evidence_nodes():
     dom = sample_dom()
     first_source_id = next(
@@ -545,6 +582,16 @@ def test_audit_blocks_relationship_edges_that_touch_evidence_nodes():
         "relationship_edge_source_is_evidence",
         "relationship_edge_target_is_evidence",
     }
+    assert publish_status_from_findings(findings) == PublishStatus.BLOCKED
+
+
+def test_audit_blocks_claim_graph_for_other_paper_dom():
+    dom = sample_dom()
+    graph = graph_from_observations("p_other", [])
+
+    findings = audit_claim_graph(graph, dom)
+
+    assert {finding.code for finding in findings} >= {"claim_graph_paper_id_mismatch"}
     assert publish_status_from_findings(findings) == PublishStatus.BLOCKED
 
 
