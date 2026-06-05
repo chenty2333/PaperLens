@@ -59,6 +59,7 @@ from paperlens_core.workflow.core_v2 import (
     observation_cards_from_model_envelope,
     refresh_core_v2_audit_artifacts,
     run_core_v2_model_observation_tasks,
+    source_pack,
     write_core_v2_artifacts,
     write_core_v2_from_observation_log,
 )
@@ -150,6 +151,32 @@ def test_reading_plan_is_structured_and_source_bound():
     ).allowed_observation_types == ["mechanism"]
     assert all(
         dom.source_exists(source_id) for task in plan.tasks for source_id in task.target_source_ids
+    )
+
+
+def test_reading_plan_targets_equation_sources_for_mechanism_tasks():
+    dom = build_paper_dom_from_layout(
+        paper_id="p_math",
+        title="Math Paper",
+        layout={
+            "pages": [
+                {
+                    "page_no": 1,
+                    "text": "Method\n\nWe optimize the loss $L = x + y$ with a runtime module.",
+                    "section_candidates": [{"title": "Method", "level": 1}],
+                }
+            ]
+        },
+    )
+    plan = build_initial_reading_plan(dom, max_sources_per_task=8)
+    method_task = next(
+        task for task in plan.tasks if task.task_type == ReadingTaskType.METHOD_MECHANISM
+    )
+
+    assert dom.equations
+    assert dom.equations[0].source_id in method_task.target_source_ids
+    assert any(
+        item["kind"] == "equation" for item in source_pack(dom, method_task.target_source_ids)
     )
 
 

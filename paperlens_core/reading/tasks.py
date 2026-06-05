@@ -70,6 +70,13 @@ ALLOWED_OBSERVATION_TYPES: dict[ReadingTaskType, tuple[str, ...]] = {
     ReadingTaskType.REPRODUCIBILITY: ("implementation", "limitation"),
 }
 
+EQUATION_READING_TASKS = {
+    ReadingTaskType.METHOD_MECHANISM,
+    ReadingTaskType.IMPLEMENTATION_PATH,
+    ReadingTaskType.RESULT_EXTRACTION,
+    ReadingTaskType.REPRODUCIBILITY,
+}
+
 
 def build_initial_reading_plan(
     dom: PaperDOM, *, max_sources_per_task: int = 8, max_tokens_per_task: int = 16000
@@ -102,6 +109,8 @@ def select_sources_for_task(dom: PaperDOM, task_type: ReadingTaskType, *, limit:
         haystack = span.text.lower()
         if any(keyword in haystack for keyword in keywords):
             matches.append(span.source_id)
+    if task_type in EQUATION_READING_TASKS:
+        matches.extend(item.source_id for item in dom.equations)
     if task_type == ReadingTaskType.RESULT_EXTRACTION:
         matches.extend(item.source_id for item in [*dom.figures, *dom.tables])
     deduped = []
