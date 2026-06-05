@@ -56,9 +56,12 @@ from paperlens_core.memory_v3 import (
 )
 from paperlens_core.memory import (
     ensure_memory_audit_operation,
+    ensure_read_pages_operation,
     fallback_memory_audit,
     memory_audit_acceptable,
     normalize_memory_audit,
+    select_central_verification_pages,
+    select_high_risk_memory_claims,
 )
 from paperlens_core.memory_store import MEMORY_PATCH_SCHEMA_VERSION, PaperMemoryStore
 from paperlens_core.protocol import RunRequest
@@ -77,8 +80,6 @@ from paperlens_core.workflow.agent import (
     render_freeform_paper_report,
     render_paperlens_report,
     sanitize_reader_hostile_text,
-    select_central_verification_pages,
-    select_high_risk_memory_claims,
     select_rolling_read_pages,
     summarize_model_calls,
     user_visible_review_items,
@@ -2388,6 +2389,24 @@ def test_existing_memory_audit_operation_is_normalized():
     assert audit["status"] == "NEED_HUMAN_REVIEW"
     assert audit["safe_to_generate_capsule"] is False
     assert audit["confidence"] == "low"
+
+
+def test_read_pages_operation_is_inserted_once():
+    patch_set = ensure_read_pages_operation(
+        {
+            "paper_id": "p_test",
+            "operations": [{"op": "upsert_claim", "payload": {"id": "C001", "text": "claim"}}],
+        },
+        paper_id="p_test",
+        pages=[1, "bad", 3],
+    )
+
+    assert patch_set["operations"][0] == {
+        "op": "add_read_pages",
+        "payload": {"pages": [1, 3]},
+    }
+    second = ensure_read_pages_operation(patch_set, paper_id="p_test", pages=[5])
+    assert [op["op"] for op in second["operations"]].count("add_read_pages") == 1
 
 
 def test_central_verification_selects_evidence_risk_and_map_pages(monkeypatch):
