@@ -52,21 +52,13 @@ from paperlens_core.quality_snapshot import write_core_quality_snapshot
 from paperlens_core.reading import select_rolling_read_pages
 from paperlens_core.report import (
     classification_counts,
-    cluster_rows_by_scope,
     combine_report_and_memory_audits,
     dedupe_evidence_refs,
-    describe_rows,
     display_paper_title,
     final_report_audit_acceptable,
     markdown_title,
-    novelty_risk,
     paper_report_filename,
-    read_decision,
-    reading_priority_key,
     render_paperlens_report,
-    report_link_lines,
-    row_decision,
-    row_relation,
     write_core_graph_report_view,
 )
 from paperlens_core.report.memory_context import (
@@ -5180,179 +5172,6 @@ def utc_timestamp() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
-def render_start_here(
-    *,
-    rows: list[dict[str, Any]],
-    review_items: list[ReviewItem],
-    budget: dict[str, Any],
-    config: dict[str, Any],
-    topic: str | None,
-    idea: str | None,
-    formal_run: bool,
-) -> str:
-    ranked = sorted(rows, key=reading_priority_key)
-    must_read = [row for row in ranked if row_decision(row).class_label in {"A", "HOLD"}][:10]
-    risky = [row for row in ranked if novelty_risk(row) in {"HIGH", "MEDIUM"}][:10]
-    provider = config.get("provider", {}) if isinstance(config.get("provider"), dict) else {}
-    lines = [
-        "# PaperLens",
-        "",
-        "## What to open",
-        "",
-        "- Run report: [PaperLens.md](PaperLens.md)",
-        "- Per-paper reports: [papers/](papers/)",
-        "- Local memory assets: [.paperlens/library/](.paperlens/library/)",
-        "",
-        "## Run summary",
-        "",
-        f"- Papers analyzed: {len(rows)}",
-        f"- Mode: {'formal agentic audit' if formal_run else 'offline parse/debug diagnostic'}",
-        f"- Topic comparison: {'enabled' if topic and idea else 'not enabled'}",
-        f"- Provider: {provider.get('kind', 'unknown')}",
-        f"- Model: {provider.get('model') or 'not recorded'}",
-        f"- Estimated model cost: ${float(budget.get('estimated_usd') or 0):.4f}",
-        f"- Human review items: {len(review_items)}",
-        "",
-    ]
-    if topic or idea:
-        lines.extend(
-            [
-                "## User research context",
-                "",
-                f"- Topic: {topic or 'not provided'}",
-                f"- Idea: {idea or 'not provided'}",
-                "",
-            ]
-        )
-    lines.extend(["## Read first", ""])
-    if formal_run:
-        lines.extend(report_link_lines(must_read) or ["- No must-read papers were selected."])
-    else:
-        lines.append(
-            "- Offline debug output is not a formal reading result. Use it only to inspect parsing, rendering, and evidence plumbing."
-        )
-    lines.extend(["", "## High-value or risky papers", ""])
-    if formal_run:
-        lines.extend(report_link_lines(risky) or ["- No medium/high risk papers were selected."])
-    else:
-        lines.append("- Not assessed in offline debug mode.")
-    lines.extend(["", "## Needs human confirmation", ""])
-    if review_items:
-        for item in review_items[:20]:
-            paper_id = item.paper_id or "run"
-            lines.append(f"- `{paper_id}`: {item.reason}")
-    else:
-        lines.append("- No open review items.")
-    return "\n".join(lines) + "\n"
-
-
-def render_main_report(
-    *,
-    rows: list[dict[str, Any]],
-    review_items: list[ReviewItem],
-    budget: dict[str, Any],
-    topic: str | None,
-    idea: str | None,
-    formal_run: bool,
-) -> str:
-    ranked = sorted(rows, key=reading_priority_key)
-    counts = {"A": 0, "B": 0, "C": 0, "HOLD": 0}
-    for row in rows:
-        counts[row_decision(row).class_label] += 1
-    if not formal_run:
-        return render_debug_main_report(
-            rows=ranked, review_items=review_items, budget=budget, counts=counts
-        )
-    lines = [
-        "# PaperLens Report",
-        "",
-        "## 1. Executive Summary",
-        "",
-        f"- Papers analyzed: {len(rows)}",
-        f"- Classification counts: A={counts['A']}, B={counts['B']}, C={counts['C']}, HOLD={counts['HOLD']}",
-        f"- Estimated model cost: ${float(budget.get('estimated_usd') or 0):.4f}",
-        f"- Report mode: {'formal agentic audit' if formal_run else 'offline parse/debug diagnostic'}",
-        f"- Topic comparison: {'enabled' if topic and idea else 'not enabled'}",
-        "",
-    ]
-    lines.extend(["## 2. Recommended Reading Order", ""])
-    for index, row in enumerate(ranked, start=1):
-        paper = row["paper"]
-        decision = row_decision(row)
-        lines.append(
-            f"{index}. [{paper.paper_id}: {paper.canonical_title or paper.paper_id}](papers/{row['report_name']}) "
-            f"- {read_decision(row)}; class {decision.class_label}; novelty risk {novelty_risk(row)}."
-        )
-    lines.extend(["", "## 3. Must Read Papers", ""])
-    must_read = [row for row in ranked if read_decision(row) == "Close read"]
-    lines.extend(describe_rows(must_read) or ["No papers require full close reading."])
-    lines.extend(["", "## 4. Background Papers", ""])
-    background = [row for row in ranked if read_decision(row) in {"Background", "Skip"}]
-    lines.extend(describe_rows(background) or ["No background-only papers were identified."])
-    lines.extend(["", "## 5. Value / Novelty Risk", ""])
-    if topic and idea:
-        lines.extend(
-            [
-                f"- User topic: {topic}",
-                f"- User idea: {idea}",
-                "",
-            ]
-        )
-    else:
-        lines.append(
-            "User topic and idea were not provided; this section uses general paper-value and novelty risk."
-        )
-    for row in [item for item in ranked if novelty_risk(item) in {"HIGH", "MEDIUM"}]:
-        paper = row["paper"]
-        lines.append(
-            f"- `{paper.paper_id}` {paper.canonical_title}: {novelty_risk(row)} risk. {row_relation(row)}"
-        )
-    if not any(novelty_risk(item) in {"HIGH", "MEDIUM"} for item in ranked):
-        lines.append("- No medium/high novelty risk papers were identified.")
-    lines.extend(["", "## 6. Paper Value Map", ""])
-    for cluster, cluster_rows in cluster_rows_by_scope(ranked).items():
-        lines.append(f"### {cluster}")
-        for row in cluster_rows:
-            paper = row["paper"]
-            lines.append(
-                f"- [{paper.paper_id}: {paper.canonical_title}](papers/{row['report_name']}) - {row_relation(row)}"
-            )
-        lines.append("")
-    lines.extend(["## 7. Claim Safety Audit", ""])
-    for row in ranked:
-        card = row.get("card")
-        paper = row["paper"]
-        if not card:
-            continue
-        status = "PROBABLY_SAFE" if card.verification_status == "PASS" else "NEEDS_HUMAN_REVIEW"
-        lines.append(
-            f"- `{paper.paper_id}` {status}: cite only claims backed by listed EvidenceRef entries."
-        )
-    lines.extend(["", "## 8. Human Review Queue", ""])
-    if review_items:
-        for item in review_items:
-            lines.append(f"- `{item.paper_id or 'run'}` {item.item_type}: {item.reason}")
-    else:
-        lines.append("- No open human review items.")
-    lines.extend(
-        [
-            "",
-            "## 9. Paper Index",
-            "",
-            "| Paper | Read | Class | Risk | Report |",
-            "|---|---|---|---|---|",
-        ]
-    )
-    for row in ranked:
-        paper = row["paper"]
-        decision = row_decision(row)
-        lines.append(
-            f"| {paper.paper_id} | {read_decision(row)} | {decision.class_label} | {novelty_risk(row)} | "
-            f"[open](papers/{row['report_name']}) |"
-        )
-    return "\n".join(lines) + "\n"
-
-
 def render_paper_report(
     *,
     paper: PaperRecord,
@@ -6106,48 +5925,6 @@ def display_review_status(
     if raw == "格式归一化":
         return "已归一化"
     return raw or "未复核"
-
-
-def render_debug_main_report(
-    *,
-    rows: list[dict[str, Any]],
-    review_items: list[ReviewItem],
-    budget: dict[str, Any],
-    counts: dict[str, int],
-) -> str:
-    lines = [
-        "# PaperLens Offline Debug Diagnostic",
-        "",
-        "> This is not a formal PaperLens reading result. It was generated without model reading, visual interpretation, or final report generation.",
-        "",
-        "## Purpose",
-        "",
-        "- Verify PDF scanning, parsing, page rendering, layout indexing, EvidenceRef plumbing, SQLite state, and portable sidecar execution.",
-        "- Do not use this output for citation, novelty assessment, related-work writing, or reading decisions.",
-        "",
-        "## Run Summary",
-        "",
-        f"- Papers parsed: {len(rows)}",
-        f"- Initial classification counts: A={counts['A']}, B={counts['B']}, C={counts['C']}, HOLD={counts['HOLD']}",
-        f"- Model calls: {budget.get('calls', 0)}",
-        "",
-        "## Paper Diagnostics",
-        "",
-        "| Paper | Parse quality | Diagnostic report |",
-        "|---|---|---|",
-    ]
-    for row in rows:
-        paper = row["paper"]
-        lines.append(
-            f"| {paper.paper_id} | {paper.parse_quality or 'unknown'} | [open](papers/{row['report_name']}) |"
-        )
-    lines.extend(["", "## Review Items", ""])
-    if review_items:
-        for item in review_items:
-            lines.append(f"- `{item.paper_id or 'run'}` {item.item_type}: {item.reason}")
-    else:
-        lines.append("- No review items were generated.")
-    return "\n".join(lines) + "\n"
 
 
 def render_debug_paper_diagnostic(
