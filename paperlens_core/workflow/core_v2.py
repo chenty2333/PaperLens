@@ -17,6 +17,7 @@ from paperlens_core.reading import (
     ReadingPlan,
     ReadingTask,
     ReadingTaskType,
+    allowed_observation_types_for_task,
     build_initial_reading_plan,
     make_observation_id,
 )
@@ -660,6 +661,7 @@ def build_observation_task_prompt(
             "task_id": task.task_id,
             "task_type": task.task_type.value,
             "required_outputs": task.required_outputs,
+            "allowed_observation_types": task_allowed_observation_types(task),
             "evidence_policy": task.evidence_policy,
             "max_model_calls": task.max_model_calls,
         },
@@ -744,6 +746,12 @@ def observation_cards_from_model_envelope(
         observation_type = str(item.get("observation_type") or "").strip()
         if not statement or observation_type not in {kind.value for kind in ObservationType}:
             continue
+        allowed_types = task_allowed_observation_types(task)
+        if observation_type not in allowed_types:
+            raise ValueError(
+                f"Observation card for {task.task_id} returned disallowed observation_type="
+                f"{observation_type}; allowed={allowed_types}"
+            )
         observation_id = make_observation_id(
             task_id=task.task_id,
             observation_type=observation_type,
@@ -774,6 +782,10 @@ def observation_cards_from_model_envelope(
             )
         )
     return result
+
+
+def task_allowed_observation_types(task: ReadingTask) -> list[str]:
+    return task.allowed_observation_types or allowed_observation_types_for_task(task.task_type)
 
 
 def clean_model_source_ids(value: Any, valid_source_ids: set[str]) -> list[str]:

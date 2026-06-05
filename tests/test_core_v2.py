@@ -111,6 +111,10 @@ def test_reading_plan_is_structured_and_source_bound():
     assert ReadingTaskType.RESULT_EXTRACTION in task_types
     assert all(task.max_model_calls == 1 for task in plan.tasks)
     assert all(task.evidence_policy == "must_cite_paper_dom_source_ids" for task in plan.tasks)
+    assert all(task.allowed_observation_types for task in plan.tasks)
+    assert next(
+        task for task in plan.tasks if task.task_type == ReadingTaskType.METHOD_MECHANISM
+    ).allowed_observation_types == ["mechanism"]
     assert all(
         dom.source_exists(source_id) for task in plan.tasks for source_id in task.target_source_ids
     )
@@ -585,6 +589,7 @@ def test_core_v2_model_observer_rewrites_observation_graph_artifacts(tmp_path):
             prompt = json.loads(user_prompt)
             source_id = prompt["evidence_pack"][0]["source_id"]
             task_type = prompt["task_spec"]["task_type"]
+            observation_type = prompt["task_spec"]["allowed_observation_types"][0]
             return SimpleNamespace(
                 data={
                     "artifact_type": "observation_cards",
@@ -593,7 +598,7 @@ def test_core_v2_model_observer_rewrites_observation_graph_artifacts(tmp_path):
                     "data": {
                         "cards": [
                             {
-                                "observation_type": "claim",
+                                "observation_type": observation_type,
                                 "statement": f"{task_type} observation from a source-bound card.",
                                 "source_ids": [source_id],
                                 "confidence": "high",
@@ -703,6 +708,40 @@ def test_model_observation_cards_reject_unknown_source_ids():
             envelope,
             paper_id="p_test",
             task=build_initial_reading_plan(sample_dom()).tasks[0],
+            valid_source_ids=sample_dom().source_ids(),
+        )
+
+
+def test_model_observation_cards_reject_disallowed_observation_type():
+    envelope = ArtifactEnvelope(
+        artifact_type="observation_cards",
+        producer="fake",
+        data={
+            "cards": [
+                {
+                    "observation_type": "claim",
+                    "statement": "A claim emitted from a mechanism task.",
+                    "source_ids": [sample_dom().spans[0].source_id],
+                    "confidence": "high",
+                    "provenance": "explicit",
+                    "uncertainty": None,
+                    "extracted_numbers": [],
+                    "proposed_links": [],
+                }
+            ]
+        },
+    )
+    task = next(
+        task
+        for task in build_initial_reading_plan(sample_dom()).tasks
+        if task.task_type == ReadingTaskType.METHOD_MECHANISM
+    )
+
+    with pytest.raises(ValueError, match="disallowed observation_type=claim"):
+        observation_cards_from_model_envelope(
+            envelope,
+            paper_id="p_test",
+            task=task,
             valid_source_ids=sample_dom().source_ids(),
         )
 

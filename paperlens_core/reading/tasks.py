@@ -25,6 +25,7 @@ class ReadingTask(BaseModel):
     task_type: ReadingTaskType
     target_source_ids: list[str] = Field(default_factory=list)
     required_outputs: list[str] = Field(default_factory=list)
+    allowed_observation_types: list[str] = Field(default_factory=list)
     max_model_calls: int = 1
     evidence_policy: str = "must_cite_paper_dom_source_ids"
 
@@ -55,6 +56,19 @@ TASK_KEYWORDS: dict[ReadingTaskType, tuple[str, ...]] = {
     ReadingTaskType.REPRODUCIBILITY: ("code", "hardware", "repository", "implementation detail"),
 }
 
+ALLOWED_OBSERVATION_TYPES: dict[ReadingTaskType, tuple[str, ...]] = {
+    ReadingTaskType.ORIENTATION: ("problem",),
+    ReadingTaskType.CLAIM_INVENTORY: ("claim",),
+    ReadingTaskType.METHOD_MECHANISM: ("mechanism",),
+    ReadingTaskType.IMPLEMENTATION_PATH: ("implementation",),
+    ReadingTaskType.EVALUATION_SETUP: ("evaluation",),
+    ReadingTaskType.RESULT_EXTRACTION: ("result",),
+    ReadingTaskType.LIMITATIONS: ("limitation",),
+    ReadingTaskType.CONCEPT_BRIDGE: ("concept",),
+    ReadingTaskType.RELATED_POSITIONING: ("claim", "limitation"),
+    ReadingTaskType.REPRODUCIBILITY: ("implementation", "limitation"),
+}
+
 
 def build_initial_reading_plan(dom: PaperDOM, *, max_sources_per_task: int = 8) -> ReadingPlan:
     tasks = []
@@ -66,6 +80,7 @@ def build_initial_reading_plan(dom: PaperDOM, *, max_sources_per_task: int = 8) 
                 task_type=task_type,
                 target_source_ids=targets,
                 required_outputs=required_outputs_for_task(task_type),
+                allowed_observation_types=allowed_observation_types_for_task(task_type),
                 max_model_calls=1,
             )
         )
@@ -109,3 +124,7 @@ def required_outputs_for_task(task_type: ReadingTaskType) -> list[str]:
         ReadingTaskType.RELATED_POSITIONING: ["claim", "limitation"],
         ReadingTaskType.REPRODUCIBILITY: ["implementation", "limitation"],
     }[task_type]
+
+
+def allowed_observation_types_for_task(task_type: ReadingTaskType) -> list[str]:
+    return list(ALLOWED_OBSERVATION_TYPES[task_type])

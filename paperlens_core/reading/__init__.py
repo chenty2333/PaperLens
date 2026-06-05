@@ -10,6 +10,7 @@ from paperlens_core.reading.tasks import (
     ReadingPlan,
     ReadingTask,
     ReadingTaskType,
+    allowed_observation_types_for_task,
     build_initial_reading_plan,
 )
 
@@ -20,6 +21,7 @@ __all__ = [
     "ReadingPlan",
     "ReadingTask",
     "ReadingTaskType",
+    "allowed_observation_types_for_task",
     "build_initial_reading_plan",
     "make_observation_id",
 ]
