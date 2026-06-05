@@ -18,9 +18,11 @@ from paperlens_core.library import (
     rebuild_library_from_output,
     read_library_records,
     search_library,
+    write_paperlens_library,
 )
 from paperlens_core.memory import materialize_paper_memory
 from paperlens_core.qa import answer_question, load_core_v2_qa_context
+from paperlens_core.quality_snapshot import write_core_quality_snapshot
 from paperlens_core.reading import (
     ObservationCard,
     ObservationLog,
@@ -52,7 +54,7 @@ from paperlens_core.schemas import (
     PaperRecord,
     SkimCard,
 )
-from paperlens_core.workflow.agent import PaperLensWorkflow
+from paperlens_core.workflow.agent import PaperLensWorkflow, paper_report_filename
 from paperlens_core.workflow.core_v2 import (
     observation_cards_from_model_envelope,
     refresh_core_v2_audit_artifacts,
@@ -656,6 +658,176 @@ def test_library_rebuild_indexes_core_v2_claim_graph_without_memory_v3(tmp_path)
     assert result["matches"][0]["paper"]["paper_id"] == "p_test"
     assert index["records"][0]["graph"]["node_counts"]["claim"] >= 1
     assert doctor_library(output_dir)["status"] == "PASS"
+
+
+def test_core_quality_snapshot_tracks_structural_and_qa_metrics(tmp_path):
+    output_dir = tmp_path / "out"
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=2,
+    )
+    write_core_v2_artifacts(
+        data_dir=output_dir / ".paperlens" / "data",
+        paper=paper,
+        layout={
+            "pages": [
+                {
+                    "page_no": 1,
+                    "text": "Abstract\n\nWe propose a block table method for faster serving.",
+                    "section_candidates": [{"title": "Abstract", "level": 1}],
+                },
+                {
+                    "page_no": 2,
+                    "text": "Evaluation\n\nThe method improves latency by 27% on Dataset-A.",
+                    "section_candidates": [{"title": "Evaluation", "level": 1}],
+                },
+            ]
+        },
+    )
+    graph_path = (
+        output_dir / ".paperlens" / "data" / "core" / "v2" / "p_test" / "claim_graph.v1.json"
+    )
+    graph_envelope = json.loads(graph_path.read_text(encoding="utf-8"))
+    fact_node = next(
+        node for node in graph_envelope["data"]["nodes"].values() if node["kind"] != "evidence"
+    )
+    fact_node["label"] = f"{fact_node['label']} The reported latency improvement is 27%."
+    graph_path.write_text(json.dumps(graph_envelope, ensure_ascii=False), encoding="utf-8")
+    qa_trace = output_dir / ".paperlens" / "data" / "qa_trace.jsonl"
+    qa_trace.parent.mkdir(parents=True, exist_ok=True)
+    qa_trace.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "paper_id": "p_test",
+                        "question": "27% 是哪来的？",
+                        "cited_source_ids": ["span:p_test:p2:2"],
+                        "selected_graph_nodes": ["result:obs"],
+                        "cache_hit": False,
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "paper_id": "p_test",
+                        "question": "离线缓存问题",
+                        "cited_source_ids": [],
+                        "selected_graph_nodes": [],
+                        "cache_hit": True,
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    snapshot_path = write_core_quality_snapshot(output_dir)
+    envelope = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    snapshot = envelope["data"]
+    paper_snapshot = snapshot["papers"][0]
+
+    assert envelope["artifact_type"] == "core_quality_snapshot"
+    assert paper_snapshot["paper_id"] == "p_test"
+    assert paper_snapshot["evidence_coverage"] == 1.0
+    assert paper_snapshot["numeric_fact_node_count"] >= 1
+    assert paper_snapshot["numeric_locatable_rate"] == 1.0
+    assert paper_snapshot["unsupported_fact_node_rate"] == 0.0
+    assert paper_snapshot["qa"]["total"] == 2
+    assert paper_snapshot["qa"]["graph_hit_rate"] == 0.5
+    assert paper_snapshot["qa"]["cache_hit_rate"] == 0.5
+    assert snapshot["aggregate"]["qa_total"] == 2
+    assert snapshot["aggregate"]["qa_cache_hit_rate"] == 0.5
+
+
+def test_stage17_manifest_includes_core_quality_snapshot(tmp_path):
+    output_dir = tmp_path / "out"
+    input_dir = tmp_path / "in"
+    input_dir.mkdir()
+    pipeline = PaperLensWorkflow(
+        input_dir=input_dir,
+        output_dir=output_dir,
+        config=CoreConfig(offline_debug=True),
+        events=EventWriter(
+            "run_test",
+            output_dir / ".paperlens" / "data" / "events.jsonl",
+            output_dir / ".paperlens" / "data" / "errors.jsonl",
+        ),
+        control=ControlState(),
+    )
+    try:
+        pipeline.prepare_output()
+        paper = PaperRecord(
+            paper_id="p_test",
+            file_path="paper.pdf",
+            file_hash="hash",
+            canonical_title="Test Paper",
+            page_count=1,
+        )
+        decision = ClassificationDecision(
+            paper_id="p_test",
+            class_label="A",
+            confidence=0.9,
+            false_negative_risk=0.1,
+        )
+        pipeline.papers = [paper]
+        pipeline.classifications = [decision]
+        report_name = paper_report_filename(paper)
+        (output_dir / "PaperLens.md").write_text("# PaperLens\n\n索引。", encoding="utf-8")
+        (output_dir / "papers" / report_name).write_text("# Test Paper\n\n报告。", encoding="utf-8")
+        write_paperlens_library(
+            output_dir=output_dir,
+            rows=[
+                {
+                    "paper": paper,
+                    "decision": decision,
+                    "card": PaperCard(
+                        paper_id="p_test",
+                        contribution_claims=["The paper proposes a block table method."],
+                    ),
+                    "report_name": report_name,
+                    "report_title": "Test Paper",
+                    "paper_memory_v3": {},
+                    "model_report": {"one_line_reason": "Block table method."},
+                    "report_audit": {"verdict": "PASS"},
+                }
+            ],
+            topic=None,
+            idea=None,
+        )
+        memory_dir = output_dir / ".paperlens" / "data" / "memory" / "v3"
+        memory_dir.mkdir(parents=True, exist_ok=True)
+        (memory_dir / "p_test.paper_memory.v3.json").write_text("{}", encoding="utf-8")
+        write_core_v2_artifacts(
+            data_dir=pipeline.data_dir,
+            paper=paper,
+            layout={
+                "pages": [
+                    {
+                        "page_no": 1,
+                        "text": "Abstract\n\nWe propose a block table method.",
+                        "section_candidates": [{"title": "Abstract", "level": 1}],
+                    }
+                ]
+            },
+        )
+
+        manifest = pipeline.stage_17_manifest()
+
+        snapshot_path = output_dir / ".paperlens" / "data" / "core_quality_snapshot.v1.json"
+        snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        assert manifest["artifacts"]["core_quality_snapshot"] == (
+            ".paperlens/data/core_quality_snapshot.v1.json"
+        )
+        assert snapshot["artifact_type"] == "core_quality_snapshot"
+        assert snapshot["data"]["paper_count"] == 1
+    finally:
+        pipeline.db.close()
 
 
 def test_stage07_runs_core_v2_observation_read_before_legacy_rolling(tmp_path, monkeypatch):

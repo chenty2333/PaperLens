@@ -37,6 +37,7 @@ from paperlens_core.pdf.ingest import scan_pdfs
 from paperlens_core.pdf.layout_index import build_layout_index
 from paperlens_core.pdf.pymupdf_parser import parse_pdf
 from paperlens_core.pdf.qa import parse_quality
+from paperlens_core.quality_snapshot import write_core_quality_snapshot
 from paperlens_core.runtime import PaperLensRuntime, context_pack_prompt
 from paperlens_core.schemas import (
     ArtifactVersion,
@@ -1795,6 +1796,7 @@ class PaperLensWorkflow:
         )
         model_call_summary = summarize_model_calls(self.data_dir / "model_calls.jsonl")
         write_json(self.data_dir / "model_call_summary.json", model_call_summary)
+        write_core_quality_snapshot(self.output_dir)
         manifest = {
             "run_id": self.events.run_id,
             "input_dir": str(self.input_dir),
@@ -1814,6 +1816,7 @@ class PaperLensWorkflow:
                 "library_records": ".paperlens/library/library_records.jsonl",
                 "paper_memory_v3": ".paperlens/data/memory/v3/",
                 "core_v2": ".paperlens/data/core/v2/",
+                "core_quality_snapshot": ".paperlens/data/core_quality_snapshot.v1.json",
                 "library_index": ".paperlens/library/index/search_index.json",
                 "data": ".paperlens/data/",
                 "model_call_summary": ".paperlens/data/model_call_summary.json",
