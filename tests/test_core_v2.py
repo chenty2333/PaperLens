@@ -153,6 +153,10 @@ def test_reading_plan_is_structured_and_source_bound():
     assert all(
         dom.source_exists(source_id) for task in plan.tasks for source_id in task.target_source_ids
     )
+    orientation_task = next(
+        task for task in plan.tasks if task.task_type == ReadingTaskType.ORIENTATION
+    )
+    assert source_pack(dom, orientation_task.target_source_ids)[0]["text"].startswith("We propose")
 
 
 def test_reading_plan_targets_equation_sources_for_mechanism_tasks():
@@ -364,6 +368,27 @@ def test_audit_blocks_missing_sources_and_unsupported_fact_nodes():
     findings = audit_claim_graph(graph, dom)
 
     assert {finding.code for finding in findings} >= {"missing_dom_source"}
+    assert publish_status_from_findings(findings) == PublishStatus.BLOCKED
+
+
+def test_audit_blocks_fact_text_unrelated_to_declared_source():
+    dom = sample_dom()
+    observation = ObservationCard(
+        observation_id="obs_mismatch",
+        paper_id="p_test",
+        task_id="read_02_claim_inventory",
+        observation_type=ObservationType.CLAIM,
+        statement="The paper achieves 99% accuracy on ImageNet.",
+        source_ids=[dom.spans[0].source_id],
+        confidence="high",
+    )
+
+    graph = graph_from_observations("p_test", [observation])
+    findings = audit_claim_graph(graph, dom)
+
+    assert {finding.code for finding in findings} >= {
+        "fact_node_text_not_grounded_in_evidence_source"
+    }
     assert publish_status_from_findings(findings) == PublishStatus.BLOCKED
 
 
@@ -734,7 +759,10 @@ def test_core_v2_model_observer_rewrites_observation_graph_artifacts(tmp_path):
                         "cards": [
                             {
                                 "observation_type": observation_type,
-                                "statement": f"{task_type} observation from a source-bound card.",
+                                "statement": (
+                                    f"{task_type} observation about the block table method from "
+                                    "a source-bound card."
+                                ),
                                 "source_ids": [source_id],
                                 "confidence": "high",
                                 "provenance": "explicit",
@@ -1011,6 +1039,8 @@ def test_core_v2_qa_reads_claim_graph_without_final_markdown_report(tmp_path):
         title=paper.canonical_title,
         layout=layout,
     )
+    claim_span = next(span for span in dom.spans if "block table method" in span.text)
+    mechanism_span = next(span for span in dom.spans if "organizes serving state" in span.text)
     write_core_v2_from_observation_log(
         data_dir=output_dir / ".paperlens" / "data",
         paper=paper,
@@ -1024,7 +1054,7 @@ def test_core_v2_qa_reads_claim_graph_without_final_markdown_report(tmp_path):
                 task_id="read_02_claim_inventory",
                 observation_type=ObservationType.CLAIM,
                 statement="The paper proposes a block table method.",
-                source_ids=[dom.spans[0].source_id],
+                source_ids=[claim_span.source_id],
             )
         )
         .append(
@@ -1034,7 +1064,7 @@ def test_core_v2_qa_reads_claim_graph_without_final_markdown_report(tmp_path):
                 task_id="read_03_method_mechanism",
                 observation_type=ObservationType.MECHANISM,
                 statement="The block table mechanism organizes serving state.",
-                source_ids=[dom.spans[-1].source_id],
+                source_ids=[mechanism_span.source_id],
                 proposed_links=[
                     {"source_id": "obs_mechanism", "target_id": "obs_claim", "kind": "explains"}
                 ],
@@ -1177,6 +1207,8 @@ def test_library_rebuild_indexes_core_v2_claim_graph_without_memory_v3(tmp_path)
         title=paper.canonical_title,
         layout=layout,
     )
+    claim_span = next(span for span in dom.spans if "block table method" in span.text)
+    mechanism_span = next(span for span in dom.spans if "organizes serving state" in span.text)
     write_core_v2_from_observation_log(
         data_dir=output_dir / ".paperlens" / "data",
         paper=paper,
@@ -1190,7 +1222,7 @@ def test_library_rebuild_indexes_core_v2_claim_graph_without_memory_v3(tmp_path)
                 task_id="read_02_claim_inventory",
                 observation_type=ObservationType.CLAIM,
                 statement="The paper proposes a block table method.",
-                source_ids=[dom.spans[0].source_id],
+                source_ids=[claim_span.source_id],
             )
         )
         .append(
@@ -1200,7 +1232,7 @@ def test_library_rebuild_indexes_core_v2_claim_graph_without_memory_v3(tmp_path)
                 task_id="read_03_method_mechanism",
                 observation_type=ObservationType.MECHANISM,
                 statement="The block table mechanism organizes serving state.",
-                source_ids=[dom.spans[-1].source_id],
+                source_ids=[mechanism_span.source_id],
                 proposed_links=[
                     {"source_id": "obs_mechanism", "target_id": "obs_claim", "kind": "explains"}
                 ],

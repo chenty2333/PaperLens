@@ -4,6 +4,7 @@ import re
 
 from paperlens_core.audit.findings import AuditFinding, AuditSeverity, PublishStatus
 from paperlens_core.dom.paper_dom import PaperDOM
+from paperlens_core.grounding import text_overlaps_any_reference
 from paperlens_core.graph.claim_graph import ClaimGraph
 
 
@@ -100,6 +101,27 @@ def audit_claim_graph(graph: ClaimGraph, dom: PaperDOM) -> list[AuditFinding]:
                     node_id=node.node_id,
                 )
             )
+        if node.kind in FACT_NODE_KINDS:
+            evidence_source_ids = fact_node_source_ids(graph, node.node_id)
+            evidence_texts = [
+                text
+                for source_id in evidence_source_ids
+                if (text := source_text_for_id(dom, source_id))
+            ]
+            if evidence_texts and not text_overlaps_any_reference(node.label, evidence_texts):
+                findings.append(
+                    AuditFinding(
+                        finding_id=f"source_text_mismatch:{node.node_id}",
+                        severity=AuditSeverity.ERROR,
+                        code="fact_node_text_not_grounded_in_evidence_source",
+                        message=(
+                            f"{node.kind} node text does not overlap its declared PaperDOM "
+                            "evidence source text"
+                        ),
+                        node_id=node.node_id,
+                        source_ids=evidence_source_ids,
+                    )
+                )
         if node.kind in FACT_NODE_KINDS and node.payload.get("confidence") == "low":
             findings.append(
                 AuditFinding(
@@ -158,13 +180,34 @@ def contains_number(text: str) -> bool:
     return bool(re.search(r"\d", text))
 
 
-def source_text_contains_number(dom: PaperDOM, source_id: str) -> bool:
+def fact_node_source_ids(graph: ClaimGraph, node_id: str) -> list[str]:
+    source_ids = []
+    for evidence_id in graph.evidence_ids_for(node_id):
+        evidence_node = graph.nodes.get(evidence_id)
+        source_id = str((evidence_node.payload if evidence_node else {}).get("source_id") or "")
+        if source_id and source_id not in source_ids:
+            source_ids.append(source_id)
+    return source_ids
+
+
+def source_text_for_id(dom: PaperDOM, source_id: str) -> str:
+    for section in dom.sections:
+        if section.source_id == source_id:
+            return section.title
     for span in dom.spans:
         if span.source_id == source_id:
-            return contains_number(span.text)
-    for item in [*dom.figures, *dom.tables, *dom.equations]:
-        if item.source_id == source_id:
-            return contains_number(
-                str(getattr(item, "caption", None) or getattr(item, "latex_or_text", ""))
-            )
-    return False
+            return span.text
+    for figure in dom.figures:
+        if figure.source_id == source_id:
+            return figure.caption or ""
+    for table in dom.tables:
+        if table.source_id == source_id:
+            return table.caption or ""
+    for equation in dom.equations:
+        if equation.source_id == source_id:
+            return equation.latex_or_text
+    return ""
+
+
+def source_text_contains_number(dom: PaperDOM, source_id: str) -> bool:
+    return contains_number(source_text_for_id(dom, source_id))

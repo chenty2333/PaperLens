@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -101,11 +102,19 @@ def build_initial_reading_plan(
 def select_sources_for_task(dom: PaperDOM, task_type: ReadingTaskType, *, limit: int) -> list[str]:
     keywords = TASK_KEYWORDS[task_type]
     matches = []
+    spans_by_id = {span.source_id: span for span in dom.spans}
+    section_titles = {
+        section.source_id: normalize_heading_text(section.title) for section in dom.sections
+    }
     for section in dom.sections:
         section_text = section.title.lower()
         if any(keyword in section_text for keyword in keywords):
-            matches.extend(section.span_ids)
+            matches.extend(
+                non_heading_section_span_ids(section.span_ids, spans_by_id, section.title)
+            )
     for span in dom.spans:
+        if is_heading_span(span, section_titles):
+            continue
         haystack = span.text.lower()
         if any(keyword in haystack for keyword in keywords):
             matches.append(span.source_id)
@@ -120,8 +129,41 @@ def select_sources_for_task(dom: PaperDOM, task_type: ReadingTaskType, *, limit:
         if len(deduped) >= limit:
             return deduped
     if not deduped:
-        return [span.source_id for span in dom.spans[: min(limit, 3)]]
+        fallback_spans = non_heading_spans(dom.spans, section_titles) or dom.spans
+        return [span.source_id for span in fallback_spans[: min(limit, 3)]]
     return deduped
+
+
+def non_heading_section_span_ids(
+    span_ids: list[str],
+    spans_by_id: dict[str, Any],
+    section_title: str,
+) -> list[str]:
+    title = normalize_heading_text(section_title)
+    result = []
+    for span_id in span_ids:
+        span = spans_by_id.get(span_id)
+        text = normalize_heading_text(getattr(span, "text", ""))
+        if title and text == title:
+            continue
+        result.append(span_id)
+    return result
+
+
+def normalize_heading_text(text: str) -> str:
+    return " ".join(text.lower().split())
+
+
+def non_heading_spans(spans: list[Any], section_titles: dict[str, str]) -> list[Any]:
+    return [span for span in spans if not is_heading_span(span, section_titles)]
+
+
+def is_heading_span(span: Any, section_titles: dict[str, str]) -> bool:
+    section_id = getattr(span, "section_id", None)
+    section_title = section_titles.get(section_id)
+    return bool(
+        section_title and normalize_heading_text(getattr(span, "text", "")) == section_title
+    )
 
 
 def required_outputs_for_task(task_type: ReadingTaskType) -> list[str]:
