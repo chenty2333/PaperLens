@@ -274,6 +274,11 @@ def test_claim_graph_memory_and_audit_flow_from_observations():
     assert memory.evaluation_matrix[0].extracted_numbers == [{"text": "27%"}]
     metrics = compute_core_quality_metrics(dom=dom, graph=graph, findings=findings)
     assert metrics.evidence_coverage == 1.0
+    assert metrics.numeric_fact_node_count == 1
+    assert metrics.number_not_located_count == 0
+    assert metrics.numeric_locatable_rate == 1.0
+    assert metrics.unsupported_fact_node_count == 0
+    assert metrics.unsupported_fact_node_rate == 0.0
     assert metrics.publish_status == PublishStatus.REVIEWED
 
 
@@ -501,10 +506,15 @@ def test_audit_blocks_fact_text_unrelated_to_declared_source():
 
     graph = graph_from_observations("p_test", [observation])
     findings = audit_claim_graph(graph, dom)
+    metrics = compute_core_quality_metrics(dom=dom, graph=graph, findings=findings)
 
     assert {finding.code for finding in findings} >= {
-        "fact_node_text_not_grounded_in_evidence_source"
+        "fact_node_text_not_grounded_in_evidence_source",
+        "number_not_located_in_source",
     }
+    assert metrics.numeric_fact_node_count == 1
+    assert metrics.number_not_located_count == 1
+    assert metrics.numeric_locatable_rate == 0.0
     assert publish_status_from_findings(findings) == PublishStatus.BLOCKED
 
 
