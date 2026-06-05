@@ -577,6 +577,7 @@ def build_core_v2_derived_views(
     )
     memory_view = materialize_paper_memory(
         claim_graph,
+        dom=dom,
         metadata=metadata,
         unresolved_audit_findings=[finding.finding_id for finding in all_findings],
         report_readiness=quality_metrics.publish_status,

@@ -242,12 +242,14 @@ def test_claim_graph_memory_and_audit_flow_from_observations():
         statement="The method improves latency by 27% on Dataset-A.",
         source_ids=[result_span.source_id],
         confidence="high",
+        extracted_numbers=[{"text": "27%"}],
     )
 
     graph = graph_from_observations("p_test", [observation])
     findings = audit_claim_graph(graph, dom)
     memory = materialize_paper_memory(
         graph,
+        dom=dom,
         unresolved_audit_findings=[finding.finding_id for finding in findings],
         report_readiness=publish_status_from_findings(findings).value,
     )
@@ -256,6 +258,12 @@ def test_claim_graph_memory_and_audit_flow_from_observations():
     assert memory.result_nodes
     assert memory.report_readiness == PublishStatus.REVIEWED
     assert memory.evidence_index[memory.result_nodes[0]]
+    assert memory.fact_nodes[0].node_id == memory.result_nodes[0]
+    assert memory.fact_nodes[0].source_ids == [result_span.source_id]
+    assert memory.fact_nodes[0].pages == [result_span.page_no]
+    assert memory.evidence_sources[result_span.source_id].excerpt.startswith("The method")
+    assert memory.evaluation_matrix[0].node_id == memory.result_nodes[0]
+    assert memory.evaluation_matrix[0].extracted_numbers == [{"text": "27%"}]
     metrics = compute_core_quality_metrics(dom=dom, graph=graph, findings=findings)
     assert metrics.evidence_coverage == 1.0
     assert metrics.publish_status == PublishStatus.REVIEWED
@@ -866,6 +874,9 @@ def test_stage03_writes_core_v2_artifact_envelopes(tmp_path):
         metrics_envelope = json.loads(
             (core_root / "quality_metrics.v1.json").read_text(encoding="utf-8")
         )
+        memory_envelope = json.loads(
+            (core_root / "paper_memory_view.v1.json").read_text(encoding="utf-8")
+        )
         report_envelope = json.loads(
             (core_root / "report_draft.v1.json").read_text(encoding="utf-8")
         )
@@ -880,6 +891,7 @@ def test_stage03_writes_core_v2_artifact_envelopes(tmp_path):
         assert plan_envelope["artifact_type"] == "reading_plan"
         assert graph_envelope["artifact_type"] == "claim_graph"
         assert metrics_envelope["artifact_type"] == "core_quality_metrics"
+        assert memory_envelope["artifact_type"] == "paper_memory_view"
         assert report_envelope["artifact_type"] == "graph_report_draft"
         assert report_audit_envelope["artifact_type"] == "report_audit_findings"
         assert core_manifest_envelope["artifact_type"] == "core_v2_manifest"
@@ -888,6 +900,10 @@ def test_stage03_writes_core_v2_artifact_envelopes(tmp_path):
         assert graph_envelope["data"]["nodes"]
         assert report_envelope["data"]["sections"]
         assert report_audit_envelope["data"] == []
+        assert memory_envelope["data"]["fact_nodes"]
+        assert memory_envelope["data"]["evidence_sources"]
+        assert memory_envelope["data"]["evaluation_matrix"]
+        assert memory_envelope["data"]["evaluation_matrix"][0]["source_ids"]
         assert metrics_envelope["data"]["fact_node_count"] > 0
         assert metrics_envelope["data"]["publish_status"] == PublishStatus.DRAFT_WEAK
         assert core_manifest_envelope["data"]["status"] == "COMPLETE"
