@@ -1950,7 +1950,7 @@ ROLLING_MEMORY_SYSTEM_PROMPT = """
 You are the PaperLens RollingReader.
 Read paper pages and improve PaperMemoryV3.
 Use tools whenever they help you check text, figures, evidence, or current memory.
-Return final_json as one MemoryPatchSet when the memory patch is good enough.
+Return final as one MemoryPatchSet when the memory patch is good enough.
 Keep durable paper claims separate from background concepts and open uncertainty.
 """.strip()
 
@@ -1962,7 +1962,7 @@ Use tools until you can confidently repair memory, weaken unsupported claims, li
 or record explicit uncertainty.
 The memory audit status is authoritative: use NEED_HUMAN_REVIEW only when the capsule should
 not be presented as reviewed; never mark NEED_HUMAN_REVIEW as safe_to_generate_capsule=true.
-Return final_json as one MemoryPatchSet. Include a memory audit operation when done.
+Return final as one MemoryPatchSet. Include a memory audit operation when done.
 """.strip()
 
 

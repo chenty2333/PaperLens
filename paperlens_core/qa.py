@@ -32,7 +32,7 @@ For prerequisite/background questions, teach the concept first, then connect it 
 Separate paper claims, PaperLens inference, background knowledge, and evidence limits.
 If a background explanation is useful, label it as background knowledge, not a paper claim.
 Use source_attribution to record those boundaries.
-Return final_json matching the QA schema when done.
+Return final matching the QA schema when done.
 """.strip()
 
 

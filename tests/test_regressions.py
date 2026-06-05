@@ -23,12 +23,15 @@ from paperlens_core.agents.llm import (
     parse_json_text_for_schema,
 )
 from paperlens_core.agent_loop import (
+    AGENT_TURN_SCHEMA,
     AgentLoop,
     AgentLoopStepLimitExceeded,
     PaperToolRegistry,
     normalize_agent_turn,
     parse_arguments_json,
+    parse_arguments_payload,
     parse_final_json,
+    parse_final_payload,
 )
 from paperlens_core.library import (
     LIBRARY_RECORD_FILENAME,
@@ -1854,11 +1857,11 @@ def test_agent_loop_executes_paper_tool_before_final(tmp_path):
                             {
                                 "id": "t1",
                                 "tool": "paper.read_pages",
-                                "arguments_json": json.dumps({"pages": [1]}),
+                                "arguments": {"pages": [1]},
                                 "reason": "Read the target page.",
                             }
                         ],
-                        "final_json": "",
+                        "final": {},
                     },
                     usage={"prompt_tokens": 10, "completion_tokens": 4},
                     request_id="req_1",
@@ -1869,7 +1872,7 @@ def test_agent_loop_executes_paper_tool_before_final(tmp_path):
                     "action": "final",
                     "message": "Done.",
                     "tool_requests": [],
-                    "final_json": json.dumps({"ok": True, "page_seen": 1}),
+                    "final": {"ok": True, "page_seen": 1},
                 },
                 usage={"prompt_tokens": 12, "completion_tokens": 5},
                 request_id="req_2",
@@ -1904,7 +1907,35 @@ def test_agent_loop_executes_paper_tool_before_final(tmp_path):
     assert any(row.get("event") == "tool_observation" for row in trace)
 
 
-def test_agent_loop_accepts_object_final_json_from_compatible_providers():
+def test_agent_turn_schema_uses_typed_payloads_not_nested_json_strings():
+    assert "final" in AGENT_TURN_SCHEMA["required"]
+    assert "final_json" not in AGENT_TURN_SCHEMA["properties"]
+    tool_schema = AGENT_TURN_SCHEMA["properties"]["tool_requests"]["items"]
+    assert "arguments" in tool_schema["required"]
+    assert "arguments_json" not in tool_schema["properties"]
+
+
+def test_agent_loop_accepts_structured_final_from_compatible_providers():
+    raw = LlmJsonResult(
+        data={
+            "action": "final",
+            "message": "Done.",
+            "tool_requests": [],
+            "final": {"ok": True, "page_seen": 2},
+        },
+        text="",
+        request_id=None,
+        usage={},
+        endpoint="fake",
+    )
+
+    turn = normalize_agent_turn(raw)
+
+    assert turn["action"] == "final"
+    assert parse_final_payload(turn["final"], "unit_final") == {"ok": True, "page_seen": 2}
+
+
+def test_agent_loop_accepts_legacy_object_final_json_from_compatible_providers():
     raw = LlmJsonResult(
         data={
             "action": "final",
@@ -1925,9 +1956,13 @@ def test_agent_loop_accepts_object_final_json_from_compatible_providers():
         "ok": True,
         "page_seen": 2,
     }
+    assert parse_final_payload(turn["final"], "unit_final") == {
+        "ok": True,
+        "page_seen": 2,
+    }
 
 
-def test_agent_loop_recovers_when_final_json_is_missing(tmp_path):
+def test_agent_loop_recovers_when_final_is_missing(tmp_path):
     calls: list[str] = []
 
     class FakeClient:
@@ -1941,7 +1976,7 @@ def test_agent_loop_recovers_when_final_json_is_missing(tmp_path):
                         "action": "final",
                         "message": "I wrote the answer in the message.",
                         "tool_requests": [],
-                        "final_json": "",
+                        "final": {},
                     },
                     text="",
                     request_id=None,
@@ -1953,7 +1988,7 @@ def test_agent_loop_recovers_when_final_json_is_missing(tmp_path):
                     "action": "final",
                     "message": "Done.",
                     "tool_requests": [],
-                    "final_json": {"ok": True},
+                    "final": {"ok": True},
                 },
                 text="",
                 request_id=None,
@@ -1984,7 +2019,7 @@ def test_agent_loop_recovers_when_final_json_is_missing(tmp_path):
     assert result.final == {"ok": True}
     assert len(calls) == 2
     trace = [json.loads(line) for line in (tmp_path / "agent_trace.jsonl").read_text().splitlines()]
-    assert any(row.get("event") == "invalid_final_json" for row in trace)
+    assert any(row.get("event") == "invalid_final" for row in trace)
 
 
 def test_agent_loop_fails_when_step_limit_is_exceeded(tmp_path):
@@ -2001,7 +2036,7 @@ def test_agent_loop_fails_when_step_limit_is_exceeded(tmp_path):
                     "action": "tool_request",
                     "message": "Need more context.",
                     "tool_requests": [],
-                    "final_json": "",
+                    "final": {},
                 },
                 text="",
                 request_id=f"req_{calls}",
@@ -2038,6 +2073,10 @@ def test_agent_loop_fails_when_step_limit_is_exceeded(tmp_path):
 
 
 def test_agent_loop_accepts_object_tool_arguments_from_compatible_providers():
+    assert parse_arguments_payload({"arguments": {"pages": [1, 2], "reason": "check"}}) == {
+        "pages": [1, 2],
+        "reason": "check",
+    }
     assert parse_arguments_json({"pages": [1, 2], "reason": "check"}) == {
         "pages": [1, 2],
         "reason": "check",
@@ -2169,17 +2208,17 @@ def test_library_question_uses_agent_loop_tools(tmp_path, monkeypatch):
                             {
                                 "id": "s1",
                                 "tool": "library.search",
-                                "arguments_json": json.dumps({"query": "KV cache", "limit": 5}),
+                                "arguments": {"query": "KV cache", "limit": 5},
                                 "reason": "Find relevant read papers.",
                             },
                             {
                                 "id": "r1",
                                 "tool": "library.get_record",
-                                "arguments_json": json.dumps({"paper_id": "p_vllm"}),
+                                "arguments": {"paper_id": "p_vllm"},
                                 "reason": "Inspect claims and evidence.",
                             },
                         ],
-                        "final_json": "",
+                        "final": {},
                     },
                     usage={"prompt_tokens": 10, "completion_tokens": 4},
                     request_id="req_1",
@@ -2190,27 +2229,24 @@ def test_library_question_uses_agent_loop_tools(tmp_path, monkeypatch):
                     "action": "final",
                     "message": "Done.",
                     "tool_requests": [],
-                    "final_json": json.dumps(
-                        {
-                            "answer_markdown": "PagedAttention 是库里和 KV cache 最相关的论文。",
-                            "related_papers": [
-                                {
-                                    "paper_id": "p_vllm",
-                                    "title": "PagedAttention",
-                                    "report_path": "papers/p_vllm.md",
-                                    "why_related": "它讨论 KV cache paging。",
-                                }
-                            ],
-                            "confidence": "high",
-                            "source_attribution": {
-                                "paper_claims": ["PagedAttention manages KV cache memory."],
-                                "cross_paper_synthesis": [],
-                                "background_context": [],
-                                "evidence_limits": [],
-                            },
+                    "final": {
+                        "answer_markdown": "PagedAttention 是库里和 KV cache 最相关的论文。",
+                        "related_papers": [
+                            {
+                                "paper_id": "p_vllm",
+                                "title": "PagedAttention",
+                                "report_path": "papers/p_vllm.md",
+                                "why_related": "它讨论 KV cache paging。",
+                            }
+                        ],
+                        "confidence": "high",
+                        "source_attribution": {
+                            "paper_claims": ["PagedAttention manages KV cache memory."],
+                            "cross_paper_synthesis": [],
+                            "background_context": [],
+                            "evidence_limits": [],
                         },
-                        ensure_ascii=False,
-                    ),
+                    },
                 },
                 usage={"prompt_tokens": 12, "completion_tokens": 5},
                 request_id="req_2",
@@ -2765,7 +2801,7 @@ def test_rolling_memory_agent_session_omits_completion_budget(tmp_path):
                     "action": "final",
                     "message": "done",
                     "tool_requests": [],
-                    "final_json": json.dumps({"paper_id": "p_test", "operations": []}),
+                    "final": {"paper_id": "p_test", "operations": []},
                 },
                 usage={"prompt_tokens": 10, "completion_tokens": 10},
                 endpoint="fake",
@@ -3102,7 +3138,7 @@ def test_agentic_report_composer_uses_step_cache(tmp_path):
                     "action": "final",
                     "message": "done",
                     "tool_requests": [],
-                    "final_json": json.dumps(data),
+                    "final": data,
                 },
                 usage={"prompt_tokens": 10, "completion_tokens": 20},
                 endpoint="fake",
@@ -3242,7 +3278,7 @@ def test_report_composer_repairs_failed_section_once(tmp_path):
                     "action": "final",
                     "message": "done",
                     "tool_requests": [],
-                    "final_json": json.dumps(data),
+                    "final": data,
                 },
                 usage={"prompt_tokens": 10, "completion_tokens": 20},
                 endpoint="fake",
@@ -3449,7 +3485,7 @@ def test_paper_question_answer_uses_cache(tmp_path, monkeypatch):
                     "action": "final",
                     "message": "done",
                     "tool_requests": [],
-                    "final_json": json.dumps(answer),
+                    "final": answer,
                 },
                 usage={"prompt_tokens": 11, "completion_tokens": 22},
                 endpoint="fake",

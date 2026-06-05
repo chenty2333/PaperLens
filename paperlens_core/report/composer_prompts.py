@@ -27,7 +27,7 @@ Plan for a Theseus-grade capsule: complete, sectioned, and detailed enough to te
 For normal A/B/C papers, cover orientation/background, core mechanism, implementation or
 algorithm path, evaluation evidence, value/tradeoffs, and limitations/boundaries. Do not merge
 evaluation, value, and limitations into one thin section when the memory has enough material.
-Return final_json matching the ReportPlan schema.
+Return final matching the ReportPlan schema.
 """.strip()
 
 
@@ -134,7 +134,7 @@ Keep paper claims, interpretation, background knowledge, and evidence limits dis
 Write at Theseus-grade depth: a section should explain why the idea exists, how the mechanism
 works, what evidence supports it, and what boundary limits it when those are relevant to the
 planned section. Prefer 2-4 compact but substantive paragraphs over a one-paragraph summary.
-Return final_json matching the ReportSection schema.
+Return final matching the ReportSection schema.
 """.strip()
 
 
@@ -178,7 +178,7 @@ Use tools when a claim needs checking. Prefer explicit evidence boundaries over 
 Mark REPAIR when a section is factually unsupported, overclaims, or is too shallow to satisfy
 its planned purpose. Missing reader-critical mechanism, evaluation, or limitation context is a
 real quality defect, not just a style preference.
-Return final_json matching the ReportSectionAudit schema.
+Return final matching the ReportSectionAudit schema.
 """.strip()
 
 
