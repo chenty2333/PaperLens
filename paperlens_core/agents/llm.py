@@ -15,7 +15,7 @@ import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from paperlens_core.config import ProviderConfig
 
@@ -966,29 +966,10 @@ def normalized_csv_env(name: str) -> set[str]:
 
 
 def parse_json_text(text: str) -> dict[str, Any]:
-    cleaned = text.strip()
-    fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", cleaned, flags=re.DOTALL | re.IGNORECASE)
-    if fence:
-        cleaned = fence.group(1).strip()
-    try:
-        parsed = json.loads(cleaned)
-    except json.JSONDecodeError:
-        start = cleaned.find("{")
-        if start < 0:
-            raise LlmError("Model response did not contain a JSON object")
-        try:
-            parsed, _end = json.JSONDecoder().raw_decode(cleaned[start:])
-        except json.JSONDecodeError as exc:
-            end = cleaned.rfind("}")
-            if end <= start:
-                raise LlmError("Model response did not contain a JSON object") from exc
-            try:
-                parsed = json.loads(cleaned[start : end + 1])
-            except json.JSONDecodeError as exc:
-                raise LlmError("Model response JSON could not be parsed") from exc
-    if not isinstance(parsed, dict):
-        raise LlmError("Model response JSON root must be an object")
-    return parsed
+    candidates = list(iter_json_object_candidates(text))
+    if not candidates:
+        raise LlmError("Model response did not contain a JSON object")
+    return candidates[0]
 
 
 def parse_json_text_for_schema(
@@ -996,12 +977,51 @@ def parse_json_text_for_schema(
     schema_name: str,
     schema: dict[str, Any],
 ) -> dict[str, Any]:
-    data = parse_json_text(text)
-    apply_schema_compatible_defaults(data, schema, schema_name=schema_name)
-    missing = missing_required_schema_keys(data, schema)
-    if missing:
-        raise LlmError(f"Provider JSON did not match schema {schema_name}; missing keys: {', '.join(missing)}")
-    return data
+    candidates = list(iter_json_object_candidates(text))
+    if not candidates:
+        raise LlmError("Model response did not contain a JSON object")
+    best_missing: list[str] | None = None
+    for candidate in candidates:
+        data = dict(candidate)
+        apply_schema_compatible_defaults(data, schema, schema_name=schema_name)
+        missing = missing_required_schema_keys(data, schema)
+        if not missing:
+            return data
+        if best_missing is None or len(missing) < len(best_missing):
+            best_missing = missing
+    missing_text = ", ".join(best_missing or [])
+    raise LlmError(f"Provider JSON did not match schema {schema_name}; missing keys: {missing_text}")
+
+
+def iter_json_object_candidates(text: str) -> Iterable[dict[str, Any]]:
+    cleaned = text.strip()
+    seen: set[str] = set()
+    for candidate in json_candidate_strings(cleaned):
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            yield parsed
+
+
+def json_candidate_strings(text: str) -> Iterable[str]:
+    fence_pattern = re.compile(r"```(?:json)?\s*(.*?)\s*```", flags=re.DOTALL | re.IGNORECASE)
+    for match in fence_pattern.finditer(text):
+        yield match.group(1).strip()
+
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "{":
+            continue
+        try:
+            _parsed, end = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        yield text[index : index + end].strip()
 
 
 def apply_schema_compatible_defaults(

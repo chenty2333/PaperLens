@@ -17,10 +17,18 @@ from paperlens_core.events import EventWriter
 from paperlens_core.agents.llm import (
     JsonLlmClient,
     LlmError,
+    LlmJsonResult,
     json_retry_completion_minimum,
+    parse_json_text,
     parse_json_text_for_schema,
 )
-from paperlens_core.agent_loop import AgentLoop, PaperToolRegistry
+from paperlens_core.agent_loop import (
+    AgentLoop,
+    PaperToolRegistry,
+    normalize_agent_turn,
+    parse_arguments_json,
+    parse_final_json,
+)
 from paperlens_core.library import (
     LIBRARY_RECORD_FILENAME,
     LIBRARY_RECORD_SCHEMA_VERSION,
@@ -1705,6 +1713,94 @@ def test_agent_loop_executes_paper_tool_before_final(tmp_path):
     assert any(row.get("event") == "tool_observation" for row in trace)
 
 
+def test_agent_loop_accepts_object_final_json_from_compatible_providers():
+    raw = LlmJsonResult(
+        data={
+            "action": "final",
+            "message": "Done.",
+            "tool_requests": [],
+            "final_json": {"ok": True, "page_seen": 2},
+        },
+        text="",
+        request_id=None,
+        usage={},
+        endpoint="fake",
+    )
+
+    turn = normalize_agent_turn(raw)
+
+    assert turn["action"] == "final"
+    assert parse_final_json(turn["final_json"], "unit_final") == {
+        "ok": True,
+        "page_seen": 2,
+    }
+
+
+def test_agent_loop_recovers_when_final_json_is_missing(tmp_path):
+    calls: list[str] = []
+
+    class FakeClient:
+        config = SimpleNamespace(model="fake", kind="fake")
+
+        def invoke_json(self, **kwargs):
+            calls.append(kwargs["user_prompt"])
+            if len(calls) == 1:
+                return LlmJsonResult(
+                    data={
+                        "action": "final",
+                        "message": "I wrote the answer in the message.",
+                        "tool_requests": [],
+                        "final_json": "",
+                    },
+                    text="",
+                    request_id=None,
+                    usage={"prompt_tokens": 1, "completion_tokens": 1},
+                    endpoint="fake",
+                )
+            return LlmJsonResult(
+                data={
+                    "action": "final",
+                    "message": "Done.",
+                    "tool_requests": [],
+                    "final_json": {"ok": True},
+                },
+                text="",
+                request_id=None,
+                usage={"prompt_tokens": 1, "completion_tokens": 1},
+                endpoint="fake",
+            )
+
+    loop = AgentLoop(
+        client=FakeClient(),
+        tools=PaperToolRegistry(runtime=PaperLensRuntime(artifacts=[]), paper_id="p_test", title="Test"),
+        session_name="unit_agent",
+        objective="Return final JSON.",
+        final_schema_name="unit_final",
+        final_schema={
+            "type": "object",
+            "required": ["ok"],
+            "properties": {"ok": {"type": "boolean"}},
+        },
+        stage="unit",
+        paper_id="p_test",
+        trace_path=tmp_path / "agent_trace.jsonl",
+    )
+
+    result = loop.run(initial_context={})
+
+    assert result.final == {"ok": True}
+    assert len(calls) == 2
+    trace = [json.loads(line) for line in (tmp_path / "agent_trace.jsonl").read_text().splitlines()]
+    assert any(row.get("event") == "invalid_final_json" for row in trace)
+
+
+def test_agent_loop_accepts_object_tool_arguments_from_compatible_providers():
+    assert parse_arguments_json({"pages": [1, 2], "reason": "check"}) == {
+        "pages": [1, 2],
+        "reason": "check",
+    }
+
+
 def test_json_schema_parser_fills_nullable_required_defaults():
     data = parse_json_text_for_schema(
         '{"items": ["a"]}',
@@ -1720,6 +1816,40 @@ def test_json_schema_parser_fills_nullable_required_defaults():
     )
 
     assert data == {"items": ["a"], "optional_note": None}
+
+
+def test_json_schema_parser_selects_matching_candidate_after_schema_echo():
+    text = """
+    The schema is:
+    ```json
+    {"type":"object","required":["answer"],"properties":{"answer":{"type":"string"}}}
+    ```
+    The answer is:
+    ```json
+    {"answer":"grounded result","confidence":"high"}
+    ```
+    """
+
+    data = parse_json_text_for_schema(
+        text,
+        "schema_echo_test",
+        {
+            "type": "object",
+            "required": ["answer", "confidence"],
+            "properties": {
+                "answer": {"type": "string"},
+                "confidence": {"type": "string"},
+            },
+        },
+    )
+
+    assert data == {"answer": "grounded result", "confidence": "high"}
+
+
+def test_json_parser_finds_later_json_object_after_inline_braces():
+    text = "Use `{not json}` as prose, then return {\"ok\": true, \"page_seen\": 3}"
+
+    assert parse_json_text(text) == {"ok": True, "page_seen": 3}
 
 
 def test_library_ask_prompt_keeps_source_grounding():

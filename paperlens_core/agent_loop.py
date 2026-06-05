@@ -356,7 +356,31 @@ class AgentLoop:
             trace.append(trace_row)
             self._append_trace(trace_row)
             if turn["action"] == "final":
-                final = parse_final_json(turn["final_json"], self.final_schema_name)
+                try:
+                    final = parse_final_json(turn["final_json"], self.final_schema_name)
+                except Exception as exc:
+                    observation = {
+                        "ok": False,
+                        "error": (
+                            f"The model selected final, but final_json was missing or invalid for "
+                            f"{self.final_schema_name}: {exc}. Return action='final' with final_json "
+                            "as one valid JSON object matching final_schema."
+                        ),
+                        "message": compact_text(turn["message"], limit=700),
+                        "final_json_preview": compact_text(turn["final_json"], limit=700),
+                    }
+                    row = {
+                        "event": "invalid_final_json",
+                        "session": self.session_name,
+                        "stage": self.stage,
+                        "paper_id": self.paper_id,
+                        "step": step,
+                        "observation": observation,
+                    }
+                    trace.append(row)
+                    self._append_trace(row)
+                    observations.append(observation)
+                    continue
                 return AgentLoopResult(
                     final=final,
                     trace=trace,
@@ -444,14 +468,15 @@ class AgentLoop:
 def normalize_agent_turn(raw: LlmJsonResult) -> dict[str, Any]:
     data = raw.data if isinstance(raw.data, dict) else {}
     action = str(data.get("action") or "").strip()
+    final_json = json_text_value(data.get("final_json"))
     if action not in {"tool_request", "final"}:
-        action = "final" if str(data.get("final_json") or "").strip() else "tool_request"
+        action = "final" if final_json else "tool_request"
     requests = data.get("tool_requests") if isinstance(data.get("tool_requests"), list) else []
     return {
         "action": action,
         "message": str(data.get("message") or "").strip(),
         "tool_requests": [item for item in requests if isinstance(item, dict)],
-        "final_json": str(data.get("final_json") or "").strip(),
+        "final_json": final_json,
     }
 
 
@@ -461,12 +486,22 @@ def parse_final_json(text: str, schema_name: str) -> dict[str, Any]:
     return parse_json_text(text)
 
 
-def parse_arguments_json(text: str) -> dict[str, Any]:
+def parse_arguments_json(text: Any) -> dict[str, Any]:
+    if isinstance(text, dict):
+        return text
     try:
-        parsed = parse_json_text(text)
+        parsed = parse_json_text(json_text_value(text))
     except Exception:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def json_text_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value or "").strip()
 
 
 def positive_int(value: Any, *, default: int) -> int:
