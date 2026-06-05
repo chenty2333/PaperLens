@@ -1,0 +1,562 @@
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+from typing import Any
+
+from paperlens_core.dom import PaperDOM
+from paperlens_core.graph import ClaimGraph, GraphNode
+from paperlens_core.runtime import ArtifactEnvelope
+
+
+GRAPH_LIBRARY_SUMMARY_SCHEMA_VERSION = "paperlens.graph_library_summary.v1"
+
+GRAPH_LIBRARY_NODE_KINDS = [
+    "problem",
+    "claim",
+    "mechanism",
+    "implementation",
+    "evaluation",
+    "result",
+    "limitation",
+    "concept",
+]
+
+METHOD_NODE_KINDS = {"mechanism", "implementation", "concept"}
+CLAIM_NODE_KINDS = {"claim", "problem"}
+EVALUATION_NODE_KINDS = {"evaluation", "result"}
+RELATION_TERMS = {
+    "related",
+    "baseline",
+    "compared",
+    "comparison",
+    "prior",
+    "previous",
+    "vs",
+    "versus",
+    "improves over",
+    "outperforms",
+}
+METRIC_TERMS = {
+    "accuracy",
+    "latency",
+    "throughput",
+    "speedup",
+    "memory",
+    "cost",
+    "runtime",
+    "f1",
+    "auc",
+    "recall",
+    "precision",
+}
+
+
+def read_core_v2_graph_summary(output_dir: Path, paper_id: str) -> dict[str, Any]:
+    root = output_dir / ".paperlens" / "data" / "core" / "v2" / paper_id
+    dom_path = root / "paper_dom.v1.json"
+    graph_path = root / "claim_graph.v1.json"
+    if not dom_path.exists() or not graph_path.exists():
+        return {}
+    dom_payload = read_envelope_data(dom_path, expected_type="paper_dom")
+    graph_payload = read_envelope_data(graph_path, expected_type="claim_graph")
+    if not isinstance(dom_payload, dict) or not isinstance(graph_payload, dict):
+        return {}
+    dom = PaperDOM.model_validate(dom_payload)
+    graph = ClaimGraph.model_validate(graph_payload)
+    quality = read_optional_envelope_data(root / "quality_metrics.v1.json", "core_quality_metrics")
+    memory_view = read_optional_envelope_data(
+        root / "paper_memory_view.v1.json", "paper_memory_view"
+    )
+    return summarize_claim_graph_for_library(
+        dom=dom,
+        graph=graph,
+        quality=quality if isinstance(quality, dict) else {},
+        memory_view=memory_view if isinstance(memory_view, dict) else {},
+        root=root,
+    )
+
+
+def summarize_claim_graph_for_library(
+    *,
+    dom: PaperDOM,
+    graph: ClaimGraph,
+    quality: dict[str, Any],
+    memory_view: dict[str, Any],
+    root: Path,
+) -> dict[str, Any]:
+    source_index = core_v2_source_index(dom)
+    nodes_by_kind = {
+        kind: [
+            summarize_graph_node(node, graph=graph, source_index=source_index)
+            for node in graph.nodes.values()
+            if node.kind == kind
+        ]
+        for kind in GRAPH_LIBRARY_NODE_KINDS
+    }
+    method_nodes = [item for kind in METHOD_NODE_KINDS for item in nodes_by_kind.get(kind, [])]
+    claim_nodes = [item for kind in CLAIM_NODE_KINDS for item in nodes_by_kind.get(kind, [])]
+    evaluation_nodes = [
+        item for kind in EVALUATION_NODE_KINDS for item in nodes_by_kind.get(kind, [])
+    ]
+    evidence_text = " ".join(
+        json.dumps(item.get("evidence_samples", []), ensure_ascii=False)
+        for item in [*method_nodes, *claim_nodes, *evaluation_nodes]
+    )
+    metadata = dict_value(memory_view.get("metadata"))
+    return {
+        "schema_version": GRAPH_LIBRARY_SUMMARY_SCHEMA_VERSION,
+        "paper_id": dom.paper_id,
+        "metadata": {
+            "title": metadata.get("title") or dom.title,
+            "year": metadata.get("year"),
+            "grade": metadata.get("grade"),
+        },
+        "source": {
+            "paper_dom": relative_core_path(root / "paper_dom.v1.json"),
+            "claim_graph": relative_core_path(root / "claim_graph.v1.json"),
+            "quality_metrics": relative_core_path(root / "quality_metrics.v1.json"),
+            "paper_memory_view": relative_core_path(root / "paper_memory_view.v1.json"),
+        },
+        "quality": {
+            "publish_status": quality.get("publish_status") or memory_view.get("report_readiness"),
+            "evidence_coverage": quality.get("evidence_coverage"),
+            "fact_node_count": quality.get("fact_node_count"),
+            "supported_fact_node_count": quality.get("supported_fact_node_count"),
+            "audit_error_count": quality.get("audit_error_count"),
+            "audit_warning_count": quality.get("audit_warning_count"),
+        },
+        "node_counts": {
+            kind: len([node for node in graph.nodes.values() if node.kind == kind])
+            for kind in [*GRAPH_LIBRARY_NODE_KINDS, "evidence"]
+        },
+        "problem_nodes": nodes_by_kind.get("problem", [])[:6],
+        "claim_nodes": nodes_by_kind.get("claim", [])[:10],
+        "method_family": compact_labels(method_nodes, limit=8),
+        "mechanism_nodes": nodes_by_kind.get("mechanism", [])[:8],
+        "implementation_nodes": nodes_by_kind.get("implementation", [])[:6],
+        "evaluation_nodes": nodes_by_kind.get("evaluation", [])[:8],
+        "result_nodes": nodes_by_kind.get("result", [])[:8],
+        "limitation_nodes": nodes_by_kind.get("limitation", [])[:8],
+        "concept_nodes": nodes_by_kind.get("concept", [])[:8],
+        "evaluation_datasets": extract_dataset_terms(
+            " ".join([item["label"] for item in evaluation_nodes]) + " " + evidence_text
+        )[:12],
+        "evaluation_metrics": extract_metric_terms(
+            " ".join([item["label"] for item in evaluation_nodes]) + " " + evidence_text
+        )[:12],
+        "relations": relation_nodes([*claim_nodes, *method_nodes, *evaluation_nodes])[:8],
+    }
+
+
+def summarize_graph_node(
+    node: GraphNode,
+    *,
+    graph: ClaimGraph,
+    source_index: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    evidence_ids = graph.evidence_ids_for(node.node_id)
+    source_ids = []
+    pages = []
+    evidence_samples = []
+    for evidence_id in evidence_ids:
+        evidence_node = graph.nodes.get(evidence_id)
+        source_id = str((evidence_node.payload if evidence_node else {}).get("source_id") or "")
+        source = source_index.get(source_id)
+        if not source:
+            continue
+        source_ids.append(source_id)
+        page_no = source.get("page_no")
+        if isinstance(page_no, int) and page_no not in pages:
+            pages.append(page_no)
+        evidence_samples.append(
+            {
+                "source_id": source_id,
+                "page_no": page_no,
+                "text": source.get("text") or source.get("caption") or source.get("equation") or "",
+            }
+        )
+    return {
+        "node_id": node.node_id,
+        "kind": node.kind,
+        "label": compact_text(node.label, max_chars=420),
+        "confidence": node.payload.get("confidence"),
+        "provenance": node.payload.get("provenance"),
+        "uncertainty": node.payload.get("uncertainty"),
+        "evidence_ids": evidence_ids[:8],
+        "source_ids": source_ids[:8],
+        "pages": pages[:8],
+        "evidence_samples": evidence_samples[:3],
+    }
+
+
+def build_graph_summary_search_text(summary: dict[str, Any]) -> str:
+    if not summary:
+        return ""
+    parts = [
+        json.dumps(summary.get("metadata", {}), ensure_ascii=False),
+        json.dumps(summary.get("method_family", []), ensure_ascii=False),
+        json.dumps(summary.get("evaluation_datasets", []), ensure_ascii=False),
+        json.dumps(summary.get("evaluation_metrics", []), ensure_ascii=False),
+        json.dumps(summary.get("relations", []), ensure_ascii=False),
+    ]
+    for key in [
+        "problem_nodes",
+        "claim_nodes",
+        "mechanism_nodes",
+        "implementation_nodes",
+        "evaluation_nodes",
+        "result_nodes",
+        "limitation_nodes",
+        "concept_nodes",
+    ]:
+        for item in list_payload(summary.get(key)):
+            parts.append(str(item.get("label") or ""))
+            parts.extend(
+                str(source.get("text") or "")
+                for source in list_payload(item.get("evidence_samples"))
+            )
+    return "\n".join(part for part in parts if part)
+
+
+def first_graph_label(summary: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        for node in list_payload(summary.get(key)):
+            label = string_or_empty(node.get("label"))
+            if label:
+                return label
+    return ""
+
+
+def graph_node_labels(summary: dict[str, Any], *keys: str) -> list[str]:
+    labels = []
+    for key in keys:
+        for node in list_payload(summary.get(key)):
+            label = compact_text(node.get("label"), max_chars=280)
+            if label and label not in labels:
+                labels.append(label)
+            if len(labels) >= 10:
+                return labels
+    return labels
+
+
+def normalize_graph_claims(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    claims = []
+    for node in [
+        *list_payload(summary.get("claim_nodes")),
+        *list_payload(summary.get("problem_nodes")),
+    ]:
+        label = string_or_empty(node.get("label"))
+        if not label:
+            continue
+        claims.append(
+            {
+                "claim": label,
+                "confidence": string_or_empty(node.get("confidence")) or "medium",
+                "evidence_pages": [page for page in node.get("pages", []) if isinstance(page, int)][
+                    :8
+                ],
+                "node_id": string_or_empty(node.get("node_id")),
+                "source_ids": [
+                    source_id
+                    for source_id in node.get("source_ids", [])
+                    if isinstance(source_id, str)
+                ][:8],
+            }
+        )
+        if len(claims) >= 12:
+            break
+    return claims
+
+
+def normalize_graph_concepts(summary: dict[str, Any]) -> list[dict[str, str]]:
+    concepts = []
+    for label in dict.fromkeys(summary.get("method_family", []) or []):
+        text = string_or_empty(label)
+        if not text:
+            continue
+        concepts.append({"term": compact_text(text, max_chars=80), "explanation": text})
+        if len(concepts) >= 8:
+            break
+    return concepts
+
+
+def normalize_graph_evidence(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    evidence = []
+    for node in graph_summary_nodes(summary):
+        label = string_or_empty(node.get("label"))
+        for sample in list_payload(node.get("evidence_samples")):
+            source_id = string_or_empty(sample.get("source_id"))
+            quote = string_or_none(sample.get("text"))
+            if not source_id:
+                continue
+            evidence.append(
+                {
+                    "page_no": int_or_none(sample.get("page_no")),
+                    "claim": label,
+                    "quote": quote,
+                    "source_id": source_id,
+                    "node_id": string_or_empty(node.get("node_id")),
+                }
+            )
+            if len(evidence) >= 12:
+                return evidence
+    return evidence
+
+
+def graph_provenance(summary: dict[str, Any]) -> dict[str, Any]:
+    if not summary:
+        return {}
+    node_ids = []
+    source_ids = []
+    for node in graph_summary_nodes(summary):
+        node_id = string_or_empty(node.get("node_id"))
+        if node_id and node_id not in node_ids:
+            node_ids.append(node_id)
+        for source_id in (
+            node.get("source_ids", []) if isinstance(node.get("source_ids"), list) else []
+        ):
+            source_text = string_or_empty(source_id)
+            if source_text and source_text not in source_ids:
+                source_ids.append(source_text)
+    return {
+        "paths": dict_value(summary.get("source")),
+        "node_ids": node_ids[:32],
+        "source_ids": source_ids[:48],
+        "publish_status": dict_value(summary.get("quality")).get("publish_status"),
+    }
+
+
+def graph_summary_tags(summary: dict[str, Any]) -> list[str]:
+    if not summary:
+        return []
+    text = " ".join(
+        [
+            " ".join(string_or_empty(item) for item in summary.get("method_family", []) or []),
+            " ".join(
+                string_or_empty(item) for item in summary.get("evaluation_datasets", []) or []
+            ),
+            " ".join(string_or_empty(item) for item in summary.get("evaluation_metrics", []) or []),
+        ]
+    )
+    return [token for token in tokenize_for_search(text) if not token.isdigit()][:10]
+
+
+def compact_graph_summary_for_index(value: Any) -> dict[str, Any]:
+    summary = dict_value(value)
+    if not summary:
+        return {}
+    return {
+        "schema_version": summary.get("schema_version"),
+        "quality": dict_value(summary.get("quality")),
+        "node_counts": dict_value(summary.get("node_counts")),
+        "method_family": (summary.get("method_family") or [])[:6]
+        if isinstance(summary.get("method_family"), list)
+        else [],
+        "evaluation_datasets": (summary.get("evaluation_datasets") or [])[:8]
+        if isinstance(summary.get("evaluation_datasets"), list)
+        else [],
+        "evaluation_metrics": (summary.get("evaluation_metrics") or [])[:8]
+        if isinstance(summary.get("evaluation_metrics"), list)
+        else [],
+    }
+
+
+def compact_graph_summary_for_agent(value: Any) -> dict[str, Any]:
+    summary = dict_value(value)
+    if not summary:
+        return {}
+    return {
+        **compact_graph_summary_for_index(summary),
+        "problem_nodes": compact_graph_nodes(summary.get("problem_nodes")),
+        "claim_nodes": compact_graph_nodes(summary.get("claim_nodes")),
+        "mechanism_nodes": compact_graph_nodes(summary.get("mechanism_nodes")),
+        "evaluation_nodes": compact_graph_nodes(summary.get("evaluation_nodes")),
+        "result_nodes": compact_graph_nodes(summary.get("result_nodes")),
+        "limitation_nodes": compact_graph_nodes(summary.get("limitation_nodes")),
+        "relations": summary.get("relations", [])[:8]
+        if isinstance(summary.get("relations"), list)
+        else [],
+    }
+
+
+def compact_graph_nodes(value: Any) -> list[dict[str, Any]]:
+    nodes = []
+    for node in list_payload(value)[:8]:
+        nodes.append(
+            {
+                "node_id": node.get("node_id"),
+                "kind": node.get("kind"),
+                "label": compact_text(node.get("label"), max_chars=260),
+                "source_ids": node.get("source_ids", [])[:6]
+                if isinstance(node.get("source_ids"), list)
+                else [],
+                "pages": node.get("pages", [])[:6] if isinstance(node.get("pages"), list) else [],
+            }
+        )
+    return nodes
+
+
+def graph_summary_nodes(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    nodes = []
+    for key in [
+        "problem_nodes",
+        "claim_nodes",
+        "mechanism_nodes",
+        "implementation_nodes",
+        "evaluation_nodes",
+        "result_nodes",
+        "limitation_nodes",
+        "concept_nodes",
+    ]:
+        nodes.extend(list_payload(summary.get(key)))
+    return nodes
+
+
+def core_v2_source_index(dom: PaperDOM) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for span in dom.spans:
+        result[span.source_id] = {
+            "source_id": span.source_id,
+            "kind": span.kind,
+            "page_no": span.page_no,
+            "section_id": span.section_id,
+            "text": compact_text(span.text, max_chars=1000),
+        }
+    for figure in dom.figures:
+        result[figure.source_id] = {
+            "source_id": figure.source_id,
+            "kind": figure.kind,
+            "page_no": figure.page_no,
+            "caption": compact_text(figure.caption or "", max_chars=800),
+        }
+    for table in dom.tables:
+        result[table.source_id] = {
+            "source_id": table.source_id,
+            "kind": table.kind,
+            "page_no": table.page_no,
+            "caption": compact_text(table.caption or "", max_chars=800),
+        }
+    for equation in dom.equations:
+        result[equation.source_id] = {
+            "source_id": equation.source_id,
+            "kind": equation.kind,
+            "page_no": equation.page_no,
+            "equation": compact_text(equation.latex_or_text, max_chars=800),
+        }
+    return result
+
+
+def read_envelope_data(path: Path, *, expected_type: str) -> dict[str, Any] | list[Any]:
+    envelope = ArtifactEnvelope.model_validate_json(path.read_text(encoding="utf-8"))
+    return envelope.require_type(expected_type).data
+
+
+def read_optional_envelope_data(path: Path, expected_type: str) -> dict[str, Any] | list[Any]:
+    if not path.exists():
+        return {}
+    try:
+        return read_envelope_data(path, expected_type=expected_type)
+    except Exception:
+        return {}
+
+
+def compact_labels(nodes: list[dict[str, Any]], *, limit: int) -> list[str]:
+    labels = []
+    for node in nodes:
+        label = compact_text(node.get("label"), max_chars=220)
+        if label and label not in labels:
+            labels.append(label)
+        if len(labels) >= limit:
+            break
+    return labels
+
+
+def relation_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result = []
+    for node in nodes:
+        label = str(node.get("label") or "")
+        lowered = label.lower()
+        if not any(term in lowered for term in RELATION_TERMS):
+            continue
+        result.append(
+            {
+                "node_id": node.get("node_id"),
+                "label": compact_text(label, max_chars=260),
+                "source_ids": node.get("source_ids", [])[:6],
+                "pages": node.get("pages", [])[:6],
+            }
+        )
+    return result
+
+
+def extract_dataset_terms(text: str) -> list[str]:
+    terms = []
+    for pattern in [
+        r"\bDataset[-_ ][A-Za-z0-9_.-]+\b",
+        r"\b[A-Z][A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)+\b",
+        r"\bon\s+([A-Z][A-Za-z0-9_.-]{2,})\b",
+    ]:
+        for match in re.finditer(pattern, text):
+            value = match.group(1) if match.groups() else match.group(0)
+            add_unique(terms, value.strip())
+    return terms
+
+
+def extract_metric_terms(text: str) -> list[str]:
+    lowered = text.lower()
+    terms = [term for term in METRIC_TERMS if term in lowered]
+    for match in re.finditer(r"\b\d+(?:\.\d+)?%?\b", text):
+        add_unique(terms, match.group(0))
+    return terms
+
+
+def relative_core_path(path: Path) -> str:
+    parts = path.parts
+    if ".paperlens" not in parts:
+        return str(path)
+    index = parts.index(".paperlens")
+    return "/".join(parts[index:])
+
+
+def compact_text(value: Any, *, max_chars: int) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 1)].rstrip() + "..."
+
+
+def add_unique(target: list[str], value: str) -> None:
+    if value and value not in target:
+        target.append(value)
+
+
+def tokenize_for_search(text: Any) -> list[str]:
+    normalized = re.sub(r"\s+", " ", str(text or "").lower()).strip()
+    return re.findall(r"[a-z0-9_+.-]{2,}|[\u4e00-\u9fff]{2,}", normalized)
+
+
+def string_or_none(value: Any) -> str | None:
+    text = string_or_empty(value)
+    return text or None
+
+
+def string_or_empty(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def int_or_none(value: Any) -> int | None:
+    try:
+        integer = int(value)
+    except (TypeError, ValueError):
+        return None
+    return integer if integer > 0 else None
+
+
+def dict_value(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def list_payload(value: Any) -> list[dict[str, Any]]:
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []

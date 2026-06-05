@@ -13,6 +13,12 @@ from paperlens_core.audit import (
 )
 from paperlens_core.dom import build_paper_dom_from_layout
 from paperlens_core.graph import graph_from_observations
+from paperlens_core.library import (
+    doctor_library,
+    rebuild_library_from_output,
+    read_library_records,
+    search_library,
+)
 from paperlens_core.memory import materialize_paper_memory
 from paperlens_core.qa import answer_question, load_core_v2_qa_context
 from paperlens_core.reading import (
@@ -607,6 +613,49 @@ def test_core_v2_qa_reads_claim_graph_without_final_markdown_report(tmp_path):
     assert answer["cited_pages"] == [1]
     assert "ClaimGraph" in answer["answer_markdown"]
     assert answer["source_attribution"]["paper_claims"]
+
+
+def test_library_rebuild_indexes_core_v2_claim_graph_without_memory_v3(tmp_path):
+    output_dir = tmp_path / "out"
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    write_core_v2_artifacts(
+        data_dir=output_dir / ".paperlens" / "data",
+        paper=paper,
+        layout={
+            "pages": [
+                {
+                    "page_no": 1,
+                    "text": "Abstract\n\nWe propose a block table method for faster serving.",
+                    "section_candidates": [{"title": "Abstract", "level": 1}],
+                }
+            ]
+        },
+    )
+
+    written = rebuild_library_from_output(output_dir)
+    records = read_library_records(output_dir)
+    result = search_library(output_dir=output_dir, query="block table faster serving", limit=3)
+    index = json.loads(
+        (output_dir / ".paperlens" / "library" / "index" / "search_index.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert any(path.name == "library_records.jsonl" for path in written)
+    assert records[0]["paper_id"] == "p_test"
+    assert records[0]["graph_summary"]["schema_version"] == "paperlens.graph_library_summary.v1"
+    assert records[0]["memory"]["claims"]
+    assert records[0]["provenance"]["core_v2"]["source_ids"]
+    assert records[0]["quality"]["graph_publish_status"] == PublishStatus.DRAFT_WEAK
+    assert result["matches"][0]["paper"]["paper_id"] == "p_test"
+    assert index["records"][0]["graph"]["node_counts"]["claim"] >= 1
+    assert doctor_library(output_dir)["status"] == "PASS"
 
 
 def test_stage07_runs_core_v2_observation_read_before_legacy_rolling(tmp_path, monkeypatch):
