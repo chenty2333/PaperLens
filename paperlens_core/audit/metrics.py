@@ -3,7 +3,12 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 from paperlens_core.audit.findings import AuditFinding
-from paperlens_core.audit.suite import FACT_NODE_KINDS, contains_number, publish_status_from_findings
+from paperlens_core.audit.suite import (
+    FACT_NODE_KINDS,
+    contains_number,
+    extracted_number_texts,
+    publish_status_from_findings,
+)
 from paperlens_core.dom.paper_dom import PaperDOM
 from paperlens_core.graph.claim_graph import ClaimGraph
 
@@ -17,6 +22,9 @@ class CoreQualityMetrics(BaseModel):
     numeric_fact_node_count: int
     number_not_located_count: int
     numeric_locatable_rate: float
+    extracted_number_count: int
+    extracted_number_not_located_count: int
+    extracted_number_locatable_rate: float
     unsupported_fact_node_count: int
     unsupported_fact_node_rate: float
     missing_source_count: int
@@ -41,6 +49,16 @@ def compute_core_quality_metrics(
     number_not_located = [
         finding for finding in findings if finding.code == "number_not_located_in_source"
     ]
+    extracted_numbers = [
+        number
+        for node in fact_nodes
+        for number in extracted_number_texts(node.payload.get("extracted_numbers"))
+    ]
+    extracted_numbers_not_located = [
+        finding
+        for finding in findings
+        if finding.code == "extracted_number_not_located_in_source"
+    ]
     missing_sources = [finding for finding in findings if finding.code == "missing_dom_source"]
     errors = [finding for finding in findings if finding.severity == "ERROR"]
     warnings = [finding for finding in findings if finding.severity == "WARNING"]
@@ -54,6 +72,13 @@ def compute_core_quality_metrics(
         numeric_locatable_rate=metric_rate(
             len(numeric_fact_nodes) - len(number_not_located),
             len(numeric_fact_nodes),
+            default=1.0,
+        ),
+        extracted_number_count=len(extracted_numbers),
+        extracted_number_not_located_count=len(extracted_numbers_not_located),
+        extracted_number_locatable_rate=metric_rate(
+            len(extracted_numbers) - len(extracted_numbers_not_located),
+            len(extracted_numbers),
             default=1.0,
         ),
         unsupported_fact_node_count=len(unsupported_fact_nodes),

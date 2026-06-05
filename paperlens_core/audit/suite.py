@@ -200,6 +200,33 @@ def audit_claim_graph(graph: ClaimGraph, dom: PaperDOM) -> list[AuditFinding]:
                         source_ids=source_ids,
                     )
                 )
+        if node.kind in FACT_NODE_KINDS:
+            source_ids = fact_node_source_ids(graph, node.node_id)
+            source_texts = [
+                text
+                for source_id in source_ids
+                if (text := source_text_for_id(dom, source_id))
+            ]
+            for number_text in extracted_number_texts(node.payload.get("extracted_numbers")):
+                if source_texts and not any(
+                    number_text_is_located(number_text, source_text) for source_text in source_texts
+                ):
+                    findings.append(
+                        AuditFinding(
+                            finding_id=(
+                                "extracted_number_not_located:"
+                                f"{node.node_id}:{normalized_number_text(number_text)}"
+                            ),
+                            severity=AuditSeverity.WARNING,
+                            code="extracted_number_not_located_in_source",
+                            message=(
+                                "Extracted numeric value is not visibly located in the "
+                                "declared PaperDOM evidence source text"
+                            ),
+                            node_id=node.node_id,
+                            source_ids=source_ids,
+                        )
+                    )
     return findings
 
 
@@ -248,3 +275,26 @@ def source_text_for_id(dom: PaperDOM, source_id: str) -> str:
 
 def source_text_contains_number(dom: PaperDOM, source_id: str) -> bool:
     return contains_number(source_text_for_id(dom, source_id))
+
+
+def extracted_number_texts(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "").strip()
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+def number_text_is_located(number_text: str, source_text: str) -> bool:
+    needle = normalized_number_text(number_text)
+    haystack = normalized_number_text(source_text)
+    return bool(needle and needle in haystack)
+
+
+def normalized_number_text(text: str) -> str:
+    return re.sub(r"[\s,]+", "", str(text or "").casefold())

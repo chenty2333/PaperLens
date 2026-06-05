@@ -93,6 +93,13 @@ def build_paper_quality_snapshot(
             numeric_fact_node_count,
             default=1.0,
         ),
+        "extracted_number_count": int_value(core_metrics.get("extracted_number_count")),
+        "extracted_number_not_located_count": int_value(
+            core_metrics.get("extracted_number_not_located_count")
+        ),
+        "extracted_number_locatable_rate": float_or_none(
+            core_metrics.get("extracted_number_locatable_rate")
+        ),
         "unsupported_fact_node_count": unsupported_fact_node_count,
         "unsupported_fact_node_rate": rate(
             unsupported_fact_node_count,
@@ -132,6 +139,9 @@ def aggregate_quality(
         "draft_weak_paper_count": len(draft_weak),
         "average_evidence_coverage": average_metric(papers, "evidence_coverage"),
         "average_numeric_locatable_rate": average_metric(papers, "numeric_locatable_rate"),
+        "average_extracted_number_locatable_rate": average_metric(
+            papers, "extracted_number_locatable_rate"
+        ),
         "average_unsupported_fact_node_rate": average_metric(papers, "unsupported_fact_node_rate"),
         "average_unsupported_report_paragraph_rate": average_metric(
             papers, "unsupported_report_paragraph_rate"

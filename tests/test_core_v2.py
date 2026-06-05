@@ -523,6 +523,9 @@ def test_claim_graph_memory_and_audit_flow_from_observations():
     assert metrics.numeric_fact_node_count == 1
     assert metrics.number_not_located_count == 0
     assert metrics.numeric_locatable_rate == 1.0
+    assert metrics.extracted_number_count == 1
+    assert metrics.extracted_number_not_located_count == 0
+    assert metrics.extracted_number_locatable_rate == 1.0
     assert metrics.unsupported_fact_node_count == 0
     assert metrics.unsupported_fact_node_rate == 0.0
     assert metrics.publish_status == PublishStatus.REVIEWED
@@ -809,6 +812,34 @@ def test_audit_blocks_fact_text_unrelated_to_declared_source():
     assert metrics.number_not_located_count == 1
     assert metrics.numeric_locatable_rate == 0.0
     assert publish_status_from_findings(findings) == PublishStatus.BLOCKED
+
+
+def test_audit_flags_extracted_numbers_not_located_in_declared_sources():
+    dom = sample_dom()
+    result_span = next(span for span in dom.spans if "27%" in span.text)
+    observation = ObservationCard(
+        observation_id="obs_result",
+        paper_id="p_test",
+        task_id="read_06_result_extraction",
+        observation_type=ObservationType.RESULT,
+        statement="The method improves latency by 27% on Dataset-A.",
+        source_ids=[result_span.source_id],
+        confidence="high",
+        extracted_numbers=[{"text": "99%"}],
+    )
+
+    graph = graph_from_observations("p_test", [observation])
+    findings = audit_claim_graph(graph, dom)
+    metrics = compute_core_quality_metrics(dom=dom, graph=graph, findings=findings)
+
+    assert {finding.code for finding in findings} >= {
+        "extracted_number_not_located_in_source"
+    }
+    assert "number_not_located_in_source" not in {finding.code for finding in findings}
+    assert metrics.extracted_number_count == 1
+    assert metrics.extracted_number_not_located_count == 1
+    assert metrics.extracted_number_locatable_rate == 0.0
+    assert publish_status_from_findings(findings) == PublishStatus.REVIEWED_WITH_LIMITS
 
 
 def test_audit_blocks_dangling_claim_graph_edges():
@@ -2761,6 +2792,9 @@ def test_core_quality_snapshot_tracks_structural_and_qa_metrics(tmp_path):
     assert paper_snapshot["evidence_coverage"] == 1.0
     assert paper_snapshot["numeric_fact_node_count"] >= 1
     assert paper_snapshot["numeric_locatable_rate"] == 1.0
+    assert "extracted_number_count" in paper_snapshot
+    assert "extracted_number_not_located_count" in paper_snapshot
+    assert "extracted_number_locatable_rate" in paper_snapshot
     assert paper_snapshot["unsupported_fact_node_rate"] == 0.0
     assert paper_snapshot["qa"]["total"] == 3
     assert paper_snapshot["qa"]["graph_hit_count"] == 1
@@ -2772,6 +2806,7 @@ def test_core_quality_snapshot_tracks_structural_and_qa_metrics(tmp_path):
     assert snapshot["aggregate"]["qa_graph_hit_count"] == 1
     assert snapshot["aggregate"]["qa_graph_context_selected_count"] == 2
     assert snapshot["aggregate"]["qa_cache_hit_rate"] == 0.3333
+    assert "average_extracted_number_locatable_rate" in snapshot["aggregate"]
 
 
 def test_stage17_manifest_includes_core_quality_snapshot(tmp_path):
