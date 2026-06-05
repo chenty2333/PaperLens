@@ -1,0 +1,239 @@
+from __future__ import annotations
+
+import json
+import os
+import re
+from pathlib import Path
+from typing import Any
+
+
+def validate_paperlens_output(
+    output_dir: Path,
+    *,
+    expected_report_names: set[str] | None = None,
+    expected_paper_ids: set[str] | None = None,
+) -> dict[str, Any]:
+    main_report = output_dir / "PaperLens.md"
+    library_records_path = output_dir / ".paperlens" / "library" / "library_records.jsonl"
+    memory_v3_dir = output_dir / ".paperlens" / "data" / "memory" / "v3"
+    search_index_path = output_dir / ".paperlens" / "library" / "index" / "search_index.json"
+    issues = []
+    checked_links = 0
+    fallback_markers = [
+        "Model final-report generation failed",
+        "report_generation_failed",
+        "deterministic fallback",
+        "This report used a deterministic fallback",
+    ]
+    render_markers = ["\\r\\n", "\\n"]
+    reader_hostile_markers = [
+        "supplied excerpts",
+        "the user provided",
+        "你给到",
+        "供给的片段",
+        "供给的图示",
+        "提供的页面",
+        "提供的材料",
+        "提供的证据",
+    ]
+    if not main_report.exists():
+        issues.append("PaperLens.md is missing")
+    elif not main_report.read_text(encoding="utf-8").strip():
+        issues.append("PaperLens.md is empty")
+    else:
+        markdown = main_report.read_text(encoding="utf-8")
+        for marker in fallback_markers:
+            if marker in markdown:
+                issues.append(f"Fallback report marker in PaperLens.md: {marker}")
+        for marker in render_markers:
+            if marker in markdown:
+                issues.append(f"Escaped newline marker in PaperLens.md: {marker}")
+        for target in local_markdown_link_targets(markdown):
+            checked_links += 1
+            target_path = resolve_markdown_target(output_dir, target)
+            if target_path is None:
+                continue
+            if not target_path.exists():
+                issues.append(f"Missing link target: {target}")
+            elif target_path.is_file() and not target_path.read_text(encoding="utf-8").strip():
+                issues.append(f"Empty link target: {target}")
+    if not library_records_path.exists():
+        issues.append(".paperlens/library/library_records.jsonl is missing")
+    elif not library_records_path.read_text(encoding="utf-8").strip():
+        issues.append(".paperlens/library/library_records.jsonl is empty")
+    if not search_index_path.exists():
+        issues.append(".paperlens/library/index/search_index.json is missing")
+    papers_dir = output_dir / "papers"
+    all_paper_report_files = sorted(papers_dir.glob("*.md")) if papers_dir.exists() else []
+    if expected_report_names is not None:
+        existing_names = {report.name for report in all_paper_report_files}
+        for missing_name in sorted(expected_report_names - existing_names):
+            issues.append(f"Missing expected paper report: papers/{missing_name}")
+    paper_reports = (
+        [report for report in all_paper_report_files if report.name in expected_report_names]
+        if expected_report_names is not None
+        else list(all_paper_report_files)
+    )
+    if not paper_reports:
+        issues.append("No per-paper Markdown reports were written")
+    empty_reports = [
+        report.name for report in paper_reports if not report.read_text(encoding="utf-8").strip()
+    ]
+    for report in empty_reports:
+        issues.append(f"Empty paper report: papers/{report}")
+    for report in paper_reports:
+        text = report.read_text(encoding="utf-8")
+        if ".paperlens/pages/" in text or ".paperlens\\pages\\" in text:
+            issues.append(f"Full-page render embedded in papers/{report.name}")
+        for marker in reader_hostile_markers:
+            if marker in text:
+                issues.append(
+                    f"Reader-hostile implementation wording in papers/{report.name}: {marker}"
+                )
+                break
+        for marker in fallback_markers:
+            if marker in text:
+                issues.append(f"Fallback report marker in papers/{report.name}: {marker}")
+                break
+        for marker in render_markers:
+            if marker in text:
+                issues.append(f"Escaped newline marker in papers/{report.name}: {marker}")
+                break
+    memory_v3_files = (
+        sorted(memory_v3_dir.glob("*.paper_memory.v3.json")) if memory_v3_dir.exists() else []
+    )
+    if expected_paper_ids is not None:
+        expected_memory_names = {
+            f"{paper_id}.paper_memory.v3.json" for paper_id in expected_paper_ids
+        }
+        memory_v3_files = [
+            memory_file
+            for memory_file in memory_v3_files
+            if memory_file.name in expected_memory_names
+        ]
+    if paper_reports and len(memory_v3_files) < len(paper_reports):
+        issues.append("PaperMemoryV3 file count is lower than paper report count")
+    result = {
+        "status": "PASS" if not issues else "FAIL",
+        "checked_links": checked_links,
+        "paper_reports": len(paper_reports),
+        "paper_report_files": len(all_paper_report_files),
+        "library_records": library_records_path.exists(),
+        "paper_memory_v3": len(memory_v3_files),
+        "issues": issues,
+    }
+    if issues:
+        raise RuntimeError("Output validation failed: " + "; ".join(issues[:5]))
+    return result
+
+
+def summarize_model_calls(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"calls": 0, "by_status": {}, "by_stage": {}, "by_schema": {}, "maxima": {}}
+    rows: list[dict[str, Any]] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    by_status: dict[str, int] = {}
+    by_stage: dict[str, dict[str, Any]] = {}
+    by_schema: dict[str, dict[str, Any]] = {}
+    maxima = {
+        "payload_bytes": 0,
+        "prompt_chars": 0,
+        "duration_seconds": 0.0,
+        "image_count": 0,
+    }
+    for row in rows:
+        status = str(row.get("status") or "unknown")
+        by_status[status] = by_status.get(status, 0) + 1
+        context = row.get("context") if isinstance(row.get("context"), dict) else {}
+        stage = str(context.get("stage") or "unknown")
+        schema = str(row.get("schema_name") or context.get("schema_name") or "unknown")
+        usage = row.get("usage") if isinstance(row.get("usage"), dict) else {}
+        add_model_call_summary_row(by_stage, stage, row, usage)
+        add_model_call_summary_row(by_schema, schema, row, usage)
+        for key in maxima:
+            value = row.get(key)
+            if isinstance(value, (int, float)):
+                maxima[key] = max(maxima[key], value)
+    return {
+        "calls": len(rows),
+        "by_status": by_status,
+        "by_stage": by_stage,
+        "by_schema": by_schema,
+        "maxima": maxima,
+    }
+
+
+def add_model_call_summary_row(
+    bucket: dict[str, dict[str, Any]],
+    key: str,
+    row: dict[str, Any],
+    usage: dict[str, Any],
+) -> None:
+    item = bucket.setdefault(
+        key,
+        {
+            "calls": 0,
+            "payload_bytes": 0,
+            "prompt_chars": 0,
+            "duration_seconds": 0.0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+        },
+    )
+    item["calls"] += 1
+    item["payload_bytes"] += safe_number(row.get("payload_bytes"))
+    item["prompt_chars"] += safe_number(row.get("prompt_chars"))
+    item["duration_seconds"] = round(
+        float(item["duration_seconds"]) + float(safe_number(row.get("duration_seconds"))),
+        3,
+    )
+    item["input_tokens"] += safe_number(
+        usage.get("input_tokens") or usage.get("prompt_tokens") or 0
+    )
+    item["output_tokens"] += safe_number(
+        usage.get("output_tokens") or usage.get("completion_tokens") or 0
+    )
+
+
+def safe_number(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return 0
+
+
+def local_markdown_link_targets(markdown: str) -> list[str]:
+    targets = []
+    for match in re.finditer(r"\[[^\]]+\]\(([^)]+)\)", markdown):
+        raw_target = match.group(1).strip()
+        if not raw_target:
+            continue
+        if raw_target.startswith("<") and raw_target.endswith(">"):
+            raw_target = raw_target[1:-1].strip()
+        lowered = raw_target.lower()
+        if lowered.startswith(("http://", "https://", "mailto:", "#")):
+            continue
+        targets.append(raw_target)
+    return targets
+
+
+def resolve_markdown_target(base_dir: Path, target: str) -> Path | None:
+    target = re.split(r"[?#]", target, maxsplit=1)[0].strip()
+    if not target:
+        return None
+    target = target.replace("/", os.sep)
+    path = Path(target)
+    if not path.is_absolute():
+        path = base_dir / path
+    return path
