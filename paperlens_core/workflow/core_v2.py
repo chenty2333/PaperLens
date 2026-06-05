@@ -20,6 +20,7 @@ from paperlens_core.reading import (
     build_initial_reading_plan,
     make_observation_id,
 )
+from paperlens_core.report import audit_report_draft_against_graph, build_report_draft_from_graph
 from paperlens_core.runtime import ArtifactEnvelope
 from paperlens_core.schemas import ClassificationDecision, PaperRecord, SkimCard
 
@@ -49,6 +50,8 @@ def write_core_v2_artifacts(
         graph=claim_graph,
         findings=audit_findings,
     )
+    report_draft = build_report_draft_from_graph(claim_graph)
+    report_audit_findings = audit_report_draft_against_graph(report_draft, claim_graph)
     memory_view = materialize_paper_memory(
         claim_graph,
         metadata={
@@ -73,6 +76,8 @@ def write_core_v2_artifacts(
         "audit_findings": root / "audit_findings.v1.json",
         "quality_metrics": root / "quality_metrics.v1.json",
         "paper_memory_view": root / "paper_memory_view.v1.json",
+        "report_draft": root / "report_draft.v1.json",
+        "report_audit_findings": root / "report_audit_findings.v1.json",
     }
     write_envelope(paths["paper_dom"], "paper_dom", paper.paper_id, dom.model_dump())
     write_envelope(paths["reading_plan"], "reading_plan", paper.paper_id, reading_plan.model_dump())
@@ -101,6 +106,18 @@ def write_core_v2_artifacts(
         "paper_memory_view",
         paper.paper_id,
         memory_view.model_dump(),
+    )
+    write_envelope(
+        paths["report_draft"],
+        "graph_report_draft",
+        paper.paper_id,
+        report_draft.model_dump(),
+    )
+    write_envelope(
+        paths["report_audit_findings"],
+        "report_audit_findings",
+        paper.paper_id,
+        [finding.model_dump() for finding in report_audit_findings],
     )
     return paths
 

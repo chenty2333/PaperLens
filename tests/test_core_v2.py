@@ -21,6 +21,13 @@ from paperlens_core.reading import (
     build_initial_reading_plan,
     make_observation_id,
 )
+from paperlens_core.report import (
+    GraphReportDraft,
+    ReportParagraph,
+    ReportSection,
+    audit_report_draft_against_graph,
+    build_report_draft_from_graph,
+)
 from paperlens_core.runtime import (
     ArtifactEnvelope,
     NodeSpec,
@@ -167,6 +174,51 @@ def test_audit_blocks_missing_sources_and_unsupported_fact_nodes():
     assert publish_status_from_findings(findings) == PublishStatus.BLOCKED
 
 
+def test_report_draft_is_a_claim_graph_view_with_declared_evidence():
+    dom = sample_dom()
+    source_id = dom.spans[0].source_id
+    observation = ObservationCard(
+        observation_id="obs_claim",
+        paper_id="p_test",
+        task_id="read_02_claim_inventory",
+        observation_type=ObservationType.CLAIM,
+        statement="The paper proposes a block table method.",
+        source_ids=[source_id],
+    )
+    graph = graph_from_observations("p_test", [observation])
+
+    draft = build_report_draft_from_graph(graph)
+    findings = audit_report_draft_against_graph(draft, graph)
+
+    assert findings == []
+    paragraph = draft.sections[0].paragraphs[0]
+    assert paragraph.used_node_ids
+    assert paragraph.used_evidence_ids
+
+    bad = GraphReportDraft(
+        paper_id="p_test",
+        sections=[
+            ReportSection(
+                section_id="bad",
+                title="Bad",
+                paragraphs=[
+                    ReportParagraph(
+                        paragraph_id="bad_01",
+                        markdown="A new unsupported fact.",
+                        used_node_ids=[],
+                        used_evidence_ids=[],
+                    )
+                ],
+            )
+        ],
+    )
+    bad_findings = audit_report_draft_against_graph(bad, graph)
+    assert {finding.code for finding in bad_findings} == {
+        "report_paragraph_missing_node_ids",
+        "report_paragraph_missing_evidence_ids",
+    }
+
+
 def test_finite_runtime_node_enforces_model_call_budget():
     spec = NodeSpec(
         node_id="read_orientation",
@@ -263,14 +315,24 @@ def test_stage03_writes_core_v2_artifact_envelopes(tmp_path):
         metrics_envelope = json.loads(
             (core_root / "quality_metrics.v1.json").read_text(encoding="utf-8")
         )
+        report_envelope = json.loads(
+            (core_root / "report_draft.v1.json").read_text(encoding="utf-8")
+        )
+        report_audit_envelope = json.loads(
+            (core_root / "report_audit_findings.v1.json").read_text(encoding="utf-8")
+        )
 
         assert dom_envelope["artifact_type"] == "paper_dom"
         assert plan_envelope["artifact_type"] == "reading_plan"
         assert graph_envelope["artifact_type"] == "claim_graph"
         assert metrics_envelope["artifact_type"] == "core_quality_metrics"
+        assert report_envelope["artifact_type"] == "graph_report_draft"
+        assert report_audit_envelope["artifact_type"] == "report_audit_findings"
         assert dom_envelope["data"]["spans"]
         assert plan_envelope["data"]["tasks"]
         assert graph_envelope["data"]["nodes"]
+        assert report_envelope["data"]["sections"]
+        assert report_audit_envelope["data"] == []
         assert metrics_envelope["data"]["fact_node_count"] > 0
         assert metrics_envelope["data"]["publish_status"] == PublishStatus.DRAFT_WEAK
         assert any(
