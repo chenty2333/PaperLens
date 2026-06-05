@@ -9,7 +9,7 @@ from paperlens_core.audit import audit_claim_graph, compute_core_quality_metrics
 from paperlens_core.agents.llm import JsonLlmClient, llm_call_context
 from paperlens_core.dom import PaperDOM, PaperSpan, build_paper_dom_from_layout
 from paperlens_core.events import write_json
-from paperlens_core.graph import graph_from_observations
+from paperlens_core.graph import ClaimGraph, graph_from_observations
 from paperlens_core.memory import materialize_paper_memory
 from paperlens_core.reading import (
     ObservationCard,
@@ -28,6 +28,7 @@ from paperlens_core.schemas import ClassificationDecision, PaperRecord, SkimCard
 
 CORE_V2_SCHEMA_VERSION = "paperlens_core.v2.bootstrap"
 CORE_V2_MODEL_OBSERVER_VERSION = "paperlens_core.v2.model_observer"
+CORE_V2_AUDIT_SUITE_VERSION = "paperlens_core.v2.audit_suite"
 
 CORE_V2_OBSERVER_SYSTEM_PROMPT = """
 You are PaperLens ObservationReader.
@@ -128,16 +129,9 @@ def write_core_v2_artifacts(
     reading_plan = build_initial_reading_plan(dom)
     observation_log = bootstrap_observation_log(dom, reading_plan)
     claim_graph = graph_from_observations(paper.paper_id, list(observation_log.cards))
-    audit_findings = audit_claim_graph(claim_graph, dom)
-    quality_metrics = compute_core_quality_metrics(
+    derived = build_core_v2_derived_views(
         dom=dom,
-        graph=claim_graph,
-        findings=audit_findings,
-    )
-    report_draft = build_report_draft_from_graph(claim_graph)
-    report_audit_findings = audit_report_draft_against_graph(report_draft, claim_graph)
-    memory_view = materialize_paper_memory(
-        claim_graph,
+        claim_graph=claim_graph,
         metadata={
             "title": paper.canonical_title,
             "authors": paper.authors,
@@ -146,8 +140,6 @@ def write_core_v2_artifacts(
             "skim_problem": skim.problem if skim else None,
             "bootstrap_schema_version": CORE_V2_SCHEMA_VERSION,
         },
-        unresolved_audit_findings=[finding.finding_id for finding in audit_findings],
-        report_readiness=quality_metrics.publish_status,
     )
 
     root = data_dir / "core" / "v2" / paper.paper_id
@@ -177,31 +169,31 @@ def write_core_v2_artifacts(
         paths["audit_findings"],
         "audit_findings",
         paper.paper_id,
-        [finding.model_dump() for finding in audit_findings],
+        [finding.model_dump() for finding in derived["audit_findings"]],
     )
     write_envelope(
         paths["quality_metrics"],
         "core_quality_metrics",
         paper.paper_id,
-        quality_metrics.model_dump(),
+        derived["quality_metrics"].model_dump(),
     )
     write_envelope(
         paths["paper_memory_view"],
         "paper_memory_view",
         paper.paper_id,
-        memory_view.model_dump(),
+        derived["memory_view"].model_dump(),
     )
     write_envelope(
         paths["report_draft"],
         "graph_report_draft",
         paper.paper_id,
-        report_draft.model_dump(),
+        derived["report_draft"].model_dump(),
     )
     write_envelope(
         paths["report_audit_findings"],
         "report_audit_findings",
         paper.paper_id,
-        [finding.model_dump() for finding in report_audit_findings],
+        [finding.model_dump() for finding in derived["report_audit_findings"]],
     )
     return paths
 
@@ -334,22 +326,13 @@ def write_core_v2_from_observation_log(
     producer: str,
 ) -> dict[str, Path]:
     claim_graph = graph_from_observations(paper.paper_id, list(observation_log.cards))
-    audit_findings = audit_claim_graph(claim_graph, dom)
-    quality_metrics = compute_core_quality_metrics(
+    derived = build_core_v2_derived_views(
         dom=dom,
-        graph=claim_graph,
-        findings=audit_findings,
-    )
-    report_draft = build_report_draft_from_graph(claim_graph)
-    report_audit_findings = audit_report_draft_against_graph(report_draft, claim_graph)
-    memory_view = materialize_paper_memory(
-        claim_graph,
+        claim_graph=claim_graph,
         metadata={
             "title": paper.canonical_title,
             "observer_schema_version": CORE_V2_MODEL_OBSERVER_VERSION,
         },
-        unresolved_audit_findings=[finding.finding_id for finding in audit_findings],
-        report_readiness=quality_metrics.publish_status,
     )
     root = data_dir / "core" / "v2" / paper.paper_id
     paths = {
@@ -380,38 +363,140 @@ def write_core_v2_from_observation_log(
         paths["audit_findings"],
         "audit_findings",
         paper.paper_id,
-        [finding.model_dump() for finding in audit_findings],
+        [finding.model_dump() for finding in derived["audit_findings"]],
         producer=producer,
     )
     write_envelope(
         paths["quality_metrics"],
         "core_quality_metrics",
         paper.paper_id,
-        quality_metrics.model_dump(),
+        derived["quality_metrics"].model_dump(),
         producer=producer,
     )
     write_envelope(
         paths["paper_memory_view"],
         "paper_memory_view",
         paper.paper_id,
-        memory_view.model_dump(),
+        derived["memory_view"].model_dump(),
         producer=producer,
     )
     write_envelope(
         paths["report_draft"],
         "graph_report_draft",
         paper.paper_id,
-        report_draft.model_dump(),
+        derived["report_draft"].model_dump(),
         producer=producer,
     )
     write_envelope(
         paths["report_audit_findings"],
         "report_audit_findings",
         paper.paper_id,
-        [finding.model_dump() for finding in report_audit_findings],
+        [finding.model_dump() for finding in derived["report_audit_findings"]],
         producer=producer,
     )
     return paths
+
+
+def refresh_core_v2_audit_artifacts(
+    *,
+    data_dir: Path,
+    paper: PaperRecord,
+    skim: SkimCard | None = None,
+    decision: ClassificationDecision | None = None,
+    producer: str = "paperlens_core_v2_audit_suite",
+) -> dict[str, Any]:
+    dom, claim_graph = load_core_v2_dom_and_graph(data_dir, paper.paper_id)
+    derived = build_core_v2_derived_views(
+        dom=dom,
+        claim_graph=claim_graph,
+        metadata={
+            "title": paper.canonical_title,
+            "authors": paper.authors,
+            "year": paper.year,
+            "grade": decision.class_label if decision else None,
+            "skim_problem": skim.problem if skim else None,
+            "audit_schema_version": CORE_V2_AUDIT_SUITE_VERSION,
+        },
+    )
+    root = data_dir / "core" / "v2" / paper.paper_id
+    paths = {
+        "audit_findings": root / "audit_findings.v1.json",
+        "quality_metrics": root / "quality_metrics.v1.json",
+        "paper_memory_view": root / "paper_memory_view.v1.json",
+        "report_draft": root / "report_draft.v1.json",
+        "report_audit_findings": root / "report_audit_findings.v1.json",
+    }
+    write_envelope(
+        paths["audit_findings"],
+        "audit_findings",
+        paper.paper_id,
+        [finding.model_dump() for finding in derived["audit_findings"]],
+        producer=producer,
+    )
+    write_envelope(
+        paths["quality_metrics"],
+        "core_quality_metrics",
+        paper.paper_id,
+        derived["quality_metrics"].model_dump(),
+        producer=producer,
+    )
+    write_envelope(
+        paths["paper_memory_view"],
+        "paper_memory_view",
+        paper.paper_id,
+        derived["memory_view"].model_dump(),
+        producer=producer,
+    )
+    write_envelope(
+        paths["report_draft"],
+        "graph_report_draft",
+        paper.paper_id,
+        derived["report_draft"].model_dump(),
+        producer=producer,
+    )
+    write_envelope(
+        paths["report_audit_findings"],
+        "report_audit_findings",
+        paper.paper_id,
+        [finding.model_dump() for finding in derived["report_audit_findings"]],
+        producer=producer,
+    )
+    return {
+        "paths": paths,
+        "graph_findings": len(derived["audit_findings"]),
+        "report_findings": len(derived["report_audit_findings"]),
+        "publish_status": derived["quality_metrics"].publish_status,
+    }
+
+
+def build_core_v2_derived_views(
+    *,
+    dom: PaperDOM,
+    claim_graph: ClaimGraph,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    audit_findings = audit_claim_graph(claim_graph, dom)
+    report_draft = build_report_draft_from_graph(claim_graph)
+    report_audit_findings = audit_report_draft_against_graph(report_draft, claim_graph)
+    all_findings = [*audit_findings, *report_audit_findings]
+    quality_metrics = compute_core_quality_metrics(
+        dom=dom,
+        graph=claim_graph,
+        findings=all_findings,
+    )
+    memory_view = materialize_paper_memory(
+        claim_graph,
+        metadata=metadata,
+        unresolved_audit_findings=[finding.finding_id for finding in all_findings],
+        report_readiness=quality_metrics.publish_status,
+    )
+    return {
+        "audit_findings": audit_findings,
+        "quality_metrics": quality_metrics,
+        "memory_view": memory_view,
+        "report_draft": report_draft,
+        "report_audit_findings": report_audit_findings,
+    }
 
 
 def bootstrap_observation_log(dom: PaperDOM, reading_plan: ReadingPlan) -> ObservationLog:
@@ -535,6 +620,17 @@ def load_core_v2_dom_and_plan(data_dir: Path, paper_id: str) -> tuple[PaperDOM, 
         raise ValueError(f"Core v2 paper_dom/reading_plan artifacts are invalid for {paper_id}")
     return PaperDOM.model_validate(dom_envelope.data), ReadingPlan.model_validate(
         plan_envelope.data
+    )
+
+
+def load_core_v2_dom_and_graph(data_dir: Path, paper_id: str) -> tuple[PaperDOM, ClaimGraph]:
+    root = data_dir / "core" / "v2" / paper_id
+    dom_envelope = read_envelope(root / "paper_dom.v1.json", expected_type="paper_dom")
+    graph_envelope = read_envelope(root / "claim_graph.v1.json", expected_type="claim_graph")
+    if not isinstance(dom_envelope.data, dict) or not isinstance(graph_envelope.data, dict):
+        raise ValueError(f"Core v2 paper_dom/claim_graph artifacts are invalid for {paper_id}")
+    return PaperDOM.model_validate(dom_envelope.data), ClaimGraph.model_validate(
+        graph_envelope.data
     )
 
 

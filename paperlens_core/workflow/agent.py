@@ -54,6 +54,7 @@ from paperlens_core.workflow.stages import (
     resolve_workflow_stages,
 )
 from paperlens_core.workflow.core_v2 import (
+    refresh_core_v2_audit_artifacts,
     run_core_v2_model_observation_tasks,
     write_core_v2_artifacts,
 )
@@ -1158,6 +1159,52 @@ class PaperLensWorkflow:
                 data={"paper_id": paper.paper_id, "error": str(exc)},
             )
 
+    def refresh_core_v2_deterministic_audits(self, stage: str) -> list[dict[str, Any]]:
+        skim_by_id = {card.paper_id: card for card in self.skim_cards}
+        decision_by_id = {decision.paper_id: decision for decision in self.classifications}
+        rows: list[dict[str, Any]] = []
+        for paper in self.papers:
+            try:
+                result = refresh_core_v2_audit_artifacts(
+                    data_dir=self.data_dir,
+                    paper=paper,
+                    skim=skim_by_id.get(paper.paper_id),
+                    decision=decision_by_id.get(paper.paper_id),
+                )
+            except FileNotFoundError:
+                if (self.data_dir / "core" / "v2" / paper.paper_id).exists():
+                    raise
+                continue
+            for artifact_type, path in result["paths"].items():
+                self.register_file_artifact(
+                    path,
+                    paper_id=paper.paper_id,
+                    artifact_type=f"core_v2_audit_{artifact_type}",
+                    depends_on=[
+                        f"core_v2_paper_dom:{paper.paper_id}",
+                        f"core_v2_claim_graph:{paper.paper_id}",
+                    ],
+                )
+            side_statuses = []
+            publish_status = str(result["publish_status"])
+            if publish_status != "REVIEWED":
+                side_statuses.append(f"CORE_V2_{publish_status}")
+            self.mark_paper_state(paper.paper_id, stage, side_statuses=side_statuses)
+            row = {
+                "paper_id": paper.paper_id,
+                "publish_status": publish_status,
+                "graph_findings": result["graph_findings"],
+                "report_findings": result["report_findings"],
+            }
+            rows.append(row)
+            self.events.emit(
+                "core_v2_audit_completed",
+                stage=stage,
+                message=f"Core v2 deterministic audit completed for {paper.paper_id}",
+                data=row,
+            )
+        return rows
+
     def persist_paper_card(self, stage: str, paper: PaperRecord, paper_card: PaperCard) -> None:
         if not any(card.paper_id == paper_card.paper_id for card in self.paper_cards):
             self.paper_cards.append(paper_card)
@@ -1611,6 +1658,7 @@ class PaperLensWorkflow:
         stage = "stage_08_evidence_verify"
         self.checkpoint(stage)
         self.events.stage_started(stage, "Verifying paper memory once against local evidence")
+        core_v2_rows = self.refresh_core_v2_deterministic_audits(stage)
         client = self.new_llm_client() if self.llm_enabled() else None
         papers_by_id = {paper.paper_id: paper for paper in self.papers}
         skims_by_id = {skim.paper_id: skim for skim in self.skim_cards}
@@ -1695,7 +1743,11 @@ class PaperLensWorkflow:
             self.mark_paper_state(card.paper_id, stage, side_statuses=side)
             rows.append({"paper_id": card.paper_id, "status": status, "notes": notes})
         self.paper_cards = verified_cards
-        self.events.stage_completed(stage, "Evidence audit completed", {"paper_cards": len(rows)})
+        self.events.stage_completed(
+            stage,
+            "Evidence audit completed",
+            {"paper_cards": len(rows), "core_v2_audits": len(core_v2_rows)},
+        )
 
     def stage_15_export(self) -> list[Path]:
         stage = "stage_15_export"

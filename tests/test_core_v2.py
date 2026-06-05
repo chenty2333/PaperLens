@@ -48,6 +48,7 @@ from paperlens_core.schemas import (
 from paperlens_core.workflow.agent import PaperLensWorkflow
 from paperlens_core.workflow.core_v2 import (
     observation_cards_from_model_envelope,
+    refresh_core_v2_audit_artifacts,
     run_core_v2_model_observation_tasks,
     write_core_v2_artifacts,
 )
@@ -437,6 +438,49 @@ def test_core_v2_model_observer_rewrites_observation_graph_artifacts(tmp_path):
     assert all(row["status"] == "PASS" for row in agent_runs)
 
 
+def test_refresh_core_v2_audit_artifacts_blocks_missing_dom_sources(tmp_path):
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    write_core_v2_artifacts(
+        data_dir=tmp_path,
+        paper=paper,
+        layout={
+            "pages": [
+                {
+                    "page_no": 1,
+                    "text": "Abstract\n\nWe propose a block table method for serving.",
+                    "section_candidates": [{"title": "Abstract", "level": 1}],
+                }
+            ]
+        },
+    )
+    root = tmp_path / "core" / "v2" / "p_test"
+    graph_path = root / "claim_graph.v1.json"
+    graph_envelope = json.loads(graph_path.read_text(encoding="utf-8"))
+    evidence_node = next(
+        node for node in graph_envelope["data"]["nodes"].values() if node["kind"] == "evidence"
+    )
+    evidence_node["payload"]["source_id"] = "span:p_test:missing"
+    graph_path.write_text(json.dumps(graph_envelope, ensure_ascii=False), encoding="utf-8")
+
+    result = refresh_core_v2_audit_artifacts(data_dir=tmp_path, paper=paper)
+
+    metrics = json.loads((root / "quality_metrics.v1.json").read_text(encoding="utf-8"))
+    findings = json.loads((root / "audit_findings.v1.json").read_text(encoding="utf-8"))
+    memory = json.loads((root / "paper_memory_view.v1.json").read_text(encoding="utf-8"))
+    assert result["publish_status"] == PublishStatus.BLOCKED
+    assert metrics["producer"] == "paperlens_core_v2_audit_suite"
+    assert metrics["data"]["publish_status"] == PublishStatus.BLOCKED
+    assert {finding["code"] for finding in findings["data"]} >= {"missing_dom_source"}
+    assert memory["data"]["report_readiness"] == PublishStatus.BLOCKED
+    assert memory["data"]["unresolved_audit_findings"]
+
+
 def test_model_observation_cards_reject_unknown_source_ids():
     envelope = ArtifactEnvelope(
         artifact_type="observation_cards",
@@ -464,6 +508,61 @@ def test_model_observation_cards_reject_unknown_source_ids():
             task=build_initial_reading_plan(sample_dom()).tasks[0],
             valid_source_ids=sample_dom().source_ids(),
         )
+
+
+def test_stage08_refreshes_core_v2_audits_without_legacy_paper_cards(tmp_path):
+    output_dir = tmp_path / "out"
+    input_dir = tmp_path / "in"
+    input_dir.mkdir()
+    pipeline = PaperLensWorkflow(
+        input_dir=input_dir,
+        output_dir=output_dir,
+        config=CoreConfig(offline_debug=True),
+        events=EventWriter(
+            "run_test",
+            output_dir / ".paperlens" / "data" / "events.jsonl",
+            output_dir / ".paperlens" / "data" / "errors.jsonl",
+        ),
+        control=ControlState(),
+    )
+    try:
+        pipeline.prepare_output()
+        paper = PaperRecord(
+            paper_id="p_test",
+            file_path="paper.pdf",
+            file_hash="hash",
+            canonical_title="Test Paper",
+            page_count=1,
+        )
+        pipeline.papers = [paper]
+        pipeline.db.upsert_paper(paper)
+        write_core_v2_artifacts(
+            data_dir=pipeline.data_dir,
+            paper=paper,
+            layout={
+                "pages": [
+                    {
+                        "page_no": 1,
+                        "text": "Abstract\n\nWe propose a block table method for serving.",
+                        "section_candidates": [{"title": "Abstract", "level": 1}],
+                    }
+                ]
+            },
+        )
+
+        pipeline.stage_08_evidence_verify()
+
+        root = pipeline.data_dir / "core" / "v2" / "p_test"
+        metrics = json.loads((root / "quality_metrics.v1.json").read_text(encoding="utf-8"))
+        artifacts = pipeline.db.list_artifact_versions()
+        state = pipeline.db.get_paper_state("p_test")
+        assert metrics["producer"] == "paperlens_core_v2_audit_suite"
+        assert any(item.artifact_type == "core_v2_audit_quality_metrics" for item in artifacts)
+        assert state is not None
+        assert state.current_stage == "stage_08_evidence_verify"
+        assert "CORE_V2_DRAFT_WEAK" in state.side_statuses
+    finally:
+        pipeline.db.close()
 
 
 def test_stage07_runs_core_v2_observation_read_before_legacy_rolling(tmp_path, monkeypatch):
