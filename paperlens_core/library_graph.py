@@ -146,7 +146,14 @@ def summarize_claim_graph_for_library(
         "evaluation_metrics": extract_metric_terms(
             " ".join([item["label"] for item in evaluation_nodes]) + " " + evidence_text
         )[:12],
-        "relations": relation_nodes([*claim_nodes, *method_nodes, *evaluation_nodes])[:8],
+        "relations": (
+            graph_relationship_edges(
+                memory_view=memory_view,
+                graph=graph,
+                source_index=source_index,
+            )
+            or relation_nodes([*claim_nodes, *method_nodes, *evaluation_nodes])
+        )[:8],
     }
 
 
@@ -486,6 +493,50 @@ def relation_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "label": compact_text(label, max_chars=260),
                 "source_ids": node.get("source_ids", [])[:6],
                 "pages": node.get("pages", [])[:6],
+            }
+        )
+    return result
+
+
+def graph_relationship_edges(
+    *,
+    memory_view: dict[str, Any],
+    graph: ClaimGraph,
+    source_index: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    result = []
+    for edge in list_payload(memory_view.get("relationship_edges")):
+        source_id = string_or_empty(edge.get("source_id"))
+        target_id = string_or_empty(edge.get("target_id"))
+        kind = string_or_empty(edge.get("kind"))
+        source_node = graph.nodes.get(source_id)
+        target_node = graph.nodes.get(target_id)
+        if not source_node or not target_node or not kind:
+            continue
+        source_ids = []
+        pages = []
+        for node_id in [source_node.node_id, target_node.node_id]:
+            for evidence_id in graph.evidence_ids_for(node_id):
+                evidence_node = graph.nodes.get(evidence_id)
+                paper_source_id = string_or_empty(
+                    (evidence_node.payload if evidence_node else {}).get("source_id")
+                )
+                if paper_source_id and paper_source_id not in source_ids:
+                    source_ids.append(paper_source_id)
+                page_no = source_index.get(paper_source_id, {}).get("page_no")
+                if isinstance(page_no, int) and page_no not in pages:
+                    pages.append(page_no)
+        result.append(
+            {
+                "source_id": source_node.node_id,
+                "source_kind": source_node.kind,
+                "source_label": compact_text(source_node.label, max_chars=220),
+                "target_id": target_node.node_id,
+                "target_kind": target_node.kind,
+                "target_label": compact_text(target_node.label, max_chars=220),
+                "kind": kind,
+                "source_ids": source_ids[:8],
+                "pages": pages[:8],
             }
         )
     return result

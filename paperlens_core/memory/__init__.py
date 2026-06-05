@@ -1,5 +1,9 @@
 from __future__ import annotations
 
-from paperlens_core.memory.paper_memory import PaperMemoryView, materialize_paper_memory
+from paperlens_core.memory.paper_memory import (
+    PaperMemoryRelationshipEdge,
+    PaperMemoryView,
+    materialize_paper_memory,
+)
 
-__all__ = ["PaperMemoryView", "materialize_paper_memory"]
+__all__ = ["PaperMemoryRelationshipEdge", "PaperMemoryView", "materialize_paper_memory"]

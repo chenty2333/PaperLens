@@ -60,6 +60,7 @@ from paperlens_core.workflow.core_v2 import (
     refresh_core_v2_audit_artifacts,
     run_core_v2_model_observation_tasks,
     write_core_v2_artifacts,
+    write_core_v2_from_observation_log,
 )
 
 
@@ -212,6 +213,41 @@ def test_claim_graph_keeps_valid_observation_relationship_edges():
         ("mechanism:obs_mechanism", "claim:obs_claim", "explains")
     ]
     assert relationship_edges[0].payload == {"proposed_by_observation_id": "obs_mechanism"}
+
+
+def test_paper_memory_view_materializes_claim_graph_relationship_edges():
+    dom = sample_dom()
+    claim = ObservationCard(
+        observation_id="obs_claim",
+        paper_id="p_test",
+        task_id="read_02_claim_inventory",
+        observation_type=ObservationType.CLAIM,
+        statement="The paper proposes a block table method.",
+        source_ids=[dom.spans[0].source_id],
+    )
+    mechanism = ObservationCard(
+        observation_id="obs_mechanism",
+        paper_id="p_test",
+        task_id="read_03_method_mechanism",
+        observation_type=ObservationType.MECHANISM,
+        statement="The block table mechanism organizes serving state.",
+        source_ids=[dom.spans[-1].source_id],
+        proposed_links=[
+            {"source_id": "obs_mechanism", "target_id": "obs_claim", "kind": "explains"}
+        ],
+    )
+    graph = graph_from_observations("p_test", [claim, mechanism])
+
+    memory = materialize_paper_memory(graph)
+
+    assert [edge.model_dump() for edge in memory.relationship_edges] == [
+        {
+            "source_id": "mechanism:obs_mechanism",
+            "target_id": "claim:obs_claim",
+            "kind": "explains",
+            "payload": {"proposed_by_observation_id": "obs_mechanism"},
+        }
+    ]
 
 
 def test_audit_blocks_supported_by_edges_that_do_not_target_evidence():
@@ -778,18 +814,60 @@ def test_library_rebuild_indexes_core_v2_claim_graph_without_memory_v3(tmp_path)
         canonical_title="Test Paper",
         page_count=1,
     )
+    layout = {
+        "pages": [
+            {
+                "page_no": 1,
+                "text": "Abstract\n\nWe propose a block table method for faster serving.",
+                "section_candidates": [{"title": "Abstract", "level": 1}],
+            },
+            {
+                "page_no": 2,
+                "text": "Method\n\nThe block table mechanism organizes serving state.",
+                "section_candidates": [{"title": "Method", "level": 1}],
+            },
+        ]
+    }
     write_core_v2_artifacts(
         data_dir=output_dir / ".paperlens" / "data",
         paper=paper,
-        layout={
-            "pages": [
-                {
-                    "page_no": 1,
-                    "text": "Abstract\n\nWe propose a block table method for faster serving.",
-                    "section_candidates": [{"title": "Abstract", "level": 1}],
-                }
-            ]
-        },
+        layout=layout,
+    )
+    dom = build_paper_dom_from_layout(
+        paper_id=paper.paper_id,
+        title=paper.canonical_title,
+        layout=layout,
+    )
+    write_core_v2_from_observation_log(
+        data_dir=output_dir / ".paperlens" / "data",
+        paper=paper,
+        dom=dom,
+        reading_plan=build_initial_reading_plan(dom),
+        observation_log=ObservationLog(paper_id="p_test")
+        .append(
+            ObservationCard(
+                observation_id="obs_claim",
+                paper_id="p_test",
+                task_id="read_02_claim_inventory",
+                observation_type=ObservationType.CLAIM,
+                statement="The paper proposes a block table method.",
+                source_ids=[dom.spans[0].source_id],
+            )
+        )
+        .append(
+            ObservationCard(
+                observation_id="obs_mechanism",
+                paper_id="p_test",
+                task_id="read_03_method_mechanism",
+                observation_type=ObservationType.MECHANISM,
+                statement="The block table mechanism organizes serving state.",
+                source_ids=[dom.spans[-1].source_id],
+                proposed_links=[
+                    {"source_id": "obs_mechanism", "target_id": "obs_claim", "kind": "explains"}
+                ],
+            )
+        ),
+        producer="unit_test",
     )
 
     written = rebuild_library_from_output(output_dir)
@@ -804,9 +882,11 @@ def test_library_rebuild_indexes_core_v2_claim_graph_without_memory_v3(tmp_path)
     assert any(path.name == "library_records.jsonl" for path in written)
     assert records[0]["paper_id"] == "p_test"
     assert records[0]["graph_summary"]["schema_version"] == "paperlens.graph_library_summary.v1"
+    assert records[0]["graph_summary"]["relations"][0]["kind"] == "explains"
+    assert records[0]["graph_summary"]["relations"][0]["source_id"] == "mechanism:obs_mechanism"
     assert records[0]["memory"]["claims"]
     assert records[0]["provenance"]["core_v2"]["source_ids"]
-    assert records[0]["quality"]["graph_publish_status"] == PublishStatus.DRAFT_WEAK
+    assert records[0]["quality"]["graph_publish_status"] == PublishStatus.REVIEWED
     assert result["matches"][0]["paper"]["paper_id"] == "p_test"
     assert index["records"][0]["graph"]["node_counts"]["claim"] >= 1
     assert doctor_library(output_dir)["status"] == "PASS"
