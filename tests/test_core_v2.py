@@ -735,6 +735,72 @@ def test_report_draft_is_a_claim_graph_view_with_declared_evidence():
     }
 
 
+def test_report_audit_blocks_draft_for_other_claim_graph():
+    dom = sample_dom()
+    observation = ObservationCard(
+        observation_id="obs_claim",
+        paper_id="p_test",
+        task_id="read_02_claim_inventory",
+        observation_type=ObservationType.CLAIM,
+        statement="The paper proposes a block table method.",
+        source_ids=[dom.spans[0].source_id],
+    )
+    graph = graph_from_observations("p_test", [observation])
+    draft = build_report_draft_from_graph(graph).model_copy(update={"paper_id": "p_other"})
+
+    findings = audit_report_draft_against_graph(draft, graph)
+
+    assert {finding.code for finding in findings} >= {"report_draft_paper_id_mismatch"}
+
+
+def test_report_audit_rejects_declared_node_not_reflected_in_paragraph_text():
+    dom = sample_dom()
+    first_observation = ObservationCard(
+        observation_id="obs_claim_first",
+        paper_id="p_test",
+        task_id="read_02_claim_inventory",
+        observation_type=ObservationType.CLAIM,
+        statement="The paper proposes a block table method.",
+        source_ids=[dom.spans[0].source_id],
+    )
+    second_observation = ObservationCard(
+        observation_id="obs_claim_second",
+        paper_id="p_test",
+        task_id="read_02_claim_inventory",
+        observation_type=ObservationType.CLAIM,
+        statement="The paper reports a latency result.",
+        source_ids=[dom.spans[-1].source_id],
+    )
+    graph = graph_from_observations("p_test", [first_observation, second_observation])
+    bad = GraphReportDraft(
+        paper_id="p_test",
+        sections=[
+            ReportSection(
+                section_id="claims",
+                title="Claims",
+                paragraphs=[
+                    ReportParagraph(
+                        paragraph_id="claim_01",
+                        markdown="The paper proposes a block table method.",
+                        used_node_ids=["claim:obs_claim_first", "claim:obs_claim_second"],
+                        used_evidence_ids=[
+                            f"evidence:{dom.spans[0].source_id}",
+                            f"evidence:{dom.spans[-1].source_id}",
+                        ],
+                    )
+                ],
+            )
+        ],
+    )
+
+    findings = audit_report_draft_against_graph(bad, graph)
+
+    assert {finding.code for finding in findings} == {
+        "report_paragraph_declared_node_not_used_in_text"
+    }
+    assert findings[0].node_id == "claim:obs_claim_second"
+
+
 def test_graph_report_markdown_declares_nodes_evidence_and_sources():
     dom = sample_dom()
     source_id = next(span.source_id for span in dom.spans if "block table method" in span.text)

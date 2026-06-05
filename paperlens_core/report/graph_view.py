@@ -73,6 +73,15 @@ def audit_report_draft_against_graph(
     graph: ClaimGraph,
 ) -> list[AuditFinding]:
     findings: list[AuditFinding] = []
+    if draft.paper_id != graph.paper_id:
+        findings.append(
+            AuditFinding(
+                finding_id=f"report_draft_paper_id_mismatch:{draft.paper_id}:{graph.paper_id}",
+                severity=AuditSeverity.ERROR,
+                code="report_draft_paper_id_mismatch",
+                message=f"Report draft paper_id does not match ClaimGraph: {draft.paper_id} != {graph.paper_id}",
+            )
+        )
     node_ids = set(graph.nodes)
     evidence_node_ids = {node.node_id for node in graph.nodes.values() if node.kind == "evidence"}
     support_edges = {
@@ -147,10 +156,11 @@ def audit_report_draft_against_graph(
                             node_id=node_id,
                         )
                     )
-            if known_node_ids and not text_overlaps_any_reference(
+            paragraph_overlaps_any_node = bool(known_node_ids) and text_overlaps_any_reference(
                 paragraph.markdown,
                 [graph.nodes[node_id].label for node_id in known_node_ids],
-            ):
+            )
+            if known_node_ids and not paragraph_overlaps_any_node:
                 findings.append(
                     AuditFinding(
                         finding_id=f"paragraph_text_not_grounded:{paragraph.paragraph_id}",
@@ -167,6 +177,25 @@ def audit_report_draft_against_graph(
                         ],
                     )
                 )
+            for node_id in known_node_ids:
+                if paragraph_overlaps_any_node and not text_overlaps_any_reference(
+                    paragraph.markdown, [graph.nodes[node_id].label]
+                ):
+                    findings.append(
+                        AuditFinding(
+                            finding_id=(
+                                "paragraph_declared_node_not_used_in_text:"
+                                f"{paragraph.paragraph_id}:{node_id}"
+                            ),
+                            severity=AuditSeverity.ERROR,
+                            code="report_paragraph_declared_node_not_used_in_text",
+                            message=(
+                                "Report paragraph declares a ClaimGraph node whose label is not "
+                                "reflected in the paragraph text"
+                            ),
+                            node_id=node_id,
+                        )
+                    )
             for evidence_id in known_evidence_ids:
                 if not any((node_id, evidence_id) in support_edges for node_id in known_node_ids):
                     findings.append(
