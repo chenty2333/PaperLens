@@ -86,6 +86,46 @@ def summarize_claim_graph_for_library(
     memory_view: dict[str, Any],
     root: Path,
 ) -> dict[str, Any]:
+    metadata = dict_value(memory_view.get("metadata"))
+    quality_summary = graph_quality_summary(quality=quality, memory_view=memory_view)
+    node_counts = {
+        kind: len([node for node in graph.nodes.values() if node.kind == kind])
+        for kind in [*GRAPH_LIBRARY_NODE_KINDS, "evidence"]
+    }
+    base_summary: dict[str, Any] = {
+        "schema_version": GRAPH_LIBRARY_SUMMARY_SCHEMA_VERSION,
+        "paper_id": dom.paper_id,
+        "metadata": {
+            "title": metadata.get("title") or dom.title,
+            "year": metadata.get("year"),
+            "grade": metadata.get("grade"),
+        },
+        "source": {
+            "paper_dom": relative_core_path(root / "paper_dom.v1.json"),
+            "claim_graph": relative_core_path(root / "claim_graph.v1.json"),
+            "quality_metrics": relative_core_path(root / "quality_metrics.v1.json"),
+            "paper_memory_view": relative_core_path(root / "paper_memory_view.v1.json"),
+        },
+        "quality": quality_summary,
+        "node_counts": node_counts,
+    }
+    if quality_summary.get("publish_status") == "BLOCKED":
+        return {
+            **base_summary,
+            "graph_access": "blocked_by_core_v2_audit",
+            "problem_nodes": [],
+            "claim_nodes": [],
+            "method_family": [],
+            "mechanism_nodes": [],
+            "implementation_nodes": [],
+            "evaluation_nodes": [],
+            "result_nodes": [],
+            "limitation_nodes": [],
+            "concept_nodes": [],
+            "evaluation_datasets": [],
+            "evaluation_metrics": [],
+            "relations": [],
+        }
     source_index = core_v2_source_index(dom)
     nodes_by_kind = {
         kind: [
@@ -104,33 +144,9 @@ def summarize_claim_graph_for_library(
         json.dumps(item.get("evidence_samples", []), ensure_ascii=False)
         for item in [*method_nodes, *claim_nodes, *evaluation_nodes]
     )
-    metadata = dict_value(memory_view.get("metadata"))
     return {
-        "schema_version": GRAPH_LIBRARY_SUMMARY_SCHEMA_VERSION,
-        "paper_id": dom.paper_id,
-        "metadata": {
-            "title": metadata.get("title") or dom.title,
-            "year": metadata.get("year"),
-            "grade": metadata.get("grade"),
-        },
-        "source": {
-            "paper_dom": relative_core_path(root / "paper_dom.v1.json"),
-            "claim_graph": relative_core_path(root / "claim_graph.v1.json"),
-            "quality_metrics": relative_core_path(root / "quality_metrics.v1.json"),
-            "paper_memory_view": relative_core_path(root / "paper_memory_view.v1.json"),
-        },
-        "quality": {
-            "publish_status": quality.get("publish_status") or memory_view.get("report_readiness"),
-            "evidence_coverage": quality.get("evidence_coverage"),
-            "fact_node_count": quality.get("fact_node_count"),
-            "supported_fact_node_count": quality.get("supported_fact_node_count"),
-            "audit_error_count": quality.get("audit_error_count"),
-            "audit_warning_count": quality.get("audit_warning_count"),
-        },
-        "node_counts": {
-            kind: len([node for node in graph.nodes.values() if node.kind == kind])
-            for kind in [*GRAPH_LIBRARY_NODE_KINDS, "evidence"]
-        },
+        **base_summary,
+        "graph_access": "readable",
         "problem_nodes": nodes_by_kind.get("problem", [])[:6],
         "claim_nodes": nodes_by_kind.get("claim", [])[:10],
         "method_family": compact_labels(method_nodes, limit=8),
@@ -154,6 +170,19 @@ def summarize_claim_graph_for_library(
             )
             or relation_nodes([*claim_nodes, *method_nodes, *evaluation_nodes])
         )[:8],
+    }
+
+
+def graph_quality_summary(
+    *, quality: dict[str, Any], memory_view: dict[str, Any]
+) -> dict[str, Any]:
+    return {
+        "publish_status": quality.get("publish_status") or memory_view.get("report_readiness"),
+        "evidence_coverage": quality.get("evidence_coverage"),
+        "fact_node_count": quality.get("fact_node_count"),
+        "supported_fact_node_count": quality.get("supported_fact_node_count"),
+        "audit_error_count": quality.get("audit_error_count"),
+        "audit_warning_count": quality.get("audit_warning_count"),
     }
 
 

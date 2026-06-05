@@ -1196,6 +1196,55 @@ def test_library_rebuild_indexes_core_v2_claim_graph_without_memory_v3(tmp_path)
     assert doctor_library(output_dir)["status"] == "PASS"
 
 
+def test_library_rebuild_does_not_index_blocked_core_v2_claim_graph(tmp_path):
+    output_dir = tmp_path / "out"
+    data_dir = output_dir / ".paperlens" / "data"
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    write_core_v2_artifacts(
+        data_dir=data_dir,
+        paper=paper,
+        layout={
+            "pages": [
+                {
+                    "page_no": 1,
+                    "text": "Abstract\n\nWe propose a block table method for serving.",
+                    "section_candidates": [{"title": "Abstract", "level": 1}],
+                }
+            ]
+        },
+    )
+    graph_path = data_dir / "core" / "v2" / "p_test" / "claim_graph.v1.json"
+    graph_envelope = json.loads(graph_path.read_text(encoding="utf-8"))
+    evidence_node = next(
+        node for node in graph_envelope["data"]["nodes"].values() if node["kind"] == "evidence"
+    )
+    evidence_node["payload"]["source_id"] = "span:p_test:missing"
+    graph_path.write_text(json.dumps(graph_envelope, ensure_ascii=False), encoding="utf-8")
+    refresh_core_v2_audit_artifacts(data_dir=data_dir, paper=paper)
+
+    rebuild_library_from_output(output_dir)
+    records = read_library_records(output_dir)
+    result = search_library(output_dir=output_dir, query="block table serving", limit=3)
+    index = json.loads(
+        (output_dir / ".paperlens" / "library" / "index" / "search_index.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert records[0]["quality"]["graph_publish_status"] == PublishStatus.BLOCKED
+    assert records[0]["graph_summary"]["graph_access"] == "blocked_by_core_v2_audit"
+    assert records[0]["graph_summary"]["claim_nodes"] == []
+    assert records[0]["memory"]["claims"] == []
+    assert result["matches"] == []
+    assert not {"block", "table", "serving"} & set(index["records"][0]["tokens"])
+
+
 def test_core_quality_snapshot_tracks_structural_and_qa_metrics(tmp_path):
     output_dir = tmp_path / "out"
     paper = PaperRecord(
