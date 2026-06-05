@@ -11,6 +11,7 @@ from paperlens_core.audit import (
     compute_core_quality_metrics,
     publish_status_from_findings,
 )
+from paperlens_core.agent_loop import PaperToolRegistry
 from paperlens_core.dom import build_paper_dom_from_layout
 from paperlens_core.graph import GraphEdge, graph_from_observations
 from paperlens_core.library import (
@@ -49,6 +50,7 @@ from paperlens_core.runtime import (
     ArtifactEnvelope,
     NodeSpec,
     NodeStatus,
+    PaperLensRuntime,
     run_finite_node,
 )
 from paperlens_core.config import CoreConfig
@@ -64,7 +66,11 @@ from paperlens_core.schemas import (
 )
 from paperlens_core.workflow.agent import (
     PaperLensWorkflow,
+    build_report_memory_context,
+    compact_paper_memory_for_report,
     paper_report_filename,
+    report_focus_pages,
+    report_focus_queries,
     write_final_report_bundle,
 )
 from paperlens_core.workflow.core_v2 import (
@@ -1560,6 +1566,115 @@ def test_export_writes_core_graph_report_view_for_reviewed_core_artifacts(tmp_pa
     assert "ClaimGraph nodes: `claim:obs_claim`" in markdown
     assert f"Evidence nodes: `evidence:{source_id}`" in markdown
     assert f"PaperDOM sources: `{source_id}`" in markdown
+
+
+def test_report_memory_context_prefers_reviewed_core_memory_view(tmp_path):
+    data_dir = tmp_path / ".paperlens" / "data"
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    layout = {
+        "pages": [
+            {
+                "page_no": 1,
+                "text": "Abstract\n\nWe propose a block table method for faster serving.",
+                "section_candidates": [{"title": "Abstract", "level": 1}],
+            }
+        ]
+    }
+    dom = build_paper_dom_from_layout(
+        paper_id=paper.paper_id,
+        title=paper.canonical_title,
+        layout=layout,
+    )
+    source_id = next(span.source_id for span in dom.spans if "block table method" in span.text)
+    write_core_v2_from_observation_log(
+        data_dir=data_dir,
+        paper=paper,
+        dom=dom,
+        reading_plan=build_initial_reading_plan(dom),
+        observation_log=ObservationLog(paper_id="p_test").append(
+            ObservationCard(
+                observation_id="obs_claim",
+                paper_id="p_test",
+                task_id="read_02_claim_inventory",
+                observation_type=ObservationType.CLAIM,
+                statement="We propose a block table method for faster serving.",
+                source_ids=[source_id],
+            )
+        ),
+        producer="unit_test",
+    )
+
+    context = build_report_memory_context(
+        data_dir=data_dir,
+        paper_id="p_test",
+        paper_memory_v3={
+            "schema_version": "paper_memory.v3",
+            "paper_id": "p_test",
+            "claims": [{"id": "legacy", "text": "Legacy claim should be fallback only."}],
+        },
+    )
+    compact = compact_paper_memory_for_report(context)
+
+    assert context["schema_version"] == "paperlens.report_memory_context.v1"
+    assert context["source_of_truth"] == "core_v2_paper_memory_view"
+    assert compact["source_of_truth"] == "core_v2_paper_memory_view"
+    assert compact["core_memory_view"]["fact_nodes"][0]["node_id"] == "claim:obs_claim"
+    assert compact["core_memory_view"]["fact_nodes"][0]["source_ids"] == [source_id]
+    assert report_focus_pages(context, skim=None, card=None) == [1]
+    assert any(
+        "block table method" in query
+        for query in report_focus_queries(context, paper=paper, skim=None, card=None)
+    )
+
+
+def test_agent_memory_tools_search_core_memory_view(tmp_path):
+    source_id = "span:p_test:p1:1"
+    memory = {
+        "schema_version": "paperlens.report_memory_context.v1",
+        "core_memory_view": {
+            "schema_version": "paper_memory.view.v1",
+            "paper_id": "p_test",
+            "fact_nodes": [
+                {
+                    "node_id": "claim:obs_claim",
+                    "kind": "claim",
+                    "label": "The paper proposes a block table method.",
+                    "evidence_ids": [f"evidence:{source_id}"],
+                    "source_ids": [source_id],
+                    "pages": [1],
+                }
+            ],
+            "evidence_sources": {
+                source_id: {
+                    "source_id": source_id,
+                    "kind": "paragraph",
+                    "page_no": 1,
+                    "excerpt": "We propose a block table method for faster serving.",
+                }
+            },
+            "evaluation_matrix": [],
+            "relationship_edges": [],
+        },
+    }
+    registry = PaperToolRegistry(
+        runtime=PaperLensRuntime(artifacts=[]),
+        paper_id="p_test",
+        memory=memory,
+    )
+
+    search = registry._memory_search("block table")
+    claim = registry._memory_get_claim("claim:obs_claim")
+    evidence = registry._evidence_lookup([source_id])
+
+    assert search["results"][0]["section"] == "core.fact_nodes"
+    assert claim["results"][0]["node_id"] == "claim:obs_claim"
+    assert evidence["results"][0]["source_id"] == source_id
 
 
 def test_core_v2_qa_context_does_not_use_blocked_claim_graph(tmp_path):

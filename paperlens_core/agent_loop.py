@@ -230,6 +230,19 @@ class PaperToolRegistry:
     def _memory_search(self, query: str) -> dict[str, Any]:
         terms = tokenize(query)
         haystacks = []
+        core_view = core_memory_view(self.memory)
+        for key in [
+            "fact_nodes",
+            "evaluation_matrix",
+            "evidence_sources",
+            "relationship_edges",
+        ]:
+            value = core_view.get(key)
+            for item in flatten_core_memory_items(key, value):
+                text = json.dumps(item, ensure_ascii=False)
+                score = sum(text.lower().count(term) for term in terms) if terms else 1
+                if score:
+                    haystacks.append((score, f"core.{key}", compact_json_item(item)))
         prompt_view = memory_v3_prompt_view(self.memory)
         for key in [
             "problem_frame",
@@ -260,6 +273,10 @@ class PaperToolRegistry:
         }
 
     def _memory_get_claim(self, claim_id: str) -> dict[str, Any]:
+        core_view = core_memory_view(self.memory)
+        for node in list_payload(core_view.get("fact_nodes")):
+            if isinstance(node, dict) and str(node.get("node_id") or "") == claim_id:
+                return {"tool": "memory.get_claim", "query": claim_id, "results": [node]}
         for claim in list_payload(self.memory.get("claims")):
             if isinstance(claim, dict) and str(claim.get("id") or "") == claim_id:
                 return {"tool": "memory.get_claim", "query": claim_id, "results": [claim]}
@@ -268,6 +285,14 @@ class PaperToolRegistry:
     def _evidence_lookup(self, refs: Any) -> dict[str, Any]:
         refs_list = [str(item) for item in list_payload(refs) if str(item).strip()]
         evidence = []
+        core_sources = dict_value(core_memory_view(self.memory).get("evidence_sources"))
+        for source in core_sources.values():
+            if not isinstance(source, dict):
+                continue
+            source_id = str(source.get("source_id") or "")
+            page = str(source.get("page_no") or "")
+            if source_id in refs_list or page in refs_list:
+                evidence.append(source)
         for item in list_payload(self.memory.get("evidence")):
             if not isinstance(item, dict):
                 continue
@@ -551,6 +576,25 @@ def flatten_memory_items(section: str, value: Any) -> list[Any]:
         return [value]
     if isinstance(value, str) and value.strip():
         return [{"text": value.strip()}]
+    return []
+
+
+def core_memory_view(memory: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(memory, dict):
+        return {}
+    if memory.get("schema_version") == "paper_memory.view.v1":
+        return memory
+    nested = dict_value(memory.get("core_memory_view"))
+    return nested if nested.get("schema_version") == "paper_memory.view.v1" else {}
+
+
+def flatten_core_memory_items(section: str, value: Any) -> list[Any]:
+    if section == "evidence_sources" and isinstance(value, dict):
+        return [item for item in value.values() if isinstance(item, dict)]
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        return [value]
     return []
 
 

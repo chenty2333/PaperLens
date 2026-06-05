@@ -4274,6 +4274,15 @@ def default_report_section_templates() -> list[dict[str, Any]]:
 
 
 def should_add_implementation_section(paper_memory: dict[str, Any]) -> bool:
+    core = core_memory_view_dict(paper_memory)
+    if core:
+        if list_payload(core.get("implementation_nodes")):
+            return True
+        if any(
+            node.get("kind") in {"implementation", "mechanism", "evaluation", "result"}
+            for node in list_payload(core.get("fact_nodes"))
+        ):
+            return True
     memory = paper_memory_v3_dict(paper_memory)
     mechanism = dict_value(memory.get("mechanism"))
     implementation = dict_value(memory.get("implementation_details"))
@@ -4351,6 +4360,9 @@ def build_supplemental_report_section(
 
 
 def report_section_seed_context(group: str, paper_memory: dict[str, Any]) -> dict[str, Any]:
+    core = core_memory_view_dict(paper_memory)
+    if core:
+        return core_report_section_seed_context(group, core)
     memory = paper_memory_v3_dict(paper_memory)
     claims = [claim for claim in list_payload(memory.get("claims")) if isinstance(claim, dict)]
     evidence = [item for item in list_payload(memory.get("evidence")) if isinstance(item, dict)]
@@ -4515,6 +4527,55 @@ def report_section_seed_context(group: str, paper_memory: dict[str, Any]) -> dic
     }
 
 
+def core_report_section_seed_context(group: str, core: dict[str, Any]) -> dict[str, Any]:
+    fact_nodes = [node for node in list_payload(core.get("fact_nodes")) if isinstance(node, dict)]
+    selected = [node for node in fact_nodes if core_fact_matches_group(node, group)]
+    if not selected and group in {"orientation", "value"}:
+        selected = fact_nodes[:4]
+    focus_queries = [node.get("label") for node in selected[:6]]
+    claim_ids = [
+        string_or_none(node.get("node_id")) or "" for node in selected if node.get("node_id")
+    ]
+    evidence_refs: list[str] = []
+    target_pages: list[int] = []
+    for node in selected:
+        for evidence_id in normalized_string_list(node.get("evidence_ids")):
+            if evidence_id not in evidence_refs:
+                evidence_refs.append(evidence_id)
+        for source_id in normalized_string_list(node.get("source_ids")):
+            if source_id not in evidence_refs:
+                evidence_refs.append(source_id)
+        for page in list_payload(node.get("pages")):
+            page_no = safe_int(page)
+            if page_no and page_no not in target_pages:
+                target_pages.append(page_no)
+    return {
+        "focus_queries": compact_string_list(focus_queries, limit=5, max_chars=180),
+        "claim_ids": claim_ids[:8],
+        "evidence_refs": evidence_refs[:10],
+        "target_pages": target_pages[:6],
+    }
+
+
+def core_fact_matches_group(node: dict[str, Any], group: str) -> bool:
+    kind = string_or_none(node.get("kind")) or ""
+    label = (string_or_none(node.get("label")) or "").lower()
+    if group == "orientation":
+        return kind in {"problem", "claim", "concept"}
+    if group in {"mechanism", "implementation"}:
+        return kind in {"mechanism", "implementation"} or any(
+            token in label
+            for token in ["mechanism", "implementation", "algorithm", "module", "机制", "实现"]
+        )
+    if group == "evaluation":
+        return kind in {"evaluation", "result"}
+    if group == "limits":
+        return kind == "limitation"
+    if group == "value":
+        return kind in {"claim", "result", "concept"}
+    return True
+
+
 def paper_memory_v3_dict(memory: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(memory, dict):
         return {}
@@ -4522,6 +4583,15 @@ def paper_memory_v3_dict(memory: dict[str, Any] | None) -> dict[str, Any]:
         return memory
     nested = dict_value(memory.get("paper_memory_v3"))
     return nested if nested.get("schema_version") == "paper_memory.v3" else {}
+
+
+def core_memory_view_dict(memory: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(memory, dict):
+        return {}
+    if memory.get("schema_version") == "paper_memory.view.v1":
+        return memory
+    nested = dict_value(memory.get("core_memory_view"))
+    return nested if nested.get("schema_version") == "paper_memory.view.v1" else {}
 
 
 def normalize_report_section_plan(data: dict[str, Any]) -> dict[str, Any]:
@@ -4950,6 +5020,13 @@ def report_focus_queries(
     memory: dict[str, Any], *, paper: PaperRecord, skim: SkimCard | None, card: PaperCard | None
 ) -> list[str]:
     queries = [paper.canonical_title or paper.paper_id]
+    core = core_memory_view_dict(memory)
+    if core:
+        queries.extend(
+            string_or_none(node.get("label")) or ""
+            for node in list_payload(core.get("fact_nodes"))[:8]
+            if isinstance(node, dict)
+        )
     if skim:
         queries.extend([skim.problem, skim.method_type, skim.evaluation_type])
     if card:
@@ -4972,6 +5049,11 @@ def report_focus_pages(
     memory: dict[str, Any], *, skim: SkimCard | None, card: PaperCard | None
 ) -> list[int]:
     pages = []
+    core = core_memory_view_dict(memory)
+    if core:
+        for page in core_memory_pages(core):
+            if page not in pages:
+                pages.append(page)
     for item in list_payload(memory.get("evidence"))[:12]:
         if isinstance(item, dict):
             page = safe_int(item.get("page"))
@@ -4988,6 +5070,25 @@ def report_focus_pages(
             if page and page not in pages:
                 pages.append(page)
     return pages[:10]
+
+
+def core_memory_pages(core: dict[str, Any]) -> list[int]:
+    pages: list[int] = []
+    for node in [
+        *list_payload(core.get("fact_nodes")),
+        *list_payload(core.get("evaluation_matrix")),
+    ]:
+        for value in list_payload(node.get("pages")):
+            page = safe_int(value)
+            if page and page not in pages:
+                pages.append(page)
+    sources = dict_value(core.get("evidence_sources"))
+    for source in sources.values():
+        if isinstance(source, dict):
+            page = safe_int(source.get("page_no"))
+            if page and page not in pages:
+                pages.append(page)
+    return pages[:16]
 
 
 def default_report_sections() -> list[dict[str, Any]]:
@@ -5202,6 +5303,20 @@ def compact_string_list(value: Any, *, limit: int, max_chars: int) -> list[str]:
 def compact_paper_memory_for_report(memory: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(memory, dict):
         return {}
+    core = core_memory_view_dict(memory)
+    if core:
+        result: dict[str, Any] = {
+            "source_of_truth": "core_v2_paper_memory_view",
+            "core_memory_view": compact_core_memory_view_for_report(core),
+        }
+        quality = dict_value(memory.get("quality"))
+        if quality:
+            result["quality"] = quality
+        fallback = dict_value(memory.get("legacy_memory_v3"))
+        if fallback.get("schema_version") == "paper_memory.v3":
+            result["legacy_memory_v3"] = compact_memory_v3_for_report(fallback)
+            result["legacy_memory_policy"] = memory.get("fallback_policy")
+        return result
     v3 = (
         dict_value(memory.get("paper_memory_v3"))
         if "paper_memory_v3" in memory
@@ -5221,6 +5336,69 @@ def compact_paper_memory_for_report(memory: dict[str, Any] | None) -> dict[str, 
             if key in {"verdict", "safe_usage_note"}
         },
     }
+
+
+def compact_core_memory_view_for_report(memory: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": memory.get("schema_version"),
+        "paper_id": memory.get("paper_id"),
+        "metadata": dict_value(memory.get("metadata")),
+        "report_readiness": memory.get("report_readiness"),
+        "fact_nodes": [
+            {
+                "node_id": item.get("node_id"),
+                "kind": item.get("kind"),
+                "label": compact_reason(string_or_none(item.get("label")) or "", max_chars=520),
+                "confidence": item.get("confidence"),
+                "provenance": item.get("provenance"),
+                "evidence_ids": normalized_string_list(item.get("evidence_ids"))[:8],
+                "source_ids": normalized_string_list(item.get("source_ids"))[:8],
+                "pages": [page for page in (safe_int(value) for value in list_payload(item.get("pages"))) if page][:8],
+                "extracted_numbers": list_payload(item.get("extracted_numbers"))[:8],
+            }
+            for item in list_payload(memory.get("fact_nodes"))[:16]
+            if isinstance(item, dict)
+        ],
+        "evaluation_matrix": [
+            {
+                "node_id": item.get("node_id"),
+                "kind": item.get("kind"),
+                "label": compact_reason(string_or_none(item.get("label")) or "", max_chars=420),
+                "source_ids": normalized_string_list(item.get("source_ids"))[:8],
+                "pages": [page for page in (safe_int(value) for value in list_payload(item.get("pages"))) if page][:8],
+                "extracted_numbers": list_payload(item.get("extracted_numbers"))[:8],
+            }
+            for item in list_payload(memory.get("evaluation_matrix"))[:10]
+            if isinstance(item, dict)
+        ],
+        "evidence_sources": compact_core_evidence_sources(memory.get("evidence_sources")),
+        "relationship_edges": list_payload(memory.get("relationship_edges"))[:12],
+        "unresolved_audit_findings": normalized_string_list(
+            memory.get("unresolved_audit_findings")
+        )[:12],
+    }
+
+
+def compact_core_evidence_sources(value: Any) -> list[dict[str, Any]]:
+    raw_sources = value.values() if isinstance(value, dict) else []
+    result = []
+    for item in raw_sources:
+        if not isinstance(item, dict):
+            continue
+        result.append(
+            {
+                "source_id": item.get("source_id"),
+                "kind": item.get("kind"),
+                "page_no": item.get("page_no"),
+                "section_id": item.get("section_id"),
+                "excerpt": compact_reason(
+                    string_or_none(item.get("excerpt")) or "", max_chars=320
+                ),
+            }
+        )
+        if len(result) >= 16:
+            break
+    return result
 
 
 def report_evidence_mode(env_name: str, default: str) -> str:
@@ -5309,6 +5487,10 @@ def select_focused_report_pages(
         selected.append(page_no)
 
     memory = paper_memory if isinstance(paper_memory, dict) else {}
+    core = core_memory_view_dict(memory)
+    if core:
+        for page_no in core_memory_pages(core):
+            add(page_no)
     v3 = (
         dict_value(memory.get("paper_memory_v3"))
         if "paper_memory_v3" in memory
@@ -5650,7 +5832,11 @@ def write_final_report_bundle(
             source="export_prepare",
             prefer_existing=True,
         )
-        paper_memory_for_prompt = memory_v3_prompt_view(paper_memory_v3)
+        paper_memory_for_prompt = build_report_memory_context(
+            data_dir=data_dir,
+            paper_id=paper.paper_id,
+            paper_memory_v3=paper_memory_v3,
+        )
         model_report = None
         report_audit = None
         if formal_run:
@@ -5843,6 +6029,42 @@ def write_core_graph_report_view(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(markdown, encoding="utf-8")
     return path
+
+
+def build_report_memory_context(
+    *,
+    data_dir: Path,
+    paper_id: str,
+    paper_memory_v3: dict[str, Any],
+) -> dict[str, Any]:
+    manifest = inspect_core_v2_artifact_set(data_dir, paper_id)
+    if manifest.get("consumable") is True:
+        root = data_dir / "core" / "v2" / paper_id
+        try:
+            envelope = read_typed_artifact(
+                root / "paper_memory_view.v1.json",
+                expected_type="paper_memory_view",
+            )
+        except (FileNotFoundError, ValueError):
+            envelope = None
+        if envelope is not None and isinstance(envelope.data, dict):
+            return {
+                "schema_version": "paperlens.report_memory_context.v1",
+                "source_of_truth": "core_v2_paper_memory_view",
+                "fallback_policy": (
+                    "Use core_memory_view for paper-specific facts. legacy_memory_v3 is "
+                    "supplemental context only."
+                ),
+                "quality": {
+                    "artifact_set_status": manifest.get("status"),
+                    "publish_status": manifest.get("publish_status"),
+                    "consumable": manifest.get("consumable"),
+                    "issues": manifest.get("issues", []),
+                },
+                "core_memory_view": envelope.data,
+                "legacy_memory_v3": memory_v3_prompt_view(paper_memory_v3),
+            }
+    return memory_v3_prompt_view(paper_memory_v3)
 
 
 def core_graph_report_filename(report_name: str) -> str:
