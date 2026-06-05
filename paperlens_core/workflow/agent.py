@@ -18,11 +18,8 @@ from paperlens_core.agents.providers import describe_provider
 from paperlens_core.budget import BudgetManager
 from paperlens_core.config import CoreConfig
 from paperlens_core.control import ControlState
-from paperlens_core.core_manifest import inspect_core_v2_artifact_set
 from paperlens_core.db import ArtifactDb
-from paperlens_core.dom import PaperDOM
 from paperlens_core.events import EventWriter, write_json
-from paperlens_core.graph import ClaimGraph
 from paperlens_core.library import write_paperlens_library
 from paperlens_core.memory_v3 import (
     dict_value,
@@ -42,8 +39,7 @@ from paperlens_core.pdf.pymupdf_parser import parse_pdf
 from paperlens_core.pdf.qa import parse_quality
 from paperlens_core.quality_snapshot import write_core_quality_snapshot
 from paperlens_core.report import (
-    GraphReportDraft,
-    render_graph_report_markdown,
+    write_core_graph_report_view,
 )
 from paperlens_core.report.memory_context import (
     build_report_memory_context,
@@ -52,7 +48,7 @@ from paperlens_core.report.memory_context import (
     report_focus_pages,
     report_focus_queries,
 )
-from paperlens_core.runtime import PaperLensRuntime, context_pack_prompt, read_typed_artifact
+from paperlens_core.runtime import PaperLensRuntime, context_pack_prompt
 from paperlens_core.schemas import (
     ArtifactVersion,
     ClassificationDecision,
@@ -5440,7 +5436,8 @@ def write_final_report_bundle(
         core_graph_report_path = write_core_graph_report_view(
             output_dir=output_dir,
             data_dir=data_dir,
-            paper=paper,
+            paper_id=paper.paper_id,
+            title=paper.canonical_title or paper.paper_id,
             report_name=report_name,
         )
         if core_graph_report_path is not None:
@@ -5486,60 +5483,6 @@ def write_final_report_bundle(
         )
     )
     return written
-
-
-def write_core_graph_report_view(
-    *,
-    output_dir: Path,
-    data_dir: Path,
-    paper: PaperRecord,
-    report_name: str,
-) -> Path | None:
-    manifest = inspect_core_v2_artifact_set(data_dir, paper.paper_id)
-    if manifest.get("consumable") is not True:
-        return None
-    root = data_dir / "core" / "v2" / paper.paper_id
-    try:
-        dom_envelope = read_typed_artifact(root / "paper_dom.v1.json", expected_type="paper_dom")
-        graph_envelope = read_typed_artifact(
-            root / "claim_graph.v1.json", expected_type="claim_graph"
-        )
-        draft_envelope = read_typed_artifact(
-            root / "report_draft.v1.json",
-            expected_type="graph_report_draft",
-        )
-        quality_envelope = read_typed_artifact(
-            root / "quality_metrics.v1.json",
-            expected_type="core_quality_metrics",
-        )
-    except (FileNotFoundError, ValueError):
-        return None
-    if not all(
-        isinstance(envelope.data, dict)
-        for envelope in [dom_envelope, graph_envelope, draft_envelope, quality_envelope]
-    ):
-        return None
-    dom = PaperDOM.model_validate(dom_envelope.data)
-    graph = ClaimGraph.model_validate(graph_envelope.data)
-    draft = GraphReportDraft.model_validate(draft_envelope.data)
-    quality = quality_envelope.data if isinstance(quality_envelope.data, dict) else {}
-    markdown = render_graph_report_markdown(
-        title=paper.canonical_title or paper.paper_id,
-        draft=draft,
-        graph=graph,
-        dom=dom,
-        quality=quality,
-    )
-    path = output_dir / "papers" / "core_graph" / core_graph_report_filename(report_name)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(markdown, encoding="utf-8")
-    return path
-
-
-def core_graph_report_filename(report_name: str) -> str:
-    if report_name.endswith(".md"):
-        return report_name[:-3] + ".core_graph.md"
-    return report_name + ".core_graph.md"
 
 
 def report_generation_must_succeed() -> bool:

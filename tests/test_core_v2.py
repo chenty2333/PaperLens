@@ -49,6 +49,7 @@ from paperlens_core.report import (
     report_focus_pages,
     report_focus_queries,
     render_graph_report_markdown,
+    write_core_graph_report_view,
 )
 from paperlens_core.runtime import (
     ArtifactEnvelope,
@@ -56,10 +57,11 @@ from paperlens_core.runtime import (
     NodeStatus,
     PaperLensRuntime,
     run_finite_node,
+    write_typed_artifact,
 )
 from paperlens_core.config import CoreConfig
 from paperlens_core.control import ControlState
-from paperlens_core.core_manifest import build_core_v2_manifest
+from paperlens_core.core_manifest import build_core_v2_manifest, write_core_v2_manifest
 from paperlens_core.events import EventWriter
 from paperlens_core.schemas import (
     ClassificationDecision,
@@ -629,6 +631,65 @@ def test_graph_report_markdown_declares_nodes_evidence_and_sources():
     assert f"Evidence nodes: `evidence:{source_id}`" in markdown
     assert f"PaperDOM sources: `{source_id}`" in markdown
     assert "The paper proposes a block table method." in markdown
+
+
+def test_core_graph_report_view_is_materialized_from_typed_artifacts(tmp_path):
+    data_dir = tmp_path / "data"
+    output_dir = tmp_path / "out"
+    root = data_dir / "core" / "v2" / "p_test"
+    dom = sample_dom()
+    source_id = next(span.source_id for span in dom.spans if "block table method" in span.text)
+    observation = ObservationCard(
+        observation_id="obs_claim",
+        paper_id="p_test",
+        task_id="read_02_claim_inventory",
+        observation_type=ObservationType.CLAIM,
+        statement="The paper proposes a block table method.",
+        source_ids=[source_id],
+    )
+    graph = graph_from_observations("p_test", [observation])
+    draft = build_report_draft_from_graph(graph)
+    artifact_payloads = {
+        "paper_dom.v1.json": ("paper_dom", dom.model_dump(mode="json")),
+        "reading_plan.v1.json": ("reading_plan", {"paper_id": "p_test"}),
+        "observation_log.v1.json": ("observation_log", {"paper_id": "p_test"}),
+        "claim_graph.v1.json": ("claim_graph", graph.model_dump(mode="json")),
+        "audit_findings.v1.json": ("audit_findings", []),
+        "quality_metrics.v1.json": (
+            "core_quality_metrics",
+            {"paper_id": "p_test", "publish_status": PublishStatus.REVIEWED},
+        ),
+        "paper_memory_view.v1.json": (
+            "paper_memory_view",
+            {"paper_id": "p_test", "schema_version": "paper_memory.view.v1"},
+        ),
+        "report_draft.v1.json": ("graph_report_draft", draft.model_dump(mode="json")),
+        "report_audit_findings.v1.json": ("report_audit_findings", []),
+    }
+    for filename, (artifact_type, data) in artifact_payloads.items():
+        write_typed_artifact(
+            root / filename,
+            artifact_type=artifact_type,
+            data=data,
+            producer="unit",
+            metadata={"paper_id": "p_test"},
+        )
+    write_core_v2_manifest(root, "p_test")
+
+    path = write_core_graph_report_view(
+        output_dir=output_dir,
+        data_dir=data_dir,
+        paper_id="p_test",
+        title="Test Paper",
+        report_name="test.md",
+    )
+
+    assert path == output_dir / "papers" / "core_graph" / "test.core_graph.md"
+    assert path is not None
+    markdown = path.read_text(encoding="utf-8")
+    assert "# Test Paper" in markdown
+    assert "Publish status: `REVIEWED`" in markdown
+    assert f"PaperDOM sources: `{source_id}`" in markdown
 
 
 def test_report_audit_rejects_declared_evidence_not_linked_to_declared_node():
