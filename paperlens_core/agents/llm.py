@@ -152,7 +152,10 @@ class JsonLlmClient:
             raise LlmError("Model reading is disabled")
         if not self.config.model:
             raise LlmError("Missing model name for model reading")
-        if self.config.kind in {"openai-compatible", "anthropic-compatible"} and not self.config.base_url:
+        if (
+            self.config.kind in {"openai-compatible", "anthropic-compatible"}
+            and not self.config.base_url
+        ):
             raise LlmError(f"Missing base URL for provider {self.config.kind}")
         api_key = self.config.resolved_api_key()
         if not api_key:
@@ -279,6 +282,14 @@ class JsonLlmClient:
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
+        if self._use_json_object_response_format():
+            payload["_paperlens_schema_name"] = schema_name
+            payload = chat_json_schema_fallback_payload(
+                payload=payload,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                schema=schema,
+            )
         payload = self._apply_compatible_chat_options(payload)
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -312,7 +323,9 @@ class JsonLlmClient:
                 if max_tokens is None
                 else expand_completion_budget(
                     fallback_payload,
-                    minimum=json_retry_completion_minimum(schema_name, max_tokens, has_images=False),
+                    minimum=json_retry_completion_minimum(
+                        schema_name, max_tokens, has_images=False
+                    ),
                 )
             )
             response, response_headers = self._post_json(endpoint, retry_payload, headers)
@@ -364,6 +377,14 @@ class JsonLlmClient:
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
+        if self._use_json_object_response_format():
+            payload["_paperlens_schema_name"] = schema_name
+            payload = chat_json_schema_fallback_payload_with_images(
+                payload=payload,
+                system_prompt=system_prompt,
+                user_content=user_content,
+                schema=schema,
+            )
         payload = self._apply_compatible_chat_options(payload)
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -459,6 +480,7 @@ class JsonLlmClient:
             payload["thinking"] = thinking
         else:
             payload.pop("thinking", None)
+        payload.pop("_paperlens_schema_name", None)
         return payload
 
     def _is_mimo_provider(self) -> bool:
@@ -469,9 +491,19 @@ class JsonLlmClient:
         model = self.config.model.lower()
         return model.startswith("mimo-")
 
+    def _use_json_object_response_format(self) -> bool:
+        if self.config.kind != "openai-compatible":
+            return False
+        explicit = os.getenv("PAPERLENS_OPENAI_COMPAT_JSON_OBJECT")
+        if explicit is not None:
+            return env_flag("PAPERLENS_OPENAI_COMPAT_JSON_OBJECT")
+        return self._is_mimo_provider()
+
     def _mimo_thinking_option(self, payload: dict[str, Any]) -> dict[str, str] | None:
         mode = os.getenv("PAPERLENS_MIMO_THINKING", "omit").strip().lower()
-        schema_name = compatible_payload_schema_name(payload)
+        schema_name = str(
+            payload.get("_paperlens_schema_name") or compatible_payload_schema_name(payload)
+        )
         schema_filter = normalized_csv_env("PAPERLENS_MIMO_THINKING_SCHEMAS")
         if schema_filter and schema_name not in schema_filter:
             mode = "omit"
@@ -499,7 +531,9 @@ class JsonLlmClient:
         attempts = max(1, min(3, attempts))
         last_error: Exception | None = None
         try:
-            timeout_seconds = int(os.getenv("PAPERLENS_LLM_TIMEOUT_SECONDS", str(self.config.timeout_seconds)))
+            timeout_seconds = int(
+                os.getenv("PAPERLENS_LLM_TIMEOUT_SECONDS", str(self.config.timeout_seconds))
+            )
         except ValueError:
             timeout_seconds = self.config.timeout_seconds
         timeout_seconds = max(10, min(timeout_seconds, 1800))
@@ -673,8 +707,12 @@ def enforce_request_safety(endpoint: str, payload: dict[str, Any], body_bytes: b
 
     image_count = payload_image_count(payload)
     if image_count and not env_flag("PAPERLENS_ALLOW_IMAGE_INPUTS", default=False):
-        raise LlmError("Refusing model request with image inputs; set PAPERLENS_ALLOW_IMAGE_INPUTS=1 to allow it")
-    max_images = bounded_int_env("PAPERLENS_MAX_IMAGES_PER_REQUEST", default=1, minimum=0, maximum=20)
+        raise LlmError(
+            "Refusing model request with image inputs; set PAPERLENS_ALLOW_IMAGE_INPUTS=1 to allow it"
+        )
+    max_images = bounded_int_env(
+        "PAPERLENS_MAX_IMAGES_PER_REQUEST", default=1, minimum=0, maximum=20
+    )
     if image_count > max_images:
         raise LlmError(
             f"Refusing model request with {image_count} images; "
@@ -685,7 +723,9 @@ def enforce_request_safety(endpoint: str, payload: dict[str, Any], body_bytes: b
 def before_model_attempt(*, run_id: str | None = None) -> None:
     global _LAST_CALL_TIME
     with _CALL_GUARD_LOCK:
-        max_calls = bounded_int_env("PAPERLENS_MAX_MODEL_CALLS", default=0, minimum=0, maximum=100_000)
+        max_calls = bounded_int_env(
+            "PAPERLENS_MAX_MODEL_CALLS", default=0, minimum=0, maximum=100_000
+        )
         context = dict(_LLM_CONTEXT.get({}))
         guard_key = str(run_id or context.get("run_id") or "__process__")
         guard_count = _CALL_GUARD_COUNTS.get(guard_key, 0)
@@ -693,7 +733,9 @@ def before_model_attempt(*, run_id: str | None = None) -> None:
             raise LlmError(
                 f"Refusing model request: run has reached PAPERLENS_MAX_MODEL_CALLS={max_calls}"
             )
-        min_interval = float_env("PAPERLENS_MIN_SECONDS_BETWEEN_CALLS", default=0.25, minimum=0.0, maximum=60.0)
+        min_interval = float_env(
+            "PAPERLENS_MIN_SECONDS_BETWEEN_CALLS", default=0.25, minimum=0.0, maximum=60.0
+        )
         now = time.time()
         wait_seconds = min_interval - (now - _LAST_CALL_TIME)
         if wait_seconds > 0:
@@ -701,6 +743,12 @@ def before_model_attempt(*, run_id: str | None = None) -> None:
             now = time.time()
         _CALL_GUARD_COUNTS[guard_key] = guard_count + 1
         _LAST_CALL_TIME = now
+
+
+def mark_model_attempt_finished() -> None:
+    global _LAST_CALL_TIME
+    with _CALL_GUARD_LOCK:
+        _LAST_CALL_TIME = max(_LAST_CALL_TIME, time.time())
 
 
 def float_env(name: str, *, default: float, minimum: float, maximum: float) -> float:
@@ -762,8 +810,11 @@ def write_llm_ledger(
     ledger_path: Path | str | None = None,
     run_id: str | None = None,
 ) -> None:
+    mark_model_attempt_finished()
     context = dict(_LLM_CONTEXT.get({}))
-    resolved_ledger_path = ledger_path or context.get("ledger_path") or os.getenv("PAPERLENS_LLM_LEDGER")
+    resolved_ledger_path = (
+        ledger_path or context.get("ledger_path") or os.getenv("PAPERLENS_LLM_LEDGER")
+    )
     if not resolved_ledger_path:
         return
     sample_rate = float_env(
@@ -808,7 +859,10 @@ def chat_json_schema_fallback_payload(
     fallback_payload = dict(payload)
     fallback_payload["response_format"] = {"type": "json_object"}
     fallback_payload["messages"] = [
-        {"role": "system", "content": system_prompt + "\nReturn only valid JSON matching the schema."},
+        {
+            "role": "system",
+            "content": system_prompt + "\nReturn only valid JSON matching the schema.",
+        },
         {
             "role": "user",
             "content": user_prompt
@@ -836,7 +890,10 @@ def chat_json_schema_fallback_payload_with_images(
     fallback_payload = dict(payload)
     fallback_payload["response_format"] = {"type": "json_object"}
     fallback_payload["messages"] = [
-        {"role": "system", "content": system_prompt + "\nReturn only valid JSON matching the schema."},
+        {
+            "role": "system",
+            "content": system_prompt + "\nReturn only valid JSON matching the schema.",
+        },
         {"role": "user", "content": fallback_content},
     ]
     return fallback_payload
@@ -866,7 +923,9 @@ def extract_chat_completion_text(response: dict[str, Any]) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        chunks = [part.get("text") for part in content if isinstance(part, dict) and part.get("text")]
+        chunks = [
+            part.get("text") for part in content if isinstance(part, dict) and part.get("text")
+        ]
         if chunks:
             return "\n".join(chunks)
     raise LlmError("Chat completion response did not contain text content")
@@ -990,7 +1049,9 @@ def parse_json_text_for_schema(
         if best_missing is None or len(missing) < len(best_missing):
             best_missing = missing
     missing_text = ", ".join(best_missing or [])
-    raise LlmError(f"Provider JSON did not match schema {schema_name}; missing keys: {missing_text}")
+    raise LlmError(
+        f"Provider JSON did not match schema {schema_name}; missing keys: {missing_text}"
+    )
 
 
 def iter_json_object_candidates(text: str) -> Iterable[dict[str, Any]]:

@@ -121,7 +121,9 @@ class PaperLensRuntime:
                     "visual_notes": page_list_field(page, "visual_notes")[:4],
                 }
             )
-        return ToolObservation(tool="paper.read_pages", query=",".join(map(str, requested)), results=results)
+        return ToolObservation(
+            tool="paper.read_pages", query=",".join(map(str, requested)), results=results
+        )
 
     def find_figures(self, query: str, *, limit: int = 4) -> ToolObservation:
         terms = tokenize(query)
@@ -198,7 +200,11 @@ class PaperLensRuntime:
         if queries:
             tool_trace.append(self.find_figures(" ".join(queries[:2]), limit=3).as_dict())
         already_read = sorted(
-            {number for number in (page_no(page) for page in read_artifacts) if isinstance(number, int)}
+            {
+                number
+                for number in (page_no(page) for page in read_artifacts)
+                if isinstance(number, int)
+            }
         )
         base = build_always_context(
             paper_id=paper_id,
@@ -317,7 +323,9 @@ def build_always_context(
                 "provenance": claim.get("provenance"),
                 "confidence": claim.get("confidence"),
                 "critic_status": claim.get("critic_status"),
-                "evidence_refs": claim.get("evidence_refs") if isinstance(claim.get("evidence_refs"), list) else [],
+                "evidence_refs": claim.get("evidence_refs")
+                if isinstance(claim.get("evidence_refs"), list)
+                else [],
             }
         )
     evidence = []
@@ -369,7 +377,10 @@ def memory_uncertainty(memory: dict[str, Any]) -> dict[str, Any]:
         }
         for claim in claims
         if isinstance(claim, dict)
-        and (claim.get("confidence") in {"low", "medium"} or claim.get("critic_status") in {"unchecked", "disputed"})
+        and (
+            claim.get("confidence") in {"low", "medium"}
+            or claim.get("critic_status") in {"unchecked", "disputed"}
+        )
     ][:8]
     return {
         "audit_status": audit.get("status"),
@@ -396,12 +407,16 @@ def unique_pages(values: Iterable[Any]) -> list[int]:
 
 def audit_queries(memory: dict[str, Any], audit: dict[str, Any] | None) -> list[str]:
     queries: list[str] = []
-    problem_frame = memory.get("problem_frame") if isinstance(memory.get("problem_frame"), dict) else {}
+    problem_frame = (
+        memory.get("problem_frame") if isinstance(memory.get("problem_frame"), dict) else {}
+    )
     for key in ["problem", "why_it_matters", "scope"]:
         value = problem_frame.get(key)
         if isinstance(value, str) and value.strip():
             queries.append(value)
-    for item in memory.get("core_abstractions") if isinstance(memory.get("core_abstractions"), list) else []:
+    for item in (
+        memory.get("core_abstractions") if isinstance(memory.get("core_abstractions"), list) else []
+    ):
         if isinstance(item, dict) and isinstance(item.get("text"), str):
             queries.append(item["text"])
     mechanism = memory.get("mechanism") if isinstance(memory.get("mechanism"), dict) else {}
@@ -417,7 +432,9 @@ def audit_queries(memory: dict[str, Any], audit: dict[str, Any] | None) -> list[
     for item in memory.get("next_focus") if isinstance(memory.get("next_focus"), list) else []:
         if isinstance(item, str) and item.strip():
             queries.append(item)
-    for item in memory.get("uncertainties") if isinstance(memory.get("uncertainties"), list) else []:
+    for item in (
+        memory.get("uncertainties") if isinstance(memory.get("uncertainties"), list) else []
+    ):
         if isinstance(item, str) and item.strip():
             queries.append(item)
     claims = memory.get("claims") if isinstance(memory.get("claims"), list) else []
@@ -429,7 +446,9 @@ def audit_queries(memory: dict[str, Any], audit: dict[str, Any] | None) -> list[
         elif isinstance(item.get("claim"), str):
             queries.append(item["claim"])
     if audit:
-        for item in audit.get("missing_items") if isinstance(audit.get("missing_items"), list) else []:
+        for item in (
+            audit.get("missing_items") if isinstance(audit.get("missing_items"), list) else []
+        ):
             if isinstance(item, str) and item.strip():
                 queries.append(item)
     return dedupe_queries(queries)
@@ -472,7 +491,9 @@ def pages_from_memory(memory: dict[str, Any]) -> list[int]:
                 add_page(pages, evidence_id_to_page[value])
             else:
                 add_page(pages, value)
-        for value in claim.get("evidence_pages") if isinstance(claim.get("evidence_pages"), list) else []:
+        for value in (
+            claim.get("evidence_pages") if isinstance(claim.get("evidence_pages"), list) else []
+        ):
             add_page(pages, value)
     return pages
 

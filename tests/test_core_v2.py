@@ -1,0 +1,199 @@
+from __future__ import annotations
+
+import pytest
+
+from paperlens_core.audit import (
+    PublishStatus,
+    audit_claim_graph,
+    compute_core_quality_metrics,
+    publish_status_from_findings,
+)
+from paperlens_core.dom import build_paper_dom_from_layout
+from paperlens_core.graph import graph_from_observations
+from paperlens_core.memory import materialize_paper_memory
+from paperlens_core.reading import (
+    ObservationCard,
+    ObservationLog,
+    ObservationType,
+    ReadingTaskType,
+    build_initial_reading_plan,
+    make_observation_id,
+)
+from paperlens_core.runtime import (
+    ArtifactEnvelope,
+    NodeSpec,
+    NodeStatus,
+    run_finite_node,
+)
+
+
+def sample_dom():
+    return build_paper_dom_from_layout(
+        paper_id="p_test",
+        title="Test Paper",
+        layout={
+            "pages": [
+                {
+                    "page_no": 1,
+                    "text": "Abstract\n\nWe propose a block table method for faster serving.",
+                    "section_candidates": [{"title": "Abstract", "level": 1}],
+                    "figures": [],
+                    "tables": [],
+                },
+                {
+                    "page_no": 2,
+                    "text": "Evaluation\n\nThe method improves latency by 27% on Dataset-A.",
+                    "section_candidates": [{"title": "Evaluation", "level": 1}],
+                    "figures": [{"caption": "Latency comparison, 27% lower."}],
+                    "tables": [{"caption": "Dataset-A latency results"}],
+                },
+            ]
+        },
+    )
+
+
+def test_paper_dom_assigns_stable_source_ids():
+    dom = sample_dom()
+
+    assert dom.schema_version == "paper_dom.v1"
+    assert {span.page_no for span in dom.spans} == {1, 2}
+    assert all(span.source_id.startswith("span:p_test:") for span in dom.spans)
+    assert all(section.span_ids for section in dom.sections)
+    assert dom.source_exists(dom.spans[0].source_id)
+    assert dom.figures[0].source_id.startswith("figure:p_test:")
+    assert dom.tables[0].source_id.startswith("table:p_test:")
+
+
+def test_reading_plan_is_structured_and_source_bound():
+    dom = sample_dom()
+    plan = build_initial_reading_plan(dom)
+
+    task_types = {task.task_type for task in plan.tasks}
+    assert ReadingTaskType.ORIENTATION in task_types
+    assert ReadingTaskType.EVALUATION_SETUP in task_types
+    assert ReadingTaskType.RESULT_EXTRACTION in task_types
+    assert all(task.max_model_calls == 1 for task in plan.tasks)
+    assert all(task.evidence_policy == "must_cite_paper_dom_source_ids" for task in plan.tasks)
+    assert all(
+        dom.source_exists(source_id) for task in plan.tasks for source_id in task.target_source_ids
+    )
+
+
+def test_observation_log_is_append_only_and_requires_sources():
+    dom = sample_dom()
+    source_id = dom.spans[0].source_id
+    observation = ObservationCard(
+        observation_id=make_observation_id(
+            task_id="read_01_orientation",
+            observation_type="claim",
+            statement="The paper proposes a block table method.",
+            source_ids=[source_id],
+        ),
+        paper_id="p_test",
+        task_id="read_01_orientation",
+        observation_type=ObservationType.CLAIM,
+        statement="The paper proposes a block table method.",
+        source_ids=[source_id],
+    )
+
+    log = ObservationLog(paper_id="p_test").append(observation)
+
+    assert len(log.cards) == 1
+    with pytest.raises(ValueError, match="duplicate observation_id"):
+        log.append(observation)
+    with pytest.raises(ValueError, match="at least one PaperDOM source_id"):
+        ObservationCard(
+            observation_id="obs_bad",
+            paper_id="p_test",
+            task_id="read_01_orientation",
+            observation_type=ObservationType.CLAIM,
+            statement="Unsupported claim",
+            source_ids=[],
+        )
+
+
+def test_claim_graph_memory_and_audit_flow_from_observations():
+    dom = sample_dom()
+    result_span = next(span for span in dom.spans if "27%" in span.text)
+    observation = ObservationCard(
+        observation_id="obs_result",
+        paper_id="p_test",
+        task_id="read_06_result_extraction",
+        observation_type=ObservationType.RESULT,
+        statement="The method improves latency by 27% on Dataset-A.",
+        source_ids=[result_span.source_id],
+        confidence="high",
+    )
+
+    graph = graph_from_observations("p_test", [observation])
+    findings = audit_claim_graph(graph, dom)
+    memory = materialize_paper_memory(
+        graph,
+        unresolved_audit_findings=[finding.finding_id for finding in findings],
+        report_readiness=publish_status_from_findings(findings).value,
+    )
+
+    assert findings == []
+    assert memory.result_nodes
+    assert memory.report_readiness == PublishStatus.REVIEWED
+    assert memory.evidence_index[memory.result_nodes[0]]
+    metrics = compute_core_quality_metrics(dom=dom, graph=graph, findings=findings)
+    assert metrics.evidence_coverage == 1.0
+    assert metrics.publish_status == PublishStatus.REVIEWED
+
+
+def test_audit_blocks_missing_sources_and_unsupported_fact_nodes():
+    dom = sample_dom()
+    observation = ObservationCard(
+        observation_id="obs_bad_source",
+        paper_id="p_test",
+        task_id="read_02_claim_inventory",
+        observation_type=ObservationType.CLAIM,
+        statement="The paper claims 99% improvement.",
+        source_ids=["span:p_test:missing"],
+    )
+
+    graph = graph_from_observations("p_test", [observation])
+    findings = audit_claim_graph(graph, dom)
+
+    assert {finding.code for finding in findings} >= {"missing_dom_source"}
+    assert publish_status_from_findings(findings) == PublishStatus.BLOCKED
+
+
+def test_finite_runtime_node_enforces_model_call_budget():
+    spec = NodeSpec(
+        node_id="read_orientation",
+        output_artifact_type="observation_cards",
+        max_model_calls=0,
+    )
+
+    def handler(context):
+        context.record_model_call()
+        return ArtifactEnvelope(
+            artifact_type="observation_cards",
+            producer="unit",
+            data=[],
+        )
+
+    result = run_finite_node(spec, [], handler)
+
+    assert result.status == NodeStatus.FAIL
+    assert result.issues
+    assert "max_model_calls=0" in result.issues[0]
+
+
+def test_artifact_envelope_rejects_wrong_output_type():
+    spec = NodeSpec(node_id="node", output_artifact_type="claim_graph")
+
+    result = run_finite_node(
+        spec,
+        [],
+        lambda _context: ArtifactEnvelope(
+            artifact_type="observation_cards",
+            producer="unit",
+            data=[],
+        ),
+    )
+
+    assert result.status == NodeStatus.FAIL
+    assert "Expected artifact_type=claim_graph" in result.issues[0]

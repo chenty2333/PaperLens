@@ -1558,6 +1558,7 @@ def test_mimo_compatible_payload_omits_thinking_by_default(monkeypatch):
 
     assert result.data == {"ok": True}
     assert captured[0]["model"] == "mimo-v2.5"
+    assert captured[0]["response_format"] == {"type": "json_object"}
     assert "thinking" not in captured[0]
     assert captured[0]["max_tokens"] == 123
     assert "max_completion_tokens" not in captured[0]
@@ -1602,6 +1603,7 @@ def test_mimo_thinking_can_be_enabled_for_selected_schema(monkeypatch):
 
     assert result.data == {"ok": True}
     assert captured[0]["thinking"] == {"type": "enabled"}
+    assert captured[0]["response_format"] == {"type": "json_object"}
     assert captured[0]["max_tokens"] == 123
 
 
