@@ -45,6 +45,11 @@ from paperlens_core.library import (
 )
 from paperlens_core.main import configure_utf8_stdio
 from paperlens_core.report import (
+    REPORT_PLAN_SCHEMA,
+    REPORT_SECTION_SCHEMA,
+    build_report_plan_prompt,
+    build_report_section_audit_prompt,
+    build_report_section_prompt,
     clean_model_markdown,
     combine_report_and_memory_audits,
     final_report_audit_acceptable,
@@ -74,13 +79,8 @@ from paperlens_core.memory import (
 from paperlens_core.memory_store import MEMORY_PATCH_SCHEMA_VERSION, PaperMemoryStore
 from paperlens_core.protocol import RunRequest
 from paperlens_core.workflow.agent import (
-    REPORT_PLAN_SCHEMA,
-    REPORT_SECTION_SCHEMA,
     PaperLensWorkflow,
     build_central_memory_verify_prompt,
-    build_report_plan_prompt,
-    build_report_section_audit_prompt,
-    build_report_section_prompt,
     compose_agentic_paper_report,
     normalize_report_plan,
     summarize_model_calls,
