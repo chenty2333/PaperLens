@@ -16,7 +16,6 @@ from paperlens_core.report.memory_context import (
     core_memory_view_dict,
     report_focus_pages,
     report_focus_queries,
-    select_focused_report_pages,
 )
 
 __all__ = [
@@ -33,5 +32,4 @@ __all__ = [
     "report_focus_pages",
     "report_focus_queries",
     "render_graph_report_markdown",
-    "select_focused_report_pages",
 ]

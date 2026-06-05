@@ -41,14 +41,16 @@ from paperlens_core.pdf.layout_index import build_layout_index
 from paperlens_core.pdf.pymupdf_parser import parse_pdf
 from paperlens_core.pdf.qa import parse_quality
 from paperlens_core.quality_snapshot import write_core_quality_snapshot
-from paperlens_core.report import GraphReportDraft, render_graph_report_markdown
+from paperlens_core.report import (
+    GraphReportDraft,
+    render_graph_report_markdown,
+)
 from paperlens_core.report.memory_context import (
     build_report_memory_context,
     compact_paper_memory_for_report,
     core_memory_view_dict,
     report_focus_pages,
     report_focus_queries,
-    select_focused_report_pages,
 )
 from paperlens_core.runtime import PaperLensRuntime, context_pack_prompt, read_typed_artifact
 from paperlens_core.schemas import (
@@ -5222,68 +5224,6 @@ def compact_string_list(value: Any, *, limit: int, max_chars: int) -> list[str]:
     return [
         compact_reason(item, max_chars=max_chars) for item in normalized_string_list(value)[:limit]
     ]
-
-
-def report_evidence_mode(env_name: str, default: str) -> str:
-    mode = os.getenv(env_name, default).strip().lower()
-    aliases = {
-        "off": "memory",
-        "none": "memory",
-        "no_pages": "memory",
-        "first": "frontmatter",
-        "front": "frontmatter",
-        "focused_pages": "focused",
-    }
-    return aliases.get(mode, mode)
-
-
-def report_page_evidence_blocks(
-    *,
-    pages: list[Any],
-    paper_memory: dict[str, Any] | None,
-    skim: SkimCard | None,
-    card: PaperCard | None,
-    max_pages: int,
-    max_chars: int,
-    page_text_limit: int,
-    mode_env: str,
-    default_mode: str,
-    include_figures: bool,
-) -> list[dict[str, Any]]:
-    if max_pages <= 0:
-        return []
-    mode = report_evidence_mode(mode_env, default_mode)
-    if mode == "memory":
-        return []
-    if mode == "frontmatter":
-        selected = [page for page in pages[:max_pages] if isinstance(page, dict)]
-    else:
-        selected = select_focused_report_pages(
-            pages=pages,
-            paper_memory=paper_memory,
-            skim=skim,
-            card=card,
-            max_pages=max_pages,
-        )
-    excerpts = []
-    used_chars = 0
-    for page in selected:
-        block = {
-            "page_no": page.get("page_no"),
-            "text": normalize_excerpt(str(page.get("text") or ""), limit=page_text_limit),
-            "captions": (page.get("captions") or [])[: 6 if include_figures else 4],
-            "visual_notes": (page.get("visual_notes") or [])[: 6 if include_figures else 4],
-            "low_confidence_flags": page.get("low_confidence_flags") or [],
-        }
-        if include_figures:
-            block["figures"] = (page.get("figures") or [])[:6]
-            block["tables"] = (page.get("tables") or [])[:6]
-        block_text = json.dumps(block, ensure_ascii=False)
-        if used_chars + len(block_text) > max_chars:
-            break
-        excerpts.append(block)
-        used_chars += len(block_text)
-    return excerpts
 
 
 def fallback_model_paper_report(
