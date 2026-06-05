@@ -5,6 +5,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from paperlens_core.audit import audit_claim_graph, publish_status_from_findings
+from paperlens_core.audit.findings import AuditFinding
 from paperlens_core.dom import PaperDOM
 from paperlens_core.graph import ClaimGraph, GraphNode
 from paperlens_core.runtime import ArtifactEnvelope
@@ -92,10 +94,14 @@ def summarize_claim_graph_for_library(
     root: Path,
 ) -> dict[str, Any]:
     metadata = dict_value(memory_view.get("metadata"))
+    current_audit_findings = audit_claim_graph(graph, dom)
+    current_publish_status = publish_status_from_findings(current_audit_findings).value
     quality_summary = graph_quality_summary(
         quality=quality,
         memory_view=memory_view,
         artifact_manifest=artifact_manifest,
+        current_audit_findings=current_audit_findings,
+        current_publish_status=current_publish_status,
     )
     node_counts = {
         kind: len([node for node in graph.nodes.values() if node.kind == kind])
@@ -122,6 +128,24 @@ def summarize_claim_graph_for_library(
         return {
             **base_summary,
             "graph_access": graph_non_consumable_policy(artifact_manifest),
+            "problem_nodes": [],
+            "claim_nodes": [],
+            "method_family": [],
+            "mechanism_nodes": [],
+            "implementation_nodes": [],
+            "evaluation_nodes": [],
+            "result_nodes": [],
+            "limitation_nodes": [],
+            "concept_nodes": [],
+            "evaluation_datasets": [],
+            "evaluation_metrics": [],
+            "relations": [],
+        }
+    current_access = current_graph_non_consumable_policy(current_publish_status)
+    if current_access:
+        return {
+            **base_summary,
+            "graph_access": current_access,
             "problem_nodes": [],
             "claim_nodes": [],
             "method_family": [],
@@ -187,12 +211,29 @@ def graph_quality_summary(
     quality: dict[str, Any],
     memory_view: dict[str, Any],
     artifact_manifest: dict[str, Any],
+    current_audit_findings: list[AuditFinding],
+    current_publish_status: str,
 ) -> dict[str, Any]:
+    artifact_publish_status = artifact_manifest.get("publish_status") or quality.get(
+        "publish_status"
+    )
+    effective_publish_status = artifact_publish_status
+    if artifact_manifest.get("status") == "COMPLETE" and artifact_publish_status:
+        effective_publish_status = current_publish_status
     return {
         "artifact_set_status": artifact_manifest.get("status"),
         "artifact_set_consumable": artifact_manifest.get("consumable"),
         "artifact_set_issues": artifact_manifest.get("issues", []),
-        "publish_status": artifact_manifest.get("publish_status") or quality.get("publish_status"),
+        "publish_status": effective_publish_status,
+        "artifact_publish_status": artifact_publish_status,
+        "current_audit_publish_status": current_publish_status,
+        "current_audit_error_count": current_audit_finding_count(
+            current_audit_findings, severity="ERROR"
+        ),
+        "current_audit_warning_count": current_audit_finding_count(
+            current_audit_findings, severity="WARNING"
+        ),
+        "current_audit_issue_codes": sorted({finding.code for finding in current_audit_findings}),
         "memory_report_readiness": memory_view.get("report_readiness"),
         "evidence_coverage": quality.get("evidence_coverage"),
         "fact_node_count": quality.get("fact_node_count"),
@@ -216,6 +257,22 @@ def graph_non_consumable_policy(artifact_manifest: dict[str, Any]) -> str:
     if publish_status == "BLOCKED":
         return "blocked_by_core_v2_audit"
     return "not_reviewed_by_core_v2_audit"
+
+
+def current_graph_non_consumable_policy(current_publish_status: str) -> str | None:
+    if current_publish_status in CONSUMABLE_GRAPH_STATUSES:
+        return None
+    if current_publish_status == "BLOCKED":
+        return "blocked_by_current_graph_audit"
+    return "not_reviewed_by_current_graph_audit"
+
+
+def current_audit_finding_count(
+    findings: list[AuditFinding],
+    *,
+    severity: str,
+) -> int:
+    return sum(1 for finding in findings if finding.severity == severity)
 
 
 def summarize_graph_node(

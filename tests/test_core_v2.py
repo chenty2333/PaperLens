@@ -2306,6 +2306,72 @@ def test_library_rebuild_does_not_index_blocked_core_v2_claim_graph(tmp_path):
     assert not {"block", "table", "serving"} & set(index["records"][0]["tokens"])
 
 
+def test_library_rebuild_does_not_index_stale_reviewed_graph_with_current_audit_errors(tmp_path):
+    output_dir = tmp_path / "out"
+    data_dir = output_dir / ".paperlens" / "data"
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    layout = {
+        "pages": [
+            {
+                "page_no": 1,
+                "text": "Abstract\n\nWe propose a block table method for serving.",
+                "section_candidates": [{"title": "Abstract", "level": 1}],
+            }
+        ]
+    }
+    dom = build_paper_dom_from_layout(
+        paper_id=paper.paper_id,
+        title=paper.canonical_title,
+        layout=layout,
+    )
+    claim_span = next(span for span in dom.spans if "block table method" in span.text)
+    write_core_v2_from_observation_log(
+        data_dir=data_dir,
+        paper=paper,
+        dom=dom,
+        reading_plan=build_initial_reading_plan(dom),
+        observation_log=ObservationLog(paper_id="p_test").append(
+            ObservationCard(
+                observation_id="obs_claim",
+                paper_id="p_test",
+                task_id="read_02_claim_inventory",
+                observation_type=ObservationType.CLAIM,
+                statement="The paper proposes a block table method.",
+                source_ids=[claim_span.source_id],
+            )
+        ),
+        producer="unit_test",
+    )
+    graph_path = data_dir / "core" / "v2" / "p_test" / "claim_graph.v1.json"
+    graph_envelope = json.loads(graph_path.read_text(encoding="utf-8"))
+    evidence_node = next(
+        node for node in graph_envelope["data"]["nodes"].values() if node["kind"] == "evidence"
+    )
+    evidence_node["payload"]["source_id"] = "span:p_test:missing"
+    graph_path.write_text(json.dumps(graph_envelope, ensure_ascii=False), encoding="utf-8")
+
+    rebuild_library_from_output(output_dir)
+    records = read_library_records(output_dir)
+    result = search_library(output_dir=output_dir, query="block table serving", limit=3)
+
+    graph_summary = records[0]["graph_summary"]
+    assert graph_summary["quality"]["artifact_publish_status"] == PublishStatus.REVIEWED
+    assert graph_summary["quality"]["current_audit_publish_status"] == PublishStatus.BLOCKED
+    assert graph_summary["quality"]["publish_status"] == PublishStatus.BLOCKED
+    assert graph_summary["quality"]["current_audit_error_count"] >= 1
+    assert "missing_dom_source" in graph_summary["quality"]["current_audit_issue_codes"]
+    assert graph_summary["graph_access"] == "blocked_by_current_graph_audit"
+    assert graph_summary["claim_nodes"] == []
+    assert records[0]["memory"]["claims"] == []
+    assert result["matches"] == []
+
+
 def test_library_rebuild_does_not_index_draft_weak_bootstrap_graph(tmp_path):
     output_dir = tmp_path / "out"
     data_dir = output_dir / ".paperlens" / "data"
