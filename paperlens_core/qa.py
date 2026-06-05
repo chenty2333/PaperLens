@@ -18,7 +18,10 @@ from paperlens_core.memory_v3 import (
 )
 from paperlens_core.runtime import PaperLensRuntime
 from paperlens_core.runtime import context_pack_prompt
-from paperlens_core.workflow.core_v2 import load_core_v2_dom_and_graph
+from paperlens_core.workflow.core_v2 import (
+    load_core_v2_dom_and_graph,
+    load_core_v2_quality_metrics,
+)
 
 
 ASK_SYSTEM_PROMPT = """
@@ -250,9 +253,25 @@ def load_core_v2_qa_context(
     limit: int = 8,
 ) -> dict[str, Any]:
     try:
-        dom, graph = load_core_v2_dom_and_graph(paperlens_data_dir(output_dir), paper_id)
+        data_dir = paperlens_data_dir(output_dir)
+        dom, graph = load_core_v2_dom_and_graph(data_dir, paper_id)
     except (FileNotFoundError, ValueError):
         return {}
+    quality = load_core_v2_quality_metrics(data_dir, paper_id)
+    publish_status = str(quality.get("publish_status") or "")
+    if publish_status == "BLOCKED":
+        return {
+            "schema_version": CORE_V2_QA_CONTEXT_VERSION,
+            "paper_id": paper_id,
+            "question": question,
+            "retrieval_policy": "blocked_by_core_v2_audit",
+            "answer_source_policy": (
+                "Core v2 ClaimGraph is BLOCKED by deterministic audit; do not use it as "
+                "paper-claim evidence."
+            ),
+            "quality": core_v2_quality_context(quality),
+            "matches": [],
+        }
     matches = search_core_v2_graph(dom=dom, graph=graph, question=question, limit=limit)
     return {
         "schema_version": CORE_V2_QA_CONTEXT_VERSION,
@@ -263,7 +282,17 @@ def load_core_v2_qa_context(
             "Use graph node IDs and PaperDOM source IDs for paper claims; report Markdown is not "
             "evidence."
         ),
+        "quality": core_v2_quality_context(quality),
         "matches": matches,
+    }
+
+
+def core_v2_quality_context(quality: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "publish_status": quality.get("publish_status"),
+        "audit_error_count": quality.get("audit_error_count"),
+        "audit_warning_count": quality.get("audit_warning_count"),
+        "evidence_coverage": quality.get("evidence_coverage"),
     }
 
 

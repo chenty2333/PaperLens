@@ -1066,6 +1066,49 @@ def test_core_v2_qa_reads_claim_graph_without_final_markdown_report(tmp_path):
     assert answer["source_attribution"]["paper_claims"]
 
 
+def test_core_v2_qa_context_does_not_use_blocked_claim_graph(tmp_path):
+    output_dir = tmp_path / "out"
+    data_dir = output_dir / ".paperlens" / "data"
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    write_core_v2_artifacts(
+        data_dir=data_dir,
+        paper=paper,
+        layout={
+            "pages": [
+                {
+                    "page_no": 1,
+                    "text": "Abstract\n\nWe propose a block table method for serving.",
+                    "section_candidates": [{"title": "Abstract", "level": 1}],
+                }
+            ]
+        },
+    )
+    graph_path = data_dir / "core" / "v2" / "p_test" / "claim_graph.v1.json"
+    graph_envelope = json.loads(graph_path.read_text(encoding="utf-8"))
+    evidence_node = next(
+        node for node in graph_envelope["data"]["nodes"].values() if node["kind"] == "evidence"
+    )
+    evidence_node["payload"]["source_id"] = "span:p_test:missing"
+    graph_path.write_text(json.dumps(graph_envelope, ensure_ascii=False), encoding="utf-8")
+    refresh_core_v2_audit_artifacts(data_dir=data_dir, paper=paper)
+
+    context = load_core_v2_qa_context(
+        output_dir=output_dir,
+        paper_id="p_test",
+        question="block table method 是什么？",
+    )
+
+    assert context["retrieval_policy"] == "blocked_by_core_v2_audit"
+    assert context["quality"]["publish_status"] == PublishStatus.BLOCKED
+    assert context["matches"] == []
+
+
 def test_library_rebuild_indexes_core_v2_claim_graph_without_memory_v3(tmp_path):
     output_dir = tmp_path / "out"
     paper = PaperRecord(
