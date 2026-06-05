@@ -37,6 +37,7 @@ Return final_json matching the QA schema when done.
 
 ASK_PROMPT_VERSION = "qa-agent-v1"
 CORE_V2_QA_CONTEXT_VERSION = "paperlens_core_v2_qa_context.v1"
+CORE_V2_CONSUMABLE_STATUSES = {"REVIEWED", "REVIEWED_WITH_LIMITS"}
 
 
 ASK_SCHEMA: dict[str, Any] = {
@@ -259,14 +260,14 @@ def load_core_v2_qa_context(
         return {}
     quality = load_core_v2_quality_metrics(data_dir, paper_id)
     publish_status = str(quality.get("publish_status") or "")
-    if publish_status == "BLOCKED":
+    if publish_status and publish_status not in CORE_V2_CONSUMABLE_STATUSES:
         return {
             "schema_version": CORE_V2_QA_CONTEXT_VERSION,
             "paper_id": paper_id,
             "question": question,
-            "retrieval_policy": "blocked_by_core_v2_audit",
+            "retrieval_policy": core_v2_non_consumable_policy(publish_status),
             "answer_source_policy": (
-                "Core v2 ClaimGraph is BLOCKED by deterministic audit; do not use it as "
+                "Core v2 ClaimGraph is not in a reviewed publish state; do not use it as "
                 "paper-claim evidence."
             ),
             "quality": core_v2_quality_context(quality),
@@ -294,6 +295,12 @@ def core_v2_quality_context(quality: dict[str, Any]) -> dict[str, Any]:
         "audit_warning_count": quality.get("audit_warning_count"),
         "evidence_coverage": quality.get("evidence_coverage"),
     }
+
+
+def core_v2_non_consumable_policy(publish_status: str) -> str:
+    if publish_status == "BLOCKED":
+        return "blocked_by_core_v2_audit"
+    return "not_reviewed_by_core_v2_audit"
 
 
 def search_core_v2_graph(

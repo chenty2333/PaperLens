@@ -11,6 +11,7 @@ from paperlens_core.runtime import ArtifactEnvelope
 
 
 GRAPH_LIBRARY_SUMMARY_SCHEMA_VERSION = "paperlens.graph_library_summary.v1"
+CONSUMABLE_GRAPH_STATUSES = {"REVIEWED", "REVIEWED_WITH_LIMITS"}
 
 GRAPH_LIBRARY_NODE_KINDS = [
     "problem",
@@ -109,10 +110,10 @@ def summarize_claim_graph_for_library(
         "quality": quality_summary,
         "node_counts": node_counts,
     }
-    if quality_summary.get("publish_status") == "BLOCKED":
+    if not graph_summary_is_consumable(quality_summary):
         return {
             **base_summary,
-            "graph_access": "blocked_by_core_v2_audit",
+            "graph_access": graph_non_consumable_policy(quality_summary),
             "problem_nodes": [],
             "claim_nodes": [],
             "method_family": [],
@@ -184,6 +185,18 @@ def graph_quality_summary(
         "audit_error_count": quality.get("audit_error_count"),
         "audit_warning_count": quality.get("audit_warning_count"),
     }
+
+
+def graph_summary_is_consumable(quality_summary: dict[str, Any]) -> bool:
+    publish_status = str(quality_summary.get("publish_status") or "")
+    return not publish_status or publish_status in CONSUMABLE_GRAPH_STATUSES
+
+
+def graph_non_consumable_policy(quality_summary: dict[str, Any]) -> str:
+    publish_status = str(quality_summary.get("publish_status") or "")
+    if publish_status == "BLOCKED":
+        return "blocked_by_core_v2_audit"
+    return "not_reviewed_by_core_v2_audit"
 
 
 def summarize_graph_node(

@@ -1109,6 +1109,41 @@ def test_core_v2_qa_context_does_not_use_blocked_claim_graph(tmp_path):
     assert context["matches"] == []
 
 
+def test_core_v2_qa_context_does_not_use_draft_weak_bootstrap_graph(tmp_path):
+    output_dir = tmp_path / "out"
+    data_dir = output_dir / ".paperlens" / "data"
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    write_core_v2_artifacts(
+        data_dir=data_dir,
+        paper=paper,
+        layout={
+            "pages": [
+                {
+                    "page_no": 1,
+                    "text": "Abstract\n\nWe propose a block table method for serving.",
+                    "section_candidates": [{"title": "Abstract", "level": 1}],
+                }
+            ]
+        },
+    )
+
+    context = load_core_v2_qa_context(
+        output_dir=output_dir,
+        paper_id="p_test",
+        question="block table method 是什么？",
+    )
+
+    assert context["retrieval_policy"] == "not_reviewed_by_core_v2_audit"
+    assert context["quality"]["publish_status"] == PublishStatus.DRAFT_WEAK
+    assert context["matches"] == []
+
+
 def test_library_rebuild_indexes_core_v2_claim_graph_without_memory_v3(tmp_path):
     output_dir = tmp_path / "out"
     paper = PaperRecord(
@@ -1243,6 +1278,41 @@ def test_library_rebuild_does_not_index_blocked_core_v2_claim_graph(tmp_path):
     assert records[0]["memory"]["claims"] == []
     assert result["matches"] == []
     assert not {"block", "table", "serving"} & set(index["records"][0]["tokens"])
+
+
+def test_library_rebuild_does_not_index_draft_weak_bootstrap_graph(tmp_path):
+    output_dir = tmp_path / "out"
+    data_dir = output_dir / ".paperlens" / "data"
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    write_core_v2_artifacts(
+        data_dir=data_dir,
+        paper=paper,
+        layout={
+            "pages": [
+                {
+                    "page_no": 1,
+                    "text": "Abstract\n\nWe propose a block table method for serving.",
+                    "section_candidates": [{"title": "Abstract", "level": 1}],
+                }
+            ]
+        },
+    )
+
+    rebuild_library_from_output(output_dir)
+    records = read_library_records(output_dir)
+    result = search_library(output_dir=output_dir, query="block table serving", limit=3)
+
+    assert records[0]["quality"]["graph_publish_status"] == PublishStatus.DRAFT_WEAK
+    assert records[0]["graph_summary"]["graph_access"] == "not_reviewed_by_core_v2_audit"
+    assert records[0]["graph_summary"]["claim_nodes"] == []
+    assert records[0]["memory"]["claims"] == []
+    assert result["matches"] == []
 
 
 def test_core_quality_snapshot_tracks_structural_and_qa_metrics(tmp_path):
