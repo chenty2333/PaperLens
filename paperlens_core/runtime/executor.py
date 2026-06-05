@@ -44,6 +44,8 @@ class NodeSpec:
             raise ValueError("max_steps must be >= 1")
         if self.max_model_calls < 0:
             raise ValueError("max_model_calls must be >= 0")
+        if self.max_tokens is not None and self.max_tokens < 1:
+            raise ValueError("max_tokens must be >= 1 when set")
         if self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be > 0")
 
@@ -57,6 +59,8 @@ class NodeResult:
     model_calls_used: int = 0
     tool_calls_used: int = 0
     used_tools: list[str] = field(default_factory=list)
+    tokens_used: int = 0
+    token_usage: dict[str, Any] = field(default_factory=dict)
     elapsed_seconds: float = 0.0
     issues: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -71,6 +75,8 @@ class NodeContext:
     model_calls_used: int = 0
     tool_calls_used: int = 0
     used_tools: list[str] = field(default_factory=list)
+    tokens_used: int = 0
+    token_usage: dict[str, Any] = field(default_factory=dict)
 
     def require_step(self) -> None:
         self.steps_used += 1
@@ -101,6 +107,16 @@ class NodeContext:
             )
         if tool_name not in self.used_tools:
             self.used_tools.append(tool_name)
+
+    def record_token_usage(self, usage: dict[str, Any]) -> None:
+        self._check_runtime_budget()
+        usage_tokens = token_count_from_usage(usage)
+        self.tokens_used += usage_tokens
+        merge_numeric_usage(self.token_usage, usage)
+        if self.spec.max_tokens is not None and self.tokens_used > self.spec.max_tokens:
+            raise RuntimeBudgetExceeded(
+                f"{self.spec.node_id} exceeded max_tokens={self.spec.max_tokens}"
+            )
 
     def _check_runtime_budget(self) -> None:
         elapsed = time.time() - self.started_at
@@ -144,6 +160,8 @@ def run_finite_node(
             model_calls_used=context.model_calls_used,
             tool_calls_used=context.tool_calls_used,
             used_tools=list(context.used_tools),
+            tokens_used=context.tokens_used,
+            token_usage=dict(context.token_usage),
             elapsed_seconds=round(time.time() - context.started_at, 3),
         )
     except Exception as exc:
@@ -158,6 +176,38 @@ def run_finite_node(
             model_calls_used=context.model_calls_used,
             tool_calls_used=context.tool_calls_used,
             used_tools=list(context.used_tools),
+            tokens_used=context.tokens_used,
+            token_usage=dict(context.token_usage),
             elapsed_seconds=round(time.time() - context.started_at, 3),
             issues=[str(exc)],
         )
+
+
+def token_count_from_usage(usage: dict[str, Any]) -> int:
+    total = numeric_int(usage.get("total_tokens"))
+    if total is not None:
+        return total
+    input_tokens = (
+        numeric_int(usage.get("input_tokens")) or numeric_int(usage.get("prompt_tokens")) or 0
+    )
+    output_tokens = (
+        numeric_int(usage.get("output_tokens")) or numeric_int(usage.get("completion_tokens")) or 0
+    )
+    return input_tokens + output_tokens
+
+
+def numeric_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    return None
+
+
+def merge_numeric_usage(target: dict[str, Any], source: dict[str, Any]) -> None:
+    for key, value in source.items():
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            previous = target.get(key)
+            target[key] = (previous if isinstance(previous, (int, float)) else 0) + value

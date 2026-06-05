@@ -234,6 +234,7 @@ def run_core_v2_model_observation_tasks(
             allowed_tools=("paper_dom.read_sources",),
             max_steps=1,
             max_model_calls=task.max_model_calls,
+            max_tokens=task.max_tokens,
             timeout_seconds=180.0,
         )
         inputs = [
@@ -268,9 +269,10 @@ def run_core_v2_model_observation_tasks(
                     ),
                     schema_name="paperlens_core_v2_observation_cards",
                     schema=OBSERVATION_CARDS_SCHEMA,
-                    max_tokens=None,
+                    max_tokens=task.max_tokens,
                 )
             raw_results.append(raw)
+            context.record_token_usage(dict(getattr(raw, "usage", {}) or {}))
             return ArtifactEnvelope.model_validate(raw.data).require_type("observation_cards")
 
         node_result = run_finite_node(spec, inputs, handler)
@@ -297,6 +299,8 @@ def run_core_v2_model_observation_tasks(
                 "model_calls_used": node_result.model_calls_used,
                 "tool_calls_used": node_result.tool_calls_used,
                 "used_tools": node_result.used_tools,
+                "tokens_used": node_result.tokens_used,
+                "token_usage": node_result.token_usage,
             }
         )
         if node_result.status != NodeStatus.PASS or node_result.output is None:
@@ -667,6 +671,7 @@ def build_observation_task_prompt(
             "allowed_observation_types": task_allowed_observation_types(task),
             "evidence_policy": task.evidence_policy,
             "max_model_calls": task.max_model_calls,
+            "max_tokens": task.max_tokens,
         },
         "evidence_pack": source_pack(dom, task.target_source_ids),
         "output_contract": {

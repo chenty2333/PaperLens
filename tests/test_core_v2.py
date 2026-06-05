@@ -110,6 +110,7 @@ def test_reading_plan_is_structured_and_source_bound():
     assert ReadingTaskType.EVALUATION_SETUP in task_types
     assert ReadingTaskType.RESULT_EXTRACTION in task_types
     assert all(task.max_model_calls == 1 for task in plan.tasks)
+    assert all(task.max_tokens == 16000 for task in plan.tasks)
     assert all(task.evidence_policy == "must_cite_paper_dom_source_ids" for task in plan.tasks)
     assert all(task.allowed_observation_types for task in plan.tasks)
     assert next(
@@ -508,6 +509,21 @@ def test_finite_runtime_node_rejects_disallowed_tools():
     assert "disallowed tool=filesystem.read" in result.issues[0]
 
 
+def test_finite_runtime_node_enforces_token_budget():
+    spec = NodeSpec(node_id="token_budget", max_tokens=10)
+
+    def handler(context):
+        context.record_token_usage({"prompt_tokens": 8, "completion_tokens": 4})
+        return None
+
+    result = run_finite_node(spec, [], handler)
+
+    assert result.status == NodeStatus.FAIL
+    assert result.tokens_used == 12
+    assert result.token_usage == {"prompt_tokens": 8, "completion_tokens": 4}
+    assert "exceeded max_tokens=10" in result.issues[0]
+
+
 def test_stage03_writes_core_v2_artifact_envelopes(tmp_path):
     output_dir = tmp_path / "out"
     input_dir = tmp_path / "in"
@@ -626,6 +642,7 @@ def test_core_v2_model_observer_rewrites_observation_graph_artifacts(tmp_path):
             source_id = prompt["evidence_pack"][0]["source_id"]
             task_type = prompt["task_spec"]["task_type"]
             observation_type = prompt["task_spec"]["allowed_observation_types"][0]
+            assert _kwargs["max_tokens"] == prompt["task_spec"]["max_tokens"]
             return SimpleNamespace(
                 data={
                     "artifact_type": "observation_cards",
@@ -676,6 +693,10 @@ def test_core_v2_model_observer_rewrites_observation_graph_artifacts(tmp_path):
     assert all(row["status"] == "PASS" for row in agent_runs)
     assert all(row["tool_calls_used"] == 1 for row in agent_runs)
     assert all(row["used_tools"] == ["paper_dom.read_sources"] for row in agent_runs)
+    assert all(row["tokens_used"] == 12 for row in agent_runs)
+    assert all(
+        row["token_usage"] == {"prompt_tokens": 10, "completion_tokens": 2} for row in agent_runs
+    )
 
 
 def test_refresh_core_v2_audit_artifacts_blocks_missing_dom_sources(tmp_path):

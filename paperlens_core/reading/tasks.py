@@ -27,6 +27,7 @@ class ReadingTask(BaseModel):
     required_outputs: list[str] = Field(default_factory=list)
     allowed_observation_types: list[str] = Field(default_factory=list)
     max_model_calls: int = 1
+    max_tokens: int = 16000
     evidence_policy: str = "must_cite_paper_dom_source_ids"
 
 
@@ -70,7 +71,9 @@ ALLOWED_OBSERVATION_TYPES: dict[ReadingTaskType, tuple[str, ...]] = {
 }
 
 
-def build_initial_reading_plan(dom: PaperDOM, *, max_sources_per_task: int = 8) -> ReadingPlan:
+def build_initial_reading_plan(
+    dom: PaperDOM, *, max_sources_per_task: int = 8, max_tokens_per_task: int = 16000
+) -> ReadingPlan:
     tasks = []
     for index, task_type in enumerate(ReadingTaskType, start=1):
         targets = select_sources_for_task(dom, task_type, limit=max_sources_per_task)
@@ -82,6 +85,7 @@ def build_initial_reading_plan(dom: PaperDOM, *, max_sources_per_task: int = 8) 
                 required_outputs=required_outputs_for_task(task_type),
                 allowed_observation_types=allowed_observation_types_for_task(task_type),
                 max_model_calls=1,
+                max_tokens=max_tokens_per_task,
             )
         )
     return ReadingPlan(paper_id=dom.paper_id, tasks=tasks)
