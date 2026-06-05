@@ -12,7 +12,7 @@ from paperlens_core.audit import (
     publish_status_from_findings,
 )
 from paperlens_core.agent_loop import PaperToolRegistry
-from paperlens_core.dom import build_paper_dom_from_layout
+from paperlens_core.dom import PaperDOM, PaperSection, PaperSpan, build_paper_dom_from_layout
 from paperlens_core.graph import GraphEdge, GraphNode, graph_from_observations
 from paperlens_core.library import (
     doctor_library,
@@ -157,6 +157,103 @@ def test_paper_dom_assigns_unique_equation_and_missing_page_source_ids():
     assert len({item.source_id for item in dom.figures}) == 2
     assert all("p0" not in item.source_id for item in [*dom.spans, *dom.figures, *dom.equations])
     assert "page_missing_number" in dom.parse_warnings
+
+
+def test_paper_dom_rejects_duplicate_source_ids():
+    with pytest.raises(ValueError, match="source_id values must be unique"):
+        PaperDOM(
+            paper_id="p_test",
+            sections=[
+                PaperSection(
+                    source_id="section:p_test:p1:1",
+                    paper_id="p_test",
+                    title="Abstract",
+                    span_ids=["span:p_test:p1:1"],
+                )
+            ],
+            spans=[
+                PaperSpan(
+                    source_id="span:p_test:p1:1",
+                    paper_id="p_test",
+                    section_id="section:p_test:p1:1",
+                    text="First span.",
+                ),
+                PaperSpan(
+                    source_id="span:p_test:p1:1",
+                    paper_id="p_test",
+                    section_id="section:p_test:p1:1",
+                    text="Duplicate span.",
+                ),
+            ],
+        )
+
+
+def test_paper_dom_rejects_cross_paper_source_addresses():
+    with pytest.raises(ValueError, match="source_id does not match kind/paper_id"):
+        PaperDOM(
+            paper_id="p_test",
+            sections=[
+                PaperSection(
+                    source_id="section:p_test:p1:1",
+                    paper_id="p_test",
+                    title="Abstract",
+                )
+            ],
+            spans=[
+                PaperSpan(
+                    source_id="span:p_other:p1:1",
+                    paper_id="p_test",
+                    section_id="section:p_test:p1:1",
+                    text="Wrong source address.",
+                )
+            ],
+        )
+    with pytest.raises(ValueError, match="node paper_id mismatch"):
+        PaperDOM(
+            paper_id="p_test",
+            sections=[
+                PaperSection(
+                    source_id="section:p_test:p1:1",
+                    paper_id="p_test",
+                    title="Abstract",
+                )
+            ],
+            spans=[
+                PaperSpan(
+                    source_id="span:p_test:p1:1",
+                    paper_id="p_other",
+                    section_id="section:p_test:p1:1",
+                    text="Wrong node paper id.",
+                )
+            ],
+        )
+
+
+def test_paper_dom_rejects_dangling_internal_source_links():
+    with pytest.raises(ValueError, match="section span_ids reference missing spans"):
+        PaperDOM(
+            paper_id="p_test",
+            sections=[
+                PaperSection(
+                    source_id="section:p_test:p1:1",
+                    paper_id="p_test",
+                    title="Abstract",
+                    span_ids=["span:p_test:p1:missing"],
+                )
+            ],
+        )
+    with pytest.raises(ValueError, match="nodes reference missing sections"):
+        PaperDOM(
+            paper_id="p_test",
+            spans=[
+                PaperSpan(
+                    source_id="span:p_test:p1:1",
+                    paper_id="p_test",
+                    section_id="section:p_test:p1:missing",
+                    text="Dangling section.",
+                )
+            ],
+        )
 
 
 def test_reading_plan_is_structured_and_source_bound():

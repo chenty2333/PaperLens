@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 SourceKind = Literal["section", "span", "figure", "table", "equation"]
@@ -68,15 +68,86 @@ class PaperDOM(BaseModel):
     equations: list[PaperEquation] = Field(default_factory=list)
     parse_warnings: list[str] = Field(default_factory=list)
 
+    @field_validator("paper_id")
+    @classmethod
+    def nonempty_paper_id(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("PaperDOM paper_id cannot be blank")
+        return value
+
+    @model_validator(mode="after")
+    def validate_source_address_space(self) -> "PaperDOM":
+        nodes = self.all_nodes()
+        seen: set[str] = set()
+        duplicates: list[str] = []
+        safe_paper = slug_part(self.paper_id)
+        for node in nodes:
+            if node.source_id in seen and node.source_id not in duplicates:
+                duplicates.append(node.source_id)
+            seen.add(node.source_id)
+            if node.paper_id != self.paper_id:
+                raise ValueError(
+                    f"PaperDOM node paper_id mismatch: {node.source_id} has "
+                    f"{node.paper_id} != {self.paper_id}"
+                )
+            expected_prefix = f"{node.kind}:{safe_paper}"
+            if node.source_id != expected_prefix and not node.source_id.startswith(
+                f"{expected_prefix}:"
+            ):
+                raise ValueError(
+                    f"PaperDOM node source_id does not match kind/paper_id: {node.source_id}"
+                )
+        if duplicates:
+            raise ValueError("PaperDOM source_id values must be unique: " + ", ".join(duplicates))
+
+        span_ids = {span.source_id for span in self.spans}
+        section_ids = {section.source_id for section in self.sections}
+        missing_span_refs = sorted(
+            {
+                span_id
+                for section in self.sections
+                for span_id in section.span_ids
+                if span_id not in span_ids
+            }
+        )
+        if missing_span_refs:
+            raise ValueError(
+                "PaperDOM section span_ids reference missing spans: "
+                + ", ".join(missing_span_refs[:8])
+            )
+        missing_section_refs = sorted(
+            {
+                section_id
+                for section_id in [
+                    *(span.section_id for span in self.spans),
+                    *(equation.section_id for equation in self.equations),
+                ]
+                if section_id and section_id not in section_ids
+            }
+        )
+        if missing_section_refs:
+            raise ValueError(
+                "PaperDOM nodes reference missing sections: "
+                + ", ".join(missing_section_refs[:8])
+            )
+        return self
+
     def source_ids(self) -> set[str]:
         return {
             node.source_id
-            for group in [self.sections, self.spans, self.figures, self.tables, self.equations]
-            for node in group
+            for node in self.all_nodes()
         }
 
     def source_exists(self, source_id: str) -> bool:
         return source_id in self.source_ids()
+
+    def all_nodes(self) -> list[PaperDOMNode]:
+        return [
+            node
+            for group in [self.sections, self.spans, self.figures, self.tables, self.equations]
+            for node in group
+        ]
 
 
 def stable_source_id(paper_id: str, kind: SourceKind, *parts: Any) -> str:
