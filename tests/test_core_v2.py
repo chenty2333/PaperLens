@@ -44,6 +44,10 @@ from paperlens_core.report import (
     ReportSection,
     audit_report_draft_against_graph,
     build_report_draft_from_graph,
+    build_report_memory_context,
+    compact_paper_memory_for_report,
+    report_focus_pages,
+    report_focus_queries,
     render_graph_report_markdown,
 )
 from paperlens_core.runtime import (
@@ -66,11 +70,7 @@ from paperlens_core.schemas import (
 )
 from paperlens_core.workflow.agent import (
     PaperLensWorkflow,
-    build_report_memory_context,
-    compact_paper_memory_for_report,
     paper_report_filename,
-    report_focus_pages,
-    report_focus_queries,
     write_final_report_bundle,
 )
 from paperlens_core.workflow.core_v2 import (
