@@ -26,6 +26,7 @@ from paperlens_core.qa import (
     answer_question,
     build_ask_prompt,
     core_v2_context_priority,
+    ground_qa_answer_in_core_v2_context,
     load_core_v2_qa_context,
     qa_memory_context,
 )
@@ -1744,6 +1745,104 @@ def test_core_v2_qa_memory_view_promotes_reviewed_claim_graph_context(tmp_path):
     assert "core_v2_context_priority: primary_reviewed_claim_graph" in prompt
     assert "memory_fallback_policy:" in prompt
     assert "Legacy claim should not be primary" not in prompt
+
+
+def test_core_v2_qa_grounding_filters_unknown_source_ids_and_claims():
+    core_context = {
+        "retrieval_policy": "claim_graph_nodes_with_paper_dom_source_ids",
+        "quality": {"publish_status": PublishStatus.REVIEWED},
+        "matches": [
+            {
+                "node_id": "claim:obs_claim",
+                "kind": "claim",
+                "label": "The paper proposes a block table method.",
+                "source_ids": ["span:p_test:p1:1"],
+                "evidence_spans": [
+                    {
+                        "source_id": "span:p_test:p1:1",
+                        "kind": "paragraph",
+                        "page_no": 1,
+                        "text": "We propose a block table method for serving.",
+                    }
+                ],
+            }
+        ],
+    }
+    answer = {
+        "answer_markdown": "The paper proposes a block table method and proves 99% accuracy.",
+        "cited_pages": [],
+        "cited_source_ids": ["span:p_test:p1:1", "span:p_other:p9:9"],
+        "confidence": "high",
+        "source_attribution": {
+            "paper_claims": [
+                "The paper proposes a block table method.",
+                "The paper proves 99% accuracy.",
+            ],
+            "paperlens_inferences": [],
+            "background_context": [],
+            "evidence_limits": [],
+        },
+    }
+
+    grounded = ground_qa_answer_in_core_v2_context(answer, core_context)
+
+    assert grounded["cited_source_ids"] == ["span:p_test:p1:1"]
+    assert grounded["cited_pages"] == [1]
+    assert grounded["confidence"] == "medium"
+    assert grounded["source_attribution"]["paper_claims"] == [
+        "The paper proposes a block table method."
+    ]
+    assert "Evidence limits:" in grounded["answer_markdown"]
+    assert any(
+        "Removed QA source IDs" in item
+        for item in grounded["source_attribution"]["evidence_limits"]
+    )
+    assert any(
+        "Removed model-declared paper claims" in item
+        for item in grounded["source_attribution"]["evidence_limits"]
+    )
+
+
+def test_core_v2_qa_grounding_backfills_source_ids_for_supported_paper_claims():
+    core_context = {
+        "retrieval_policy": "claim_graph_nodes_with_paper_dom_source_ids",
+        "quality": {"publish_status": PublishStatus.REVIEWED},
+        "matches": [
+            {
+                "node_id": "claim:obs_claim",
+                "kind": "claim",
+                "label": "The paper proposes a block table method.",
+                "source_ids": ["span:p_test:p1:1"],
+                "evidence_spans": [
+                    {
+                        "source_id": "span:p_test:p1:1",
+                        "kind": "paragraph",
+                        "page_no": 1,
+                        "text": "We propose a block table method for serving.",
+                    }
+                ],
+            }
+        ],
+    }
+    answer = {
+        "answer_markdown": "The paper proposes a block table method.",
+        "cited_pages": [],
+        "cited_source_ids": [],
+        "confidence": "high",
+        "source_attribution": {
+            "paper_claims": ["The paper proposes a block table method."],
+            "paperlens_inferences": [],
+            "background_context": [],
+            "evidence_limits": [],
+        },
+    }
+
+    grounded = ground_qa_answer_in_core_v2_context(answer, core_context)
+
+    assert grounded["cited_source_ids"] == ["span:p_test:p1:1"]
+    assert grounded["cited_pages"] == [1]
+    assert grounded["confidence"] == "high"
+    assert grounded["source_attribution"]["evidence_limits"] == []
 
 
 def test_export_writes_core_graph_report_view_for_reviewed_core_artifacts(tmp_path):

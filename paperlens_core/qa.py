@@ -11,6 +11,7 @@ from paperlens_core.agents.llm import JsonLlmClient
 from paperlens_core.config import CoreConfig
 from paperlens_core.core_manifest import inspect_core_v2_artifact_set
 from paperlens_core.dom import PaperDOM
+from paperlens_core.grounding import text_overlaps_any_reference
 from paperlens_core.graph import ClaimGraph
 from paperlens_core.library import read_library_records
 from paperlens_core.memory_v3 import (
@@ -141,6 +142,7 @@ def answer_question(
             pages=pages,
             core_v2_context=core_v2_context,
         )
+        answer = ground_qa_answer_in_core_v2_context(answer, core_v2_context)
         write_qa_trace(
             output_dir,
             answer,
@@ -190,6 +192,7 @@ def answer_question(
     cached = read_ask_cache(cache_path)
     if cached and isinstance(cached.get("data"), dict):
         answer = normalize_answer(cached["data"])
+        answer = ground_qa_answer_in_core_v2_context(answer, core_v2_context)
         answer["paper_id"] = resolved_paper_id
         answer["usage"] = {}
         answer["cache_hit"] = True
@@ -225,6 +228,7 @@ def answer_question(
         user_prompt=user_prompt,
     )
     answer = normalize_answer(result.final)
+    answer = ground_qa_answer_in_core_v2_context(answer, core_v2_context)
     answer["paper_id"] = resolved_paper_id
     answer["usage"] = result.usage
     answer["cache_hit"] = False
@@ -1174,6 +1178,159 @@ def normalize_answer(data: dict[str, Any]) -> dict[str, Any]:
         "confidence": confidence,
         "source_attribution": source_attribution,
     }
+
+
+def ground_qa_answer_in_core_v2_context(
+    answer: dict[str, Any],
+    core_v2_context: dict[str, Any],
+) -> dict[str, Any]:
+    if not core_v2_context_is_consumable(core_v2_context):
+        return answer
+    grounded = dict(answer)
+    attribution = normalize_source_attribution(
+        {"source_attribution": grounded.get("source_attribution")},
+        answer=str(grounded.get("answer_markdown") or ""),
+        confidence=str(grounded.get("confidence") or "low"),
+    )
+    allowed_source_ids = core_v2_context_source_ids(core_v2_context)
+    cited_source_ids = [
+        source_id
+        for source_id in normalized_source_id_list(grounded.get("cited_source_ids"))
+        if source_id in allowed_source_ids
+    ]
+    removed_source_ids = [
+        source_id
+        for source_id in normalized_source_id_list(grounded.get("cited_source_ids"))
+        if source_id not in allowed_source_ids
+    ]
+    paper_claims = attribution["paper_claims"]
+    supported_claims = []
+    unsupported_claims = []
+    for claim in paper_claims:
+        matching_sources = source_ids_for_supported_claim(claim, core_v2_context)
+        if matching_sources:
+            supported_claims.append(claim)
+            for source_id in matching_sources:
+                if source_id not in cited_source_ids:
+                    cited_source_ids.append(source_id)
+        else:
+            unsupported_claims.append(claim)
+    if removed_source_ids:
+        attribution["evidence_limits"].append(removed_qa_source_ids_note(removed_source_ids))
+    if unsupported_claims:
+        attribution["evidence_limits"].append(unsupported_qa_claims_note(unsupported_claims))
+    attribution["paper_claims"] = supported_claims
+    grounded["source_attribution"] = attribution
+    grounded["cited_source_ids"] = cited_source_ids[:16]
+    grounded["cited_pages"] = merge_core_v2_cited_pages(
+        normalized_positive_int_list(grounded.get("cited_pages")),
+        core_v2_context=core_v2_context,
+        cited_source_ids=grounded["cited_source_ids"],
+    )
+    if removed_source_ids or unsupported_claims:
+        grounded["confidence"] = lower_qa_confidence(str(grounded.get("confidence") or "low"))
+        grounded["answer_markdown"] = append_qa_evidence_limit_notes(
+            str(grounded.get("answer_markdown") or ""),
+            [removed_qa_source_ids_note(removed_source_ids)] if removed_source_ids else [],
+            [unsupported_qa_claims_note(unsupported_claims)] if unsupported_claims else [],
+        )
+    return grounded
+
+
+def source_ids_for_supported_claim(claim: str, core_v2_context: dict[str, Any]) -> list[str]:
+    source_ids = []
+    for match in list_of_dicts(core_v2_context.get("matches")):
+        label = str(match.get("label") or "")
+        if not text_overlaps_any_reference(claim, [label]):
+            continue
+        for source_id in match.get("source_ids", []):
+            if isinstance(source_id, str) and source_id and source_id not in source_ids:
+                source_ids.append(source_id)
+    return source_ids
+
+
+def core_v2_context_source_ids(core_v2_context: dict[str, Any]) -> set[str]:
+    source_ids = set()
+    for match in list_of_dicts(core_v2_context.get("matches")):
+        source_ids.update(source_id for source_id in match.get("source_ids", []) if source_id)
+        source_ids.update(
+            span.get("source_id")
+            for span in list_of_dicts(match.get("evidence_spans"))
+            if span.get("source_id")
+        )
+        for relationship in list_of_dicts(match.get("relationships")):
+            source_ids.update(
+                source_id for source_id in relationship.get("source_ids", []) if source_id
+            )
+    return {str(source_id).strip() for source_id in source_ids if str(source_id).strip()}
+
+
+def merge_core_v2_cited_pages(
+    pages: list[int],
+    *,
+    core_v2_context: dict[str, Any],
+    cited_source_ids: list[str],
+) -> list[int]:
+    result = list(pages)
+    cited = set(cited_source_ids)
+    for match in list_of_dicts(core_v2_context.get("matches")):
+        for span in list_of_dicts(match.get("evidence_spans")):
+            if span.get("source_id") not in cited:
+                continue
+            page_no = span.get("page_no")
+            if isinstance(page_no, int) and page_no > 0 and page_no not in result:
+                result.append(page_no)
+    return result[:8]
+
+
+def normalized_positive_int_list(value: Any) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    result = []
+    for item in value:
+        try:
+            number = int(item)
+        except (TypeError, ValueError):
+            continue
+        if number > 0 and number not in result:
+            result.append(number)
+    return result
+
+
+def lower_qa_confidence(confidence: str) -> str:
+    if confidence == "high":
+        return "medium"
+    if confidence == "medium":
+        return "low"
+    return "low"
+
+
+def removed_qa_source_ids_note(source_ids: list[str]) -> str:
+    return (
+        "Removed QA source IDs that were not present in the reviewed ClaimGraph context: "
+        + ", ".join(source_ids[:6])
+    )
+
+
+def unsupported_qa_claims_note(claims: list[str]) -> str:
+    return (
+        "Removed model-declared paper claims that were not supported by the reviewed "
+        "ClaimGraph matches: "
+        + " | ".join(claims[:3])
+    )
+
+
+def append_qa_evidence_limit_notes(
+    answer_markdown: str,
+    removed_source_notes: list[str],
+    unsupported_claim_notes: list[str],
+) -> str:
+    notes = [*removed_source_notes, *unsupported_claim_notes]
+    if not notes:
+        return answer_markdown
+    lines = [answer_markdown.rstrip(), "", "Evidence limits:"]
+    lines.extend(f"- {note}" for note in notes)
+    return "\n".join(line for line in lines if line is not None).strip()
 
 
 def normalize_source_attribution(
