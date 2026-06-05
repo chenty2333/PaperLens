@@ -14,6 +14,7 @@ from paperlens_core.audit import (
 from paperlens_core.dom import build_paper_dom_from_layout
 from paperlens_core.graph import graph_from_observations
 from paperlens_core.memory import materialize_paper_memory
+from paperlens_core.qa import answer_question, load_core_v2_qa_context
 from paperlens_core.reading import (
     ObservationCard,
     ObservationLog,
@@ -563,6 +564,49 @@ def test_stage08_refreshes_core_v2_audits_without_legacy_paper_cards(tmp_path):
         assert "CORE_V2_DRAFT_WEAK" in state.side_statuses
     finally:
         pipeline.db.close()
+
+
+def test_core_v2_qa_reads_claim_graph_without_final_markdown_report(tmp_path):
+    output_dir = tmp_path / "out"
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    write_core_v2_artifacts(
+        data_dir=output_dir / ".paperlens" / "data",
+        paper=paper,
+        layout={
+            "pages": [
+                {
+                    "page_no": 1,
+                    "text": "Abstract\n\nWe propose a block table method for faster serving.",
+                    "section_candidates": [{"title": "Abstract", "level": 1}],
+                }
+            ]
+        },
+    )
+
+    context = load_core_v2_qa_context(
+        output_dir=output_dir,
+        paper_id="p_test",
+        question="block table method 是什么？",
+    )
+    answer = answer_question(
+        output_dir=output_dir,
+        config=CoreConfig(offline_debug=True),
+        paper_id="p_test",
+        question="block table method 是什么？",
+    )
+
+    assert context["matches"]
+    assert context["matches"][0]["source_ids"][0].startswith("span:p_test:")
+    assert answer["cited_source_ids"][0].startswith("span:p_test:")
+    assert answer["cited_pages"] == [1]
+    assert "ClaimGraph" in answer["answer_markdown"]
+    assert answer["source_attribution"]["paper_claims"]
 
 
 def test_stage07_runs_core_v2_observation_read_before_legacy_rolling(tmp_path, monkeypatch):
