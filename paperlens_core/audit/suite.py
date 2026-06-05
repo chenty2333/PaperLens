@@ -46,6 +46,28 @@ def audit_claim_graph(graph: ClaimGraph, dom: PaperDOM) -> list[AuditFinding]:
                     node_id=node.node_id,
                 )
             )
+        if node.kind in FACT_NODE_KINDS and node.payload.get("confidence") == "low":
+            findings.append(
+                AuditFinding(
+                    finding_id=f"low_confidence:{node.node_id}",
+                    severity=AuditSeverity.WARNING,
+                    code="low_confidence_fact_node",
+                    message=f"{node.kind} node is source-bound but low confidence",
+                    node_id=node.node_id,
+                )
+            )
+        if node.kind in FACT_NODE_KINDS and str(node.payload.get("uncertainty") or "").startswith(
+            "Deterministic bootstrap observation"
+        ):
+            findings.append(
+                AuditFinding(
+                    finding_id=f"bootstrap:{node.node_id}",
+                    severity=AuditSeverity.WARNING,
+                    code="bootstrap_observation",
+                    message="Fact node comes from deterministic bootstrap and needs task-specific reading",
+                    node_id=node.node_id,
+                )
+            )
         if node.kind in {"claim", "result", "evaluation"} and contains_number(node.label):
             source_ids = [
                 str(graph.nodes[evidence_id].payload.get("source_id") or "")
@@ -71,6 +93,8 @@ def audit_claim_graph(graph: ClaimGraph, dom: PaperDOM) -> list[AuditFinding]:
 def publish_status_from_findings(findings: list[AuditFinding]) -> PublishStatus:
     if any(item.severity == AuditSeverity.ERROR for item in findings):
         return PublishStatus.BLOCKED
+    if any(item.code == "bootstrap_observation" for item in findings):
+        return PublishStatus.DRAFT_WEAK
     if any(item.severity == AuditSeverity.WARNING for item in findings):
         return PublishStatus.REVIEWED_WITH_LIMITS
     return PublishStatus.REVIEWED

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from paperlens_core.audit import (
@@ -25,6 +27,11 @@ from paperlens_core.runtime import (
     NodeStatus,
     run_finite_node,
 )
+from paperlens_core.config import CoreConfig
+from paperlens_core.control import ControlState
+from paperlens_core.events import EventWriter
+from paperlens_core.schemas import PageArtifact, PaperRecord
+from paperlens_core.workflow.agent import PaperLensWorkflow
 
 
 def sample_dom():
@@ -197,3 +204,78 @@ def test_artifact_envelope_rejects_wrong_output_type():
 
     assert result.status == NodeStatus.FAIL
     assert "Expected artifact_type=claim_graph" in result.issues[0]
+
+
+def test_stage03_writes_core_v2_artifact_envelopes(tmp_path):
+    output_dir = tmp_path / "out"
+    input_dir = tmp_path / "in"
+    input_dir.mkdir()
+    pipeline = PaperLensWorkflow(
+        input_dir=input_dir,
+        output_dir=output_dir,
+        config=CoreConfig(offline_debug=True),
+        events=EventWriter(
+            "run_test",
+            output_dir / ".paperlens" / "data" / "events.jsonl",
+            output_dir / ".paperlens" / "data" / "errors.jsonl",
+        ),
+        control=ControlState(),
+    )
+    try:
+        pipeline.prepare_output()
+        paper = PaperRecord(
+            paper_id="p_test",
+            file_path="paper.pdf",
+            file_hash="hash",
+            canonical_title="Test Paper",
+            page_count=2,
+        )
+        pages = [
+            PageArtifact(
+                paper_id="p_test",
+                page_no=1,
+                text="Abstract\n\nWe propose a block table method for serving.",
+                section_candidates=[{"title": "Abstract", "level": 1}],
+            ),
+            PageArtifact(
+                paper_id="p_test",
+                page_no=2,
+                text="Evaluation\n\nThe method improves latency by 27% on Dataset-A.",
+                section_candidates=[{"title": "Evaluation", "level": 1}],
+            ),
+        ]
+        pipeline.papers = [paper]
+        pipeline.db.upsert_paper(paper)
+        pipeline.db.insert_page_artifacts(pages)
+        layout_path = output_dir / ".paperlens" / "data" / "artifacts" / "layout" / "p_test.json"
+        layout_path.parent.mkdir(parents=True, exist_ok=True)
+        layout_path.write_text(
+            json.dumps({"pages": [page.model_dump() for page in pages]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        pipeline.stage_03_skim()
+
+        core_root = output_dir / ".paperlens" / "data" / "core" / "v2" / "p_test"
+        dom_envelope = json.loads((core_root / "paper_dom.v1.json").read_text(encoding="utf-8"))
+        plan_envelope = json.loads((core_root / "reading_plan.v1.json").read_text(encoding="utf-8"))
+        graph_envelope = json.loads((core_root / "claim_graph.v1.json").read_text(encoding="utf-8"))
+        metrics_envelope = json.loads(
+            (core_root / "quality_metrics.v1.json").read_text(encoding="utf-8")
+        )
+
+        assert dom_envelope["artifact_type"] == "paper_dom"
+        assert plan_envelope["artifact_type"] == "reading_plan"
+        assert graph_envelope["artifact_type"] == "claim_graph"
+        assert metrics_envelope["artifact_type"] == "core_quality_metrics"
+        assert dom_envelope["data"]["spans"]
+        assert plan_envelope["data"]["tasks"]
+        assert graph_envelope["data"]["nodes"]
+        assert metrics_envelope["data"]["fact_node_count"] > 0
+        assert metrics_envelope["data"]["publish_status"] == PublishStatus.DRAFT_WEAK
+        assert any(
+            item.artifact_type == "core_v2_paper_dom"
+            for item in pipeline.db.list_artifact_versions()
+        )
+    finally:
+        pipeline.db.close()

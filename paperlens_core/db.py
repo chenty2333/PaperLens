@@ -99,8 +99,7 @@ class ArtifactDb:
 
     def _ensure_paper_columns(self) -> None:
         existing = {
-            row["name"]
-            for row in self.conn.execute("PRAGMA table_info(paper_records)").fetchall()
+            row["name"] for row in self.conn.execute("PRAGMA table_info(paper_records)").fetchall()
         }
         migrations = {
             "venue": "ALTER TABLE paper_records ADD COLUMN venue TEXT",
@@ -159,7 +158,9 @@ class ArtifactDb:
         )
         self.conn.commit()
 
-    def update_paper_status(self, paper_id: str, status: str, parse_quality: str | None = None) -> None:
+    def update_paper_status(
+        self, paper_id: str, status: str, parse_quality: str | None = None
+    ) -> None:
         self.conn.execute(
             "UPDATE paper_records SET status=?, parse_quality=COALESCE(?, parse_quality) WHERE paper_id=?",
             (status, parse_quality, paper_id),
@@ -232,9 +233,7 @@ class ArtifactDb:
         return PaperState.model_validate_json(row["state_json"]) if row else None
 
     def list_papers(self) -> list[PaperRecord]:
-        rows = self.conn.execute(
-            "SELECT * FROM paper_records ORDER BY paper_id"
-        ).fetchall()
+        rows = self.conn.execute("SELECT * FROM paper_records ORDER BY paper_id").fetchall()
         return [
             PaperRecord(
                 paper_id=row["paper_id"],
@@ -263,7 +262,9 @@ class ArtifactDb:
         return [SkimCard.model_validate_json(row["card_json"]) for row in rows]
 
     def list_classifications(self) -> list[ClassificationDecision]:
-        rows = self.conn.execute("SELECT decision_json FROM classifications ORDER BY paper_id").fetchall()
+        rows = self.conn.execute(
+            "SELECT decision_json FROM classifications ORDER BY paper_id"
+        ).fetchall()
         return [ClassificationDecision.model_validate_json(row["decision_json"]) for row in rows]
 
     def list_paper_cards(self) -> list[PaperCard]:
@@ -280,6 +281,12 @@ class ArtifactDb:
             (artifact.artifact_id, artifact.model_dump_json()),
         )
         self.conn.commit()
+
+    def list_artifact_versions(self) -> list[ArtifactVersion]:
+        rows = self.conn.execute(
+            "SELECT artifact_json FROM artifact_versions ORDER BY artifact_id"
+        ).fetchall()
+        return [ArtifactVersion.model_validate_json(row["artifact_json"]) for row in rows]
 
     def upsert_review_item(self, item: ReviewItem) -> None:
         self.conn.execute(

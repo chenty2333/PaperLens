@@ -53,6 +53,7 @@ from paperlens_core.workflow.stages import (
     normalize_workflow_stage,
     resolve_workflow_stages,
 )
+from paperlens_core.workflow.core_v2 import write_core_v2_artifacts
 
 
 class PaperLensWorkflow:
@@ -760,14 +761,51 @@ class PaperLensWorkflow:
             for paper, _artifacts, fallback_card, fallback_decision in fallbacks:
                 self.persist_skim_classification(stage, paper, fallback_card, fallback_decision)
         self.order_skim_classification_state()
+        core_v2_count = self.persist_core_v2_artifacts(stage)
         self.events.stage_completed(
             stage,
             "Paper maps completed",
             {
                 "skim_cards": len(self.skim_cards),
                 "classifications": len(self.classifications),
+                "core_v2_artifacts": core_v2_count,
             },
         )
+
+    def persist_core_v2_artifacts(self, stage: str) -> int:
+        skim_by_id = {card.paper_id: card for card in self.skim_cards}
+        decision_by_id = {decision.paper_id: decision for decision in self.classifications}
+        written_count = 0
+        for paper in self.papers:
+            layout = load_layout_index(self.data_dir, paper.paper_id)
+            if not layout:
+                artifacts = self.db.get_page_artifacts(paper.paper_id)
+                layout = {"pages": [artifact.model_dump() for artifact in artifacts]}
+            paths = write_core_v2_artifacts(
+                data_dir=self.data_dir,
+                paper=paper,
+                layout=layout,
+                skim=skim_by_id.get(paper.paper_id),
+                decision=decision_by_id.get(paper.paper_id),
+            )
+            for artifact_type, path in paths.items():
+                self.register_file_artifact(
+                    path,
+                    paper_id=paper.paper_id,
+                    artifact_type=f"core_v2_{artifact_type}",
+                    depends_on=[f"layout_index:{paper.paper_id}"],
+                )
+            written_count += 1
+            self.events.emit(
+                "core_v2_artifacts_written",
+                stage=stage,
+                message=f"Core v2 artifacts written for {paper.paper_id}",
+                data={
+                    "paper_id": paper.paper_id,
+                    "artifacts": {key: str(path) for key, path in paths.items()},
+                },
+            )
+        return written_count
 
     def run_skim_classification(
         self,
@@ -1656,6 +1694,7 @@ class PaperLensWorkflow:
                 "figure_crops": ".paperlens/figures/",
                 "library_records": ".paperlens/library/library_records.jsonl",
                 "paper_memory_v3": ".paperlens/data/memory/v3/",
+                "core_v2": ".paperlens/data/core/v2/",
                 "library_index": ".paperlens/library/index/search_index.json",
                 "data": ".paperlens/data/",
                 "model_call_summary": ".paperlens/data/model_call_summary.json",
