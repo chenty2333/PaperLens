@@ -8,6 +8,7 @@ from typing import Any
 from paperlens_core.dom import PaperDOM
 from paperlens_core.graph import ClaimGraph, GraphNode
 from paperlens_core.runtime import ArtifactEnvelope
+from paperlens_core.core_manifest import inspect_core_v2_artifact_root
 
 
 GRAPH_LIBRARY_SUMMARY_SCHEMA_VERSION = "paperlens.graph_library_summary.v1"
@@ -70,11 +71,13 @@ def read_core_v2_graph_summary(output_dir: Path, paper_id: str) -> dict[str, Any
     memory_view = read_optional_envelope_data(
         root / "paper_memory_view.v1.json", "paper_memory_view"
     )
+    artifact_manifest = inspect_core_v2_artifact_root(root, paper_id)
     return summarize_claim_graph_for_library(
         dom=dom,
         graph=graph,
         quality=quality if isinstance(quality, dict) else {},
         memory_view=memory_view if isinstance(memory_view, dict) else {},
+        artifact_manifest=artifact_manifest,
         root=root,
     )
 
@@ -85,10 +88,15 @@ def summarize_claim_graph_for_library(
     graph: ClaimGraph,
     quality: dict[str, Any],
     memory_view: dict[str, Any],
+    artifact_manifest: dict[str, Any],
     root: Path,
 ) -> dict[str, Any]:
     metadata = dict_value(memory_view.get("metadata"))
-    quality_summary = graph_quality_summary(quality=quality, memory_view=memory_view)
+    quality_summary = graph_quality_summary(
+        quality=quality,
+        memory_view=memory_view,
+        artifact_manifest=artifact_manifest,
+    )
     node_counts = {
         kind: len([node for node in graph.nodes.values() if node.kind == kind])
         for kind in [*GRAPH_LIBRARY_NODE_KINDS, "evidence"]
@@ -110,10 +118,10 @@ def summarize_claim_graph_for_library(
         "quality": quality_summary,
         "node_counts": node_counts,
     }
-    if not graph_summary_is_consumable(quality_summary):
+    if not graph_summary_is_consumable(artifact_manifest):
         return {
             **base_summary,
-            "graph_access": graph_non_consumable_policy(quality_summary),
+            "graph_access": graph_non_consumable_policy(artifact_manifest),
             "problem_nodes": [],
             "claim_nodes": [],
             "method_family": [],
@@ -175,10 +183,16 @@ def summarize_claim_graph_for_library(
 
 
 def graph_quality_summary(
-    *, quality: dict[str, Any], memory_view: dict[str, Any]
+    *,
+    quality: dict[str, Any],
+    memory_view: dict[str, Any],
+    artifact_manifest: dict[str, Any],
 ) -> dict[str, Any]:
     return {
-        "publish_status": quality.get("publish_status"),
+        "artifact_set_status": artifact_manifest.get("status"),
+        "artifact_set_consumable": artifact_manifest.get("consumable"),
+        "artifact_set_issues": artifact_manifest.get("issues", []),
+        "publish_status": artifact_manifest.get("publish_status") or quality.get("publish_status"),
         "memory_report_readiness": memory_view.get("report_readiness"),
         "evidence_coverage": quality.get("evidence_coverage"),
         "fact_node_count": quality.get("fact_node_count"),
@@ -188,15 +202,17 @@ def graph_quality_summary(
     }
 
 
-def graph_summary_is_consumable(quality_summary: dict[str, Any]) -> bool:
-    publish_status = str(quality_summary.get("publish_status") or "")
-    return publish_status in CONSUMABLE_GRAPH_STATUSES
+def graph_summary_is_consumable(artifact_manifest: dict[str, Any]) -> bool:
+    return artifact_manifest.get("consumable") is True
 
 
-def graph_non_consumable_policy(quality_summary: dict[str, Any]) -> str:
-    publish_status = str(quality_summary.get("publish_status") or "")
-    if not publish_status:
+def graph_non_consumable_policy(artifact_manifest: dict[str, Any]) -> str:
+    issues = set(str(issue) for issue in artifact_manifest.get("issues", []))
+    if "missing:core_manifest.v1.json" in issues:
+        return "missing_core_v2_manifest"
+    if "missing:quality_metrics.v1.json" in issues:
         return "missing_core_v2_quality_metrics"
+    publish_status = str(artifact_manifest.get("publish_status") or "")
     if publish_status == "BLOCKED":
         return "blocked_by_core_v2_audit"
     return "not_reviewed_by_core_v2_audit"

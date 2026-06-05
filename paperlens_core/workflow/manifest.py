@@ -6,6 +6,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from paperlens_core.core_manifest import inspect_core_v2_artifact_root
+
 
 def validate_paperlens_output(
     output_dir: Path,
@@ -140,6 +142,10 @@ def validate_paperlens_output(
         data = core_manifest.get("data") if isinstance(core_manifest.get("data"), dict) else {}
         if data.get("status") != "COMPLETE":
             issues.append(f"Core v2 manifest is incomplete for {paper_id}")
+            continue
+        inspected_manifest = inspect_core_v2_artifact_root(paper_root, paper_id)
+        if inspected_manifest.get("status") != "COMPLETE":
+            issues.append(f"Core v2 artifact set is incomplete for {paper_id}")
     result = {
         "status": "PASS" if not issues else "FAIL",
         "checked_links": checked_links,

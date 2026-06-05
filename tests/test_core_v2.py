@@ -46,6 +46,7 @@ from paperlens_core.runtime import (
 )
 from paperlens_core.config import CoreConfig
 from paperlens_core.control import ControlState
+from paperlens_core.core_manifest import build_core_v2_manifest
 from paperlens_core.events import EventWriter
 from paperlens_core.schemas import (
     ClassificationDecision,
@@ -57,7 +58,6 @@ from paperlens_core.schemas import (
 from paperlens_core.workflow.agent import PaperLensWorkflow, paper_report_filename
 from paperlens_core.workflow.core_v2 import (
     OBSERVATION_CARDS_SCHEMA,
-    build_core_v2_manifest,
     load_core_v2_dom_and_plan,
     observation_cards_from_model_envelope,
     refresh_core_v2_audit_artifacts,

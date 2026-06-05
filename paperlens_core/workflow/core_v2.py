@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import re
 from pathlib import Path
 from typing import Any
 
 from paperlens_core.audit import audit_claim_graph, compute_core_quality_metrics
 from paperlens_core.agents.llm import JsonLlmClient, llm_call_context
+from paperlens_core.core_manifest import write_core_v2_manifest
 from paperlens_core.dom import PaperDOM, PaperSpan, build_paper_dom_from_layout
 from paperlens_core.graph import ClaimGraph, graph_from_observations
 from paperlens_core.memory import materialize_paper_memory
@@ -27,7 +27,6 @@ from paperlens_core.runtime import (
     ArtifactEnvelope,
     NodeSpec,
     NodeStatus,
-    read_artifact_envelope,
     read_typed_artifact,
     run_finite_node,
     write_typed_artifact,
@@ -38,19 +37,6 @@ from paperlens_core.schemas import ClassificationDecision, PaperRecord, SkimCard
 CORE_V2_SCHEMA_VERSION = "paperlens_core.v2.bootstrap"
 CORE_V2_MODEL_OBSERVER_VERSION = "paperlens_core.v2.model_observer"
 CORE_V2_AUDIT_SUITE_VERSION = "paperlens_core.v2.audit_suite"
-CORE_V2_MANIFEST_SCHEMA_VERSION = "core_v2_manifest.v1"
-CORE_V2_CONSUMABLE_STATUSES = {"REVIEWED", "REVIEWED_WITH_LIMITS"}
-CORE_V2_REQUIRED_ARTIFACTS = {
-    "paper_dom": ("paper_dom.v1.json", "paper_dom"),
-    "reading_plan": ("reading_plan.v1.json", "reading_plan"),
-    "observation_log": ("observation_log.v1.json", "observation_log"),
-    "claim_graph": ("claim_graph.v1.json", "claim_graph"),
-    "audit_findings": ("audit_findings.v1.json", "audit_findings"),
-    "quality_metrics": ("quality_metrics.v1.json", "core_quality_metrics"),
-    "paper_memory_view": ("paper_memory_view.v1.json", "paper_memory_view"),
-    "report_draft": ("report_draft.v1.json", "graph_report_draft"),
-    "report_audit_findings": ("report_audit_findings.v1.json", "report_audit_findings"),
-}
 
 CORE_V2_OBSERVER_SYSTEM_PROMPT = """
 You are PaperLens ObservationReader.
@@ -569,84 +555,6 @@ def refresh_core_v2_audit_artifacts(
         "report_findings": len(derived["report_audit_findings"]),
         "publish_status": derived["quality_metrics"].publish_status,
     }
-
-
-def write_core_v2_manifest(
-    root: Path,
-    paper_id: str,
-    *,
-    producer: str = "paperlens_core_v2_manifest",
-) -> Path:
-    path = root / "core_manifest.v1.json"
-    manifest = build_core_v2_manifest(root, paper_id)
-    write_core_v2_envelope(
-        path,
-        "core_v2_manifest",
-        paper_id,
-        manifest,
-        producer=producer,
-    )
-    return path
-
-
-def build_core_v2_manifest(root: Path, paper_id: str) -> dict[str, Any]:
-    issues: list[str] = []
-    required_artifacts: dict[str, dict[str, Any]] = {}
-    publish_status: str | None = None
-    for key, (filename, expected_type) in CORE_V2_REQUIRED_ARTIFACTS.items():
-        path = root / filename
-        entry: dict[str, Any] = {
-            "path": filename,
-            "expected_artifact_type": expected_type,
-            "exists": path.exists(),
-        }
-        if not path.exists():
-            issues.append(f"missing:{filename}")
-            required_artifacts[key] = entry
-            continue
-        entry["sha256"] = sha256_file(path)
-        try:
-            envelope = read_artifact_envelope(path)
-        except ValueError as exc:
-            issues.append(f"invalid_envelope:{filename}:{exc}")
-            required_artifacts[key] = entry
-            continue
-        entry.update(
-            {
-                "artifact_type": envelope.artifact_type,
-                "artifact_version": envelope.artifact_version,
-                "producer": envelope.producer,
-            }
-        )
-        if envelope.artifact_type != expected_type:
-            issues.append(
-                f"type_mismatch:{filename}:expected={expected_type}:actual={envelope.artifact_type}"
-            )
-        metadata_paper_id = str(envelope.metadata.get("paper_id") or "")
-        if metadata_paper_id and metadata_paper_id != paper_id:
-            issues.append(f"metadata_paper_id_mismatch:{filename}:{metadata_paper_id}")
-        if isinstance(envelope.data, dict):
-            data_paper_id = str(envelope.data.get("paper_id") or "")
-            if data_paper_id and data_paper_id != paper_id:
-                issues.append(f"data_paper_id_mismatch:{filename}:{data_paper_id}")
-            if key == "quality_metrics":
-                publish_status = str(envelope.data.get("publish_status") or "") or None
-        required_artifacts[key] = entry
-    complete = not issues
-    consumable = complete and publish_status in CORE_V2_CONSUMABLE_STATUSES
-    return {
-        "schema_version": CORE_V2_MANIFEST_SCHEMA_VERSION,
-        "paper_id": paper_id,
-        "status": "COMPLETE" if complete else "INCOMPLETE",
-        "publish_status": publish_status,
-        "consumable": consumable,
-        "required_artifacts": required_artifacts,
-        "issues": issues,
-    }
-
-
-def sha256_file(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def build_core_v2_derived_views(

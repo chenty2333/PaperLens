@@ -9,6 +9,7 @@ from typing import Any
 from paperlens_core.agent_loop import AgentLoop, PaperToolRegistry
 from paperlens_core.agents.llm import JsonLlmClient
 from paperlens_core.config import CoreConfig
+from paperlens_core.core_manifest import inspect_core_v2_artifact_set
 from paperlens_core.dom import PaperDOM
 from paperlens_core.graph import ClaimGraph
 from paperlens_core.library import read_library_records
@@ -20,7 +21,6 @@ from paperlens_core.runtime import PaperLensRuntime
 from paperlens_core.runtime import context_pack_prompt
 from paperlens_core.workflow.core_v2 import (
     load_core_v2_dom_and_graph,
-    load_core_v2_quality_metrics,
 )
 
 
@@ -258,19 +258,18 @@ def load_core_v2_qa_context(
         dom, graph = load_core_v2_dom_and_graph(data_dir, paper_id)
     except (FileNotFoundError, ValueError):
         return {}
-    quality = load_core_v2_quality_metrics(data_dir, paper_id)
-    publish_status = str(quality.get("publish_status") or "")
-    if publish_status not in CORE_V2_CONSUMABLE_STATUSES:
+    core_manifest = inspect_core_v2_artifact_set(data_dir, paper_id)
+    if not core_manifest.get("consumable"):
         return {
             "schema_version": CORE_V2_QA_CONTEXT_VERSION,
             "paper_id": paper_id,
             "question": question,
-            "retrieval_policy": core_v2_non_consumable_policy(publish_status),
+            "retrieval_policy": core_v2_non_consumable_policy(core_manifest),
             "answer_source_policy": (
                 "Core v2 ClaimGraph is not in a reviewed publish state; do not use it as "
                 "paper-claim evidence."
             ),
-            "quality": core_v2_quality_context(quality),
+            "quality": core_v2_quality_context(core_manifest),
             "matches": [],
         }
     matches = search_core_v2_graph(dom=dom, graph=graph, question=question, limit=limit)
@@ -283,23 +282,29 @@ def load_core_v2_qa_context(
             "Use graph node IDs and PaperDOM source IDs for paper claims; report Markdown is not "
             "evidence."
         ),
-        "quality": core_v2_quality_context(quality),
+        "quality": core_v2_quality_context(core_manifest),
         "matches": matches,
     }
 
 
-def core_v2_quality_context(quality: dict[str, Any]) -> dict[str, Any]:
+def core_v2_quality_context(core_manifest: dict[str, Any]) -> dict[str, Any]:
+    quality_metrics = core_manifest.get("required_artifacts", {}).get("quality_metrics", {})
     return {
-        "publish_status": quality.get("publish_status"),
-        "audit_error_count": quality.get("audit_error_count"),
-        "audit_warning_count": quality.get("audit_warning_count"),
-        "evidence_coverage": quality.get("evidence_coverage"),
+        "status": core_manifest.get("status"),
+        "publish_status": core_manifest.get("publish_status"),
+        "consumable": core_manifest.get("consumable"),
+        "issues": core_manifest.get("issues", []),
+        "quality_metrics_artifact": quality_metrics,
     }
 
 
-def core_v2_non_consumable_policy(publish_status: str) -> str:
-    if not publish_status:
+def core_v2_non_consumable_policy(core_manifest: dict[str, Any]) -> str:
+    issues = set(str(issue) for issue in core_manifest.get("issues", []))
+    if "missing:core_manifest.v1.json" in issues:
+        return "missing_core_v2_manifest"
+    if "missing:quality_metrics.v1.json" in issues:
         return "missing_core_v2_quality_metrics"
+    publish_status = str(core_manifest.get("publish_status") or "")
     if publish_status == "BLOCKED":
         return "blocked_by_core_v2_audit"
     return "not_reviewed_by_core_v2_audit"
