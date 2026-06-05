@@ -98,6 +98,10 @@ class AgentLoopResult:
     request_ids: list[str] = field(default_factory=list)
 
 
+class AgentLoopStepLimitExceeded(RuntimeError):
+    pass
+
+
 class PaperToolRegistry:
     def __init__(
         self,
@@ -288,9 +292,12 @@ class AgentLoop:
         paper_id: str,
         trace_path: Path | None = None,
         system_prompt: str | None = None,
+        max_steps: int = 8,
         control_check: Callable[[], None] | None = None,
         pause_check: Callable[[], None] | None = None,
     ) -> None:
+        if max_steps < 1:
+            raise ValueError("AgentLoop max_steps must be >= 1")
         self.client = client
         self.tools = tools
         self.session_name = session_name
@@ -301,6 +308,7 @@ class AgentLoop:
         self.paper_id = paper_id
         self.trace_path = trace_path
         self.system_prompt = system_prompt or AGENT_LOOP_SYSTEM_PROMPT
+        self.max_steps = max_steps
         self.control_check = control_check
         self.pause_check = pause_check
 
@@ -310,7 +318,7 @@ class AgentLoop:
         usage: dict[str, Any] = {}
         request_ids: list[str] = []
         step = 0
-        while True:
+        while step < self.max_steps:
             step += 1
             if self.pause_check:
                 self.pause_check()
@@ -428,6 +436,20 @@ class AgentLoop:
                 trace.append(row)
                 self._append_trace(row)
                 observations.append(observation.as_dict())
+        row = {
+            "event": "agent_step_limit_exceeded",
+            "session": self.session_name,
+            "stage": self.stage,
+            "paper_id": self.paper_id,
+            "max_steps": self.max_steps,
+            "usage": usage,
+            "request_ids": request_ids,
+        }
+        trace.append(row)
+        self._append_trace(row)
+        raise AgentLoopStepLimitExceeded(
+            f"{self.session_name} exceeded max_steps={self.max_steps} without final_json"
+        )
 
     def _build_prompt(
         self,

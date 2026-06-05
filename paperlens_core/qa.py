@@ -14,6 +14,7 @@ from paperlens_core.dom import PaperDOM
 from paperlens_core.graph import ClaimGraph
 from paperlens_core.library import read_library_records
 from paperlens_core.memory_v3 import (
+    dict_value,
     memory_v3_prompt_view,
     read_paper_memory_v3,
 )
@@ -92,30 +93,33 @@ def answer_question(
         paper_id=resolved_paper_id,
         question=question,
     )
-    pages = select_relevant_pages(layout, question, paper_memory_v3=paper_memory_v3)
+    qa_memory = qa_memory_context(
+        paper_id=resolved_paper_id,
+        paper_memory_v3=paper_memory_v3,
+        core_v2_context=core_v2_context,
+    )
+    augmented_query = memory_augmented_query(question, qa_memory)
+    pages = select_relevant_pages(layout, augmented_query, paper_memory_v3=qa_memory)
     pages = merge_core_v2_pages(pages, layout, core_v2_context)
     question_type = classify_question(question)
     layout_pages = [page for page in layout.get("pages", []) if isinstance(page, dict)]
     runtime = PaperLensRuntime(artifacts=layout_pages)
     agent_context = runtime.build_context_pack(
         stage="qa",
-        objective=(
-            "Answer the user's question by dynamically grounding it in PaperMemoryV3 and local "
-            "paper evidence. Treat report text as orientation, not proof."
-        ),
+        objective=qa_context_objective(core_v2_context),
         paper_id=resolved_paper_id,
         title=string_or_empty(
-            (paper_memory_v3.get("metadata") or {}).get("title")
-            if isinstance(paper_memory_v3.get("metadata"), dict)
+            (qa_memory.get("metadata") or {}).get("title")
+            if isinstance(qa_memory.get("metadata"), dict)
             else None
         ),
         classification=string_or_empty(
-            (paper_memory_v3.get("reading_context") or {}).get("grade")
-            if isinstance(paper_memory_v3.get("reading_context"), dict)
+            (qa_memory.get("reading_context") or {}).get("grade")
+            if isinstance(qa_memory.get("reading_context"), dict)
             else None
         ),
-        memory=paper_memory_v3,
-        focus_queries=[question, memory_augmented_query(question, paper_memory_v3)],
+        memory=qa_memory,
+        focus_queries=[question, augmented_query],
         focus_pages=[page.get("page_no") for page in pages if isinstance(page.get("page_no"), int)],
         read_artifacts=pages,
         output_contract={
@@ -158,7 +162,7 @@ def answer_question(
         paper_id=resolved_paper_id,
         question=question,
         chat_history=chat_history or [],
-        paper_memory_v3=paper_memory_v3,
+        paper_memory_v3=qa_memory,
         library_record=library_record,
         pages=pages,
         question_type=question_type,
@@ -205,14 +209,14 @@ def answer_question(
         output_dir=output_dir,
         paper_id=resolved_paper_id,
         title=string_or_empty(
-            (paper_memory_v3.get("metadata") or {}).get("title")
-            if isinstance(paper_memory_v3.get("metadata"), dict)
+            (qa_memory.get("metadata") or {}).get("title")
+            if isinstance(qa_memory.get("metadata"), dict)
             else None
         ),
         question=question,
         question_type=question_type,
         chat_history=chat_history or [],
-        paper_memory_v3=paper_memory_v3,
+        paper_memory_v3=qa_memory,
         library_record=library_record,
         layout_pages=layout_pages,
         selected_pages=pages,
@@ -308,6 +312,98 @@ def core_v2_non_consumable_policy(core_manifest: dict[str, Any]) -> str:
     if publish_status == "BLOCKED":
         return "blocked_by_core_v2_audit"
     return "not_reviewed_by_core_v2_audit"
+
+
+def qa_context_objective(core_v2_context: dict[str, Any]) -> str:
+    if core_v2_context_is_consumable(core_v2_context):
+        return (
+            "Answer the user's question by grounding paper-specific claims in the reviewed "
+            "core v2 ClaimGraph and PaperDOM source IDs. Use legacy PaperMemory only as "
+            "supplemental context, and treat report text as orientation, not proof."
+        )
+    return (
+        "Answer the user's question by dynamically grounding it in available PaperMemory and "
+        "local paper evidence. Treat report text as orientation, not proof."
+    )
+
+
+def qa_memory_context(
+    *,
+    paper_id: str,
+    paper_memory_v3: dict[str, Any],
+    core_v2_context: dict[str, Any],
+) -> dict[str, Any]:
+    if core_v2_context_is_consumable(core_v2_context):
+        return core_v2_qa_memory_view(paper_id=paper_id, core_v2_context=core_v2_context)
+    return paper_memory_v3
+
+
+def core_v2_context_is_consumable(core_v2_context: dict[str, Any]) -> bool:
+    return (
+        core_v2_context.get("retrieval_policy") == "claim_graph_nodes_with_paper_dom_source_ids"
+        and bool(list_of_dicts(core_v2_context.get("matches")))
+    )
+
+
+def core_v2_qa_memory_view(*, paper_id: str, core_v2_context: dict[str, Any]) -> dict[str, Any]:
+    claims = []
+    evidence_by_id: dict[str, dict[str, Any]] = {}
+    for match in list_of_dicts(core_v2_context.get("matches"))[:12]:
+        source_ids = unique_strings(
+            source_id for source_id in match.get("source_ids", []) if isinstance(source_id, str)
+        )
+        claims.append(
+            {
+                "id": match.get("node_id"),
+                "text": match.get("label"),
+                "type": core_v2_claim_type(str(match.get("kind") or "")),
+                "provenance": match.get("provenance") or "explicit",
+                "confidence": match.get("confidence") or "medium",
+                "critic_status": "checked",
+                "evidence_refs": source_ids,
+                "source": "core_v2_claim_graph",
+            }
+        )
+        for span in list_of_dicts(match.get("evidence_spans")):
+            source_id = str(span.get("source_id") or "").strip()
+            if not source_id or source_id in evidence_by_id:
+                continue
+            evidence_by_id[source_id] = {
+                "id": source_id,
+                "source_type": span.get("kind") or "paper_dom_source",
+                "page": span.get("page_no"),
+                "interpretation": span.get("text")
+                or span.get("caption")
+                or f"PaperDOM source {source_id}",
+                "source": "core_v2_paper_dom",
+            }
+    return {
+        "schema_version": "paperlens_core_v2_qa_memory_view.v1",
+        "paper_id": paper_id,
+        "reading_context": {
+            "source_of_truth": "core_v2_claim_graph",
+            "retrieval_policy": core_v2_context.get("retrieval_policy"),
+            "publish_status": dict_value(core_v2_context.get("quality")).get("publish_status"),
+        },
+        "claims": [claim for claim in claims if claim.get("id") and claim.get("text")],
+        "evidence": list(evidence_by_id.values()),
+        "audit_trail": {
+            "core_v2_quality": core_v2_context.get("quality"),
+            "answer_source_policy": core_v2_context.get("answer_source_policy"),
+        },
+    }
+
+
+def core_v2_claim_type(kind: str) -> str:
+    if kind in {"mechanism", "implementation"}:
+        return "mechanism"
+    if kind in {"evaluation", "result"}:
+        return "evaluation"
+    if kind == "limitation":
+        return "limitation"
+    if kind == "problem":
+        return "motivation"
+    return "implication"
 
 
 def search_core_v2_graph(
@@ -668,12 +764,14 @@ def run_paper_qa_agent(
             "question": question,
             "question_type": question_type,
             "recent_chat_history": normalize_chat_history(chat_history),
+            "core_v2_context_priority": core_v2_context_priority(core_v2_context),
             "paper_memory_v3_ir": memory_v3_prompt_view(paper_memory_v3),
             "core_v2_claim_graph_context": core_v2_context,
+            "memory_fallback_policy": memory_fallback_policy(core_v2_context),
             "paperlens_library_record": library_record,
             "initial_page_hints": page_hints,
-            "legacy_context_pack": agent_context,
-            "legacy_prompt_for_compatibility": user_prompt,
+            "context_pack": agent_context,
+            "prompt_snapshot": user_prompt,
         }
     )
 
@@ -961,6 +1059,7 @@ def build_ask_prompt(
             f"paper_id: {paper_id}",
             f"report_path: {report_path.as_posix() if report_path else ''}",
             f"question_type: {question_type}",
+            f"core_v2_context_priority: {core_v2_context_priority(core_v2_context or {})}",
             "answer_mode:",
             qa_answer_mode_instruction(question_type),
             "recent_chat_history:",
@@ -971,6 +1070,8 @@ def build_ask_prompt(
             json.dumps(core_v2_context or {}, ensure_ascii=False),
             "paper_memory_v3_ir:",
             json.dumps(memory_v3_prompt_view(paper_memory_v3 or {}), ensure_ascii=False),
+            "memory_fallback_policy:",
+            memory_fallback_policy(core_v2_context or {}),
             "agent_context_pack:",
             context_pack_prompt(agent_context),
             "paperlens_library_record:",
@@ -980,7 +1081,9 @@ def build_ask_prompt(
             json.dumps(page_blocks, ensure_ascii=False),
             (
                 "Answer contract: source_attribution.paper_claims should contain only claims directly "
-                "supported by PaperMemoryV3 evidence/claims or relevant page excerpts. "
+                "supported by reviewed core v2 ClaimGraph nodes and PaperDOM source IDs when "
+                "available; otherwise use PaperMemory evidence/claims or relevant page excerpts "
+                "as fallback. "
                 "Use agent_context_pack as the active tool/context trace for this question. "
                 "When core_v2_claim_graph_context has matches, treat those graph node IDs and "
                 "PaperDOM source IDs as the preferred paper evidence. "
@@ -1015,6 +1118,23 @@ def qa_answer_mode_instruction(question_type: str) -> str:
         "Answer the paper question directly, using paper memory/evidence for factual claims and "
         "background knowledge only when it helps understanding."
     )
+
+
+def core_v2_context_priority(core_v2_context: dict[str, Any]) -> str:
+    if core_v2_context_is_consumable(core_v2_context):
+        return "primary_reviewed_claim_graph"
+    if core_v2_context.get("retrieval_policy"):
+        return f"unavailable:{core_v2_context.get('retrieval_policy')}"
+    return "unavailable:no_core_v2_context"
+
+
+def memory_fallback_policy(core_v2_context: dict[str, Any]) -> str:
+    if core_v2_context_is_consumable(core_v2_context):
+        return (
+            "supplemental_or_fallback_only; paper-specific factual claims should cite core v2 "
+            "ClaimGraph node IDs and PaperDOM source IDs first."
+        )
+    return "fallback_primary_until_reviewed_core_v2_claim_graph_is_available."
 
 
 def normalize_answer(data: dict[str, Any]) -> dict[str, Any]:

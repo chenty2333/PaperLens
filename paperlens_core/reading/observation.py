@@ -28,7 +28,7 @@ class ObservationCard(BaseModel):
     statement: str
     source_ids: list[str]
     confidence: Literal["high", "medium", "low"] = "medium"
-    provenance: Literal["explicit", "inferred", "background"] = "explicit"
+    provenance: Literal["explicit", "inferred"] = "explicit"
     uncertainty: str | None = None
     extracted_numbers: list[dict[str, Any]] = Field(default_factory=list)
     proposed_links: list[dict[str, str]] = Field(default_factory=list)

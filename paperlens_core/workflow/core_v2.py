@@ -254,7 +254,10 @@ def run_core_v2_model_observation_tasks(
 
         def handler(context: Any) -> ArtifactEnvelope:
             context.record_model_call()
-            context.record_tool_call("paper_dom.read_sources")
+            context.record_tool_call(
+                "paper_dom.read_sources",
+                source_ids=task.target_source_ids,
+            )
             with llm_call_context(
                 stage=stage,
                 paper_id=paper.paper_id,

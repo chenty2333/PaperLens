@@ -21,7 +21,13 @@ from paperlens_core.library import (
     write_paperlens_library,
 )
 from paperlens_core.memory import materialize_paper_memory
-from paperlens_core.qa import answer_question, load_core_v2_qa_context
+from paperlens_core.qa import (
+    answer_question,
+    build_ask_prompt,
+    core_v2_context_priority,
+    load_core_v2_qa_context,
+    qa_memory_context,
+)
 from paperlens_core.quality_snapshot import write_core_quality_snapshot
 from paperlens_core.reading import (
     ObservationCard,
@@ -669,6 +675,37 @@ def test_artifact_envelope_rejects_wrong_output_type():
     assert "Expected artifact_type=claim_graph" in result.issues[0]
 
 
+def test_finite_runtime_node_requires_declared_output_artifact():
+    spec = NodeSpec(node_id="node", output_artifact_type="claim_graph")
+
+    result = run_finite_node(spec, [], lambda _context: None)
+
+    assert result.status == NodeStatus.FAIL
+    assert "did not return output_artifact_type=claim_graph" in result.issues[0]
+
+
+def test_finite_runtime_node_rejects_non_artifact_output():
+    spec = NodeSpec(node_id="node")
+
+    result = run_finite_node(spec, [], lambda _context: {"artifact_type": "claim_graph"})
+
+    assert result.status == NodeStatus.FAIL
+    assert "returned non-artifact output=dict" in result.issues[0]
+
+
+def test_finite_runtime_node_rejects_duplicate_input_artifact_types():
+    spec = NodeSpec(node_id="node", input_artifact_types=("paper_dom",))
+    inputs = [
+        ArtifactEnvelope(artifact_type="paper_dom", producer="unit", data={}),
+        ArtifactEnvelope(artifact_type="paper_dom", producer="unit", data={}),
+    ]
+
+    result = run_finite_node(spec, inputs, lambda _context: None)
+
+    assert result.status == NodeStatus.FAIL
+    assert result.issues == ["duplicate_input_artifact:paper_dom"]
+
+
 def test_finite_runtime_node_enforces_allowed_tools():
     spec = NodeSpec(
         node_id="read_sources",
@@ -677,7 +714,10 @@ def test_finite_runtime_node_enforces_allowed_tools():
     )
 
     def handler(context):
-        context.record_tool_call("paper_dom.read_sources")
+        context.record_tool_call(
+            "paper_dom.read_sources",
+            source_ids=["span:p_test:p1:1", "span:p_test:p1:1", ""],
+        )
         return ArtifactEnvelope(
             artifact_type="observation_cards",
             producer="unit",
@@ -689,6 +729,7 @@ def test_finite_runtime_node_enforces_allowed_tools():
     assert result.status == NodeStatus.PASS
     assert result.tool_calls_used == 1
     assert result.used_tools == ["paper_dom.read_sources"]
+    assert result.tool_source_ids == {"paper_dom.read_sources": ["span:p_test:p1:1"]}
 
 
 def test_finite_runtime_node_rejects_disallowed_tools():
@@ -703,6 +744,20 @@ def test_finite_runtime_node_rejects_disallowed_tools():
     assert result.status == NodeStatus.FAIL
     assert result.tool_calls_used == 1
     assert "disallowed tool=filesystem.read" in result.issues[0]
+
+
+def test_finite_runtime_node_requires_tool_source_ids():
+    spec = NodeSpec(node_id="read_sources", allowed_tools=("paper_dom.read_sources",))
+
+    def handler(context):
+        context.record_tool_call("paper_dom.read_sources")
+        return None
+
+    result = run_finite_node(spec, [], handler)
+
+    assert result.status == NodeStatus.FAIL
+    assert result.tool_calls_used == 1
+    assert "tool=paper_dom.read_sources did not return source_ids" in result.issues[0]
 
 
 def test_finite_runtime_node_enforces_token_budget():
@@ -1161,6 +1216,21 @@ def test_model_observation_cards_reject_background_provenance():
         )
 
 
+def test_observation_card_model_rejects_background_provenance():
+    dom = sample_dom()
+
+    with pytest.raises(ValueError):
+        ObservationCard(
+            observation_id="obs_background",
+            paper_id="p_test",
+            task_id="task",
+            observation_type=ObservationType.CLAIM,
+            statement="Background knowledge cannot be stored as a paper observation.",
+            source_ids=[dom.spans[0].source_id],
+            provenance="background",
+        )
+
+
 def test_stage08_refreshes_core_v2_audits_without_legacy_paper_cards(tmp_path):
     output_dir = tmp_path / "out"
     input_dir = tmp_path / "in"
@@ -1304,6 +1374,62 @@ def test_core_v2_qa_reads_claim_graph_without_final_markdown_report(tmp_path):
     assert "ClaimGraph" in answer["answer_markdown"]
     assert "relation:" in answer["answer_markdown"]
     assert answer["source_attribution"]["paper_claims"]
+
+
+def test_core_v2_qa_memory_view_promotes_reviewed_claim_graph_context(tmp_path):
+    core_context = {
+        "retrieval_policy": "claim_graph_nodes_with_paper_dom_source_ids",
+        "answer_source_policy": "Use graph node IDs and PaperDOM source IDs.",
+        "quality": {"publish_status": PublishStatus.REVIEWED},
+        "matches": [
+            {
+                "node_id": "claim:obs_claim",
+                "kind": "claim",
+                "label": "The paper proposes a block table method.",
+                "confidence": "high",
+                "provenance": "explicit",
+                "source_ids": ["span:p_test:p1:1"],
+                "evidence_spans": [
+                    {
+                        "source_id": "span:p_test:p1:1",
+                        "kind": "paragraph",
+                        "page_no": 1,
+                        "text": "We propose a block table method for serving.",
+                    }
+                ],
+            }
+        ],
+    }
+    legacy_memory = {
+        "schema_version": "paper_memory.v3",
+        "paper_id": "p_test",
+        "claims": [{"id": "legacy", "text": "Legacy claim should not be primary."}],
+    }
+
+    memory = qa_memory_context(
+        paper_id="p_test",
+        paper_memory_v3=legacy_memory,
+        core_v2_context=core_context,
+    )
+    prompt = build_ask_prompt(
+        report_path=tmp_path / "papers" / "p_test.md",
+        paper_id="p_test",
+        question="block table 是什么？",
+        paper_memory_v3=memory,
+        pages=[{"page_no": 1, "text": "page text", "captions": [], "visual_notes": []}],
+        question_type="mechanism",
+        core_v2_context=core_context,
+    )
+
+    assert core_v2_context_priority(core_context) == "primary_reviewed_claim_graph"
+    assert memory["schema_version"] == "paperlens_core_v2_qa_memory_view.v1"
+    assert memory["reading_context"]["source_of_truth"] == "core_v2_claim_graph"
+    assert memory["claims"][0]["id"] == "claim:obs_claim"
+    assert memory["claims"][0]["evidence_refs"] == ["span:p_test:p1:1"]
+    assert memory["evidence"][0]["id"] == "span:p_test:p1:1"
+    assert "core_v2_context_priority: primary_reviewed_claim_graph" in prompt
+    assert "memory_fallback_policy:" in prompt
+    assert "Legacy claim should not be primary" not in prompt
 
 
 def test_core_v2_qa_context_does_not_use_blocked_claim_graph(tmp_path):

@@ -34,6 +34,7 @@ class NodeSpec:
     max_tokens: int | None = None
     timeout_seconds: float = 120.0
     failure_policy: str = "fail"
+    require_tool_source_ids: bool = True
 
     def __post_init__(self) -> None:
         if not self.node_id.strip():
@@ -59,6 +60,7 @@ class NodeResult:
     model_calls_used: int = 0
     tool_calls_used: int = 0
     used_tools: list[str] = field(default_factory=list)
+    tool_source_ids: dict[str, list[str]] = field(default_factory=dict)
     tokens_used: int = 0
     token_usage: dict[str, Any] = field(default_factory=dict)
     elapsed_seconds: float = 0.0
@@ -75,6 +77,7 @@ class NodeContext:
     model_calls_used: int = 0
     tool_calls_used: int = 0
     used_tools: list[str] = field(default_factory=list)
+    tool_source_ids: dict[str, list[str]] = field(default_factory=dict)
     tokens_used: int = 0
     token_usage: dict[str, Any] = field(default_factory=dict)
 
@@ -94,7 +97,12 @@ class NodeContext:
                 f"{self.spec.node_id} exceeded max_model_calls={self.spec.max_model_calls}"
             )
 
-    def record_tool_call(self, tool_name: str) -> None:
+    def record_tool_call(
+        self,
+        tool_name: str,
+        *,
+        source_ids: list[str] | tuple[str, ...] | None = None,
+    ) -> None:
         tool_name = tool_name.strip()
         if not tool_name:
             raise NodeExecutionError("tool_name cannot be blank")
@@ -105,8 +113,17 @@ class NodeContext:
             raise NodeExecutionError(
                 f"{self.spec.node_id} attempted disallowed tool={tool_name}; allowed={allowed}"
             )
+        cleaned_source_ids = clean_source_ids(source_ids)
+        if self.spec.require_tool_source_ids and not cleaned_source_ids:
+            raise NodeExecutionError(
+                f"{self.spec.node_id} tool={tool_name} did not return source_ids"
+            )
         if tool_name not in self.used_tools:
             self.used_tools.append(tool_name)
+        known_source_ids = self.tool_source_ids.setdefault(tool_name, [])
+        for source_id in cleaned_source_ids:
+            if source_id not in known_source_ids:
+                known_source_ids.append(source_id)
 
     def record_token_usage(self, usage: dict[str, Any]) -> None:
         self._check_runtime_budget()
@@ -134,10 +151,22 @@ def run_finite_node(
     inputs: list[ArtifactEnvelope],
     handler: NodeCallable,
 ) -> NodeResult:
+    input_counts: dict[str, int] = {}
+    for artifact in inputs:
+        input_counts[artifact.artifact_type] = input_counts.get(artifact.artifact_type, 0) + 1
+    duplicate_inputs = [
+        artifact_type for artifact_type, count in sorted(input_counts.items()) if count > 1
+    ]
+    if duplicate_inputs:
+        return NodeResult(
+            node_id=spec.node_id,
+            status=NodeStatus.FAIL,
+            issues=[f"duplicate_input_artifact:{item}" for item in duplicate_inputs],
+        )
     missing = [
         artifact_type
         for artifact_type in spec.input_artifact_types
-        if artifact_type not in {artifact.artifact_type for artifact in inputs}
+        if artifact_type not in input_counts
     ]
     if missing:
         return NodeResult(
@@ -150,6 +179,14 @@ def run_finite_node(
     try:
         context.require_step()
         output = handler(context)
+        if output is not None and not isinstance(output, ArtifactEnvelope):
+            raise NodeExecutionError(
+                f"{spec.node_id} returned non-artifact output={type(output).__name__}"
+            )
+        if spec.output_artifact_type and output is None:
+            raise NodeExecutionError(
+                f"{spec.node_id} did not return output_artifact_type={spec.output_artifact_type}"
+            )
         if spec.output_artifact_type and output is not None:
             output.require_type(spec.output_artifact_type)
         return NodeResult(
@@ -160,6 +197,7 @@ def run_finite_node(
             model_calls_used=context.model_calls_used,
             tool_calls_used=context.tool_calls_used,
             used_tools=list(context.used_tools),
+            tool_source_ids={key: list(value) for key, value in context.tool_source_ids.items()},
             tokens_used=context.tokens_used,
             token_usage=dict(context.token_usage),
             elapsed_seconds=round(time.time() - context.started_at, 3),
@@ -176,6 +214,7 @@ def run_finite_node(
             model_calls_used=context.model_calls_used,
             tool_calls_used=context.tool_calls_used,
             used_tools=list(context.used_tools),
+            tool_source_ids={key: list(value) for key, value in context.tool_source_ids.items()},
             tokens_used=context.tokens_used,
             token_usage=dict(context.token_usage),
             elapsed_seconds=round(time.time() - context.started_at, 3),
@@ -211,3 +250,12 @@ def merge_numeric_usage(target: dict[str, Any], source: dict[str, Any]) -> None:
         if isinstance(value, (int, float)):
             previous = target.get(key)
             target[key] = (previous if isinstance(previous, (int, float)) else 0) + value
+
+
+def clean_source_ids(value: list[str] | tuple[str, ...] | None) -> list[str]:
+    result = []
+    for item in value or ():
+        source_id = str(item or "").strip()
+        if source_id and source_id not in result:
+            result.append(source_id)
+    return result

@@ -24,6 +24,7 @@ from paperlens_core.agents.llm import (
 )
 from paperlens_core.agent_loop import (
     AgentLoop,
+    AgentLoopStepLimitExceeded,
     PaperToolRegistry,
     normalize_agent_turn,
     parse_arguments_json,
@@ -1952,6 +1953,56 @@ def test_agent_loop_recovers_when_final_json_is_missing(tmp_path):
     assert len(calls) == 2
     trace = [json.loads(line) for line in (tmp_path / "agent_trace.jsonl").read_text().splitlines()]
     assert any(row.get("event") == "invalid_final_json" for row in trace)
+
+
+def test_agent_loop_fails_when_step_limit_is_exceeded(tmp_path):
+    calls = 0
+
+    class FakeClient:
+        config = SimpleNamespace(model="fake", kind="fake")
+
+        def invoke_json(self, **kwargs):
+            nonlocal calls
+            calls += 1
+            return LlmJsonResult(
+                data={
+                    "action": "tool_request",
+                    "message": "Need more context.",
+                    "tool_requests": [],
+                    "final_json": "",
+                },
+                text="",
+                request_id=f"req_{calls}",
+                usage={"prompt_tokens": 1, "completion_tokens": 1},
+                endpoint="fake",
+            )
+
+    loop = AgentLoop(
+        client=FakeClient(),
+        tools=PaperToolRegistry(
+            runtime=PaperLensRuntime(artifacts=[]), paper_id="p_test", title="Test"
+        ),
+        session_name="unit_agent",
+        objective="Return final JSON.",
+        final_schema_name="unit_final",
+        final_schema={
+            "type": "object",
+            "required": ["ok"],
+            "properties": {"ok": {"type": "boolean"}},
+        },
+        stage="unit",
+        paper_id="p_test",
+        trace_path=tmp_path / "agent_trace.jsonl",
+        max_steps=2,
+    )
+
+    with pytest.raises(AgentLoopStepLimitExceeded, match="max_steps=2"):
+        loop.run(initial_context={})
+
+    trace = [json.loads(line) for line in (tmp_path / "agent_trace.jsonl").read_text().splitlines()]
+    assert calls == 2
+    assert trace[-1]["event"] == "agent_step_limit_exceeded"
+    assert trace[-1]["request_ids"] == ["req_1", "req_2"]
 
 
 def test_agent_loop_accepts_object_tool_arguments_from_compatible_providers():
