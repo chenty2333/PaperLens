@@ -8,6 +8,11 @@ from paperlens_core.report.rows import (
     reading_priority_key,
     row_decision,
 )
+from paperlens_core.report.text import (
+    clean_model_inline_text,
+    compact_reason,
+    sanitize_reader_hostile_text,
+)
 from paperlens_core.schemas import PaperCard, PaperRecord, ReviewItem, SkimCard
 
 
@@ -107,11 +112,11 @@ def one_line_row_reason(row: dict[str, Any]) -> str:
     decision = row_decision(row)
     model_report = row.get("model_report")
     if isinstance(model_report, dict):
-        reason = _sanitize_reader_hostile_text(
-            _clean_model_inline_text(model_report.get("one_line_reason"))
+        reason = sanitize_reader_hostile_text(
+            clean_model_inline_text(model_report.get("one_line_reason"))
         )
         if reason:
-            return _compact_text(reason, max_chars=110)
+            return compact_reason(reason, max_chars=110)
     skim = row.get("skim")
     card = row.get("card")
     if isinstance(card, PaperCard) and card.contribution_claims:
@@ -161,51 +166,6 @@ def is_internal_review_noise(item: ReviewItem) -> bool:
         "visual_required_pages",
     }
     return reason in hidden_reasons
-
-
-def _clean_model_inline_text(value: Any) -> str:
-    text = value.strip() if isinstance(value, str) else ""
-    text = text.replace("\\r\\n", "\n").replace("\\n", "\n")
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def _sanitize_reader_hostile_text(text: str | None) -> str:
-    if not text:
-        return ""
-    replacements = {
-        "你给到的片段": "当前自动阅读证据",
-        "你给到的摘录": "当前自动阅读证据",
-        "你给到": "当前自动阅读证据",
-        "你提供的片段": "当前自动阅读证据",
-        "你提供的摘录": "当前自动阅读证据",
-        "你提供": "当前自动阅读证据",
-        "供给的片段": "当前自动阅读证据",
-        "供给片段": "当前自动阅读证据",
-        "供给的图示": "自动阅读证据中的图示",
-        "提供的页面": "当前自动阅读证据",
-        "提供的材料": "当前自动阅读证据",
-        "提供的证据": "当前自动阅读证据",
-        "the supplied excerpts": "the automatic reading evidence",
-        "supplied excerpts": "automatic reading evidence",
-        "provided excerpts": "automatic reading evidence",
-        "provided excerpt": "automatic reading evidence",
-        "the user provided": "the current evidence contains",
-    }
-    cleaned = text
-    for old, new in replacements.items():
-        cleaned = cleaned.replace(old, new)
-    return cleaned
-
-
-def _compact_text(text: str, *, max_chars: int) -> str:
-    cleaned = re.sub(r"\s+", " ", text).strip()
-    if len(cleaned) <= max_chars:
-        return cleaned
-    for mark in "。！？.!?；;，,":
-        index = cleaned.rfind(mark, 0, max_chars)
-        if index >= 40:
-            return cleaned[: index + 1]
-    return cleaned[:max_chars].rstrip() + "..."
 
 
 def _normalize_excerpt(text: str, *, limit: int) -> str:

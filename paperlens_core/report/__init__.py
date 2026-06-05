@@ -37,6 +37,13 @@ from paperlens_core.report.overview import (
     render_paperlens_report,
     user_visible_review_items,
 )
+from paperlens_core.report.paper import (
+    display_review_status,
+    render_freeform_paper_report,
+    render_paper_report,
+    select_key_visual_pages,
+    visual_crop_bbox_for_page,
+)
 from paperlens_core.report.rows import (
     classification_counts,
     cluster_rows_by_scope,
@@ -52,6 +59,16 @@ from paperlens_core.report.rows import (
     row_decision,
     row_relation,
 )
+from paperlens_core.report.text import (
+    clean_model_inline_text,
+    clean_model_markdown,
+    compact_compare_text,
+    compact_reason,
+    readable_model_body,
+    recommendation_for_grade,
+    sanitize_reader_hostile_text,
+    user_facing_uncertainty_note,
+)
 
 __all__ = [
     "GraphReportDraft",
@@ -61,10 +78,14 @@ __all__ = [
     "build_report_memory_context",
     "build_report_draft_from_graph",
     "classification_counts",
+    "clean_model_inline_text",
+    "clean_model_markdown",
     "cluster_rows_by_scope",
     "combine_report_and_memory_audits",
     "compact_core_memory_view_for_report",
+    "compact_compare_text",
     "compact_paper_memory_for_report",
+    "compact_reason",
     "core_graph_report_filename",
     "core_graph_report_link",
     "core_memory_pages",
@@ -72,6 +93,7 @@ __all__ = [
     "dedupe_evidence_refs",
     "describe_rows",
     "display_paper_title",
+    "display_review_status",
     "display_row_title",
     "final_report_audit_acceptable",
     "higher_read_effort_label",
@@ -84,14 +106,22 @@ __all__ = [
     "paper_report_filename",
     "read_decision",
     "read_effort_rank",
+    "readable_model_body",
     "reading_priority_key",
+    "recommendation_for_grade",
     "report_focus_pages",
     "report_focus_queries",
     "report_link_lines",
+    "render_freeform_paper_report",
     "render_paperlens_report",
+    "render_paper_report",
     "render_graph_report_markdown",
     "row_decision",
     "row_relation",
+    "sanitize_reader_hostile_text",
+    "select_key_visual_pages",
+    "user_facing_uncertainty_note",
     "user_visible_review_items",
+    "visual_crop_bbox_for_page",
     "write_core_graph_report_view",
 ]

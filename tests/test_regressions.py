@@ -45,10 +45,15 @@ from paperlens_core.library import (
 )
 from paperlens_core.main import configure_utf8_stdio
 from paperlens_core.report import (
+    clean_model_markdown,
     combine_report_and_memory_audits,
     final_report_audit_acceptable,
+    readable_model_body,
+    render_freeform_paper_report,
     render_paperlens_report,
+    sanitize_reader_hostile_text,
     user_visible_review_items,
+    visual_crop_bbox_for_page,
 )
 from paperlens_core.reading import select_rolling_read_pages
 from paperlens_core.memory_v3 import (
@@ -76,15 +81,10 @@ from paperlens_core.workflow.agent import (
     build_report_plan_prompt,
     build_report_section_audit_prompt,
     build_report_section_prompt,
-    clean_model_markdown,
     compose_agentic_paper_report,
     normalize_report_plan,
-    readable_model_body,
-    render_freeform_paper_report,
-    sanitize_reader_hostile_text,
     summarize_model_calls,
     validate_paperlens_output,
-    visual_crop_bbox_for_page,
     write_final_report_bundle,
 )
 from paperlens_core.workflow.stages import resolve_workflow_stages
