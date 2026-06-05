@@ -8,7 +8,6 @@ from typing import Any
 from paperlens_core.audit import audit_claim_graph, compute_core_quality_metrics
 from paperlens_core.agents.llm import JsonLlmClient, llm_call_context
 from paperlens_core.dom import PaperDOM, PaperSpan, build_paper_dom_from_layout
-from paperlens_core.events import write_json
 from paperlens_core.graph import ClaimGraph, graph_from_observations
 from paperlens_core.memory import materialize_paper_memory
 from paperlens_core.reading import (
@@ -22,7 +21,14 @@ from paperlens_core.reading import (
     make_observation_id,
 )
 from paperlens_core.report import audit_report_draft_against_graph, build_report_draft_from_graph
-from paperlens_core.runtime import ArtifactEnvelope, NodeSpec, NodeStatus, run_finite_node
+from paperlens_core.runtime import (
+    ArtifactEnvelope,
+    NodeSpec,
+    NodeStatus,
+    read_typed_artifact,
+    run_finite_node,
+    write_typed_artifact,
+)
 from paperlens_core.schemas import ClassificationDecision, PaperRecord, SkimCard
 
 
@@ -155,41 +161,45 @@ def write_core_v2_artifacts(
         "report_draft": root / "report_draft.v1.json",
         "report_audit_findings": root / "report_audit_findings.v1.json",
     }
-    write_envelope(paths["paper_dom"], "paper_dom", paper.paper_id, dom.model_dump())
-    write_envelope(paths["reading_plan"], "reading_plan", paper.paper_id, reading_plan.model_dump())
-    write_envelope(
+    write_core_v2_envelope(paths["paper_dom"], "paper_dom", paper.paper_id, dom.model_dump())
+    write_core_v2_envelope(
+        paths["reading_plan"], "reading_plan", paper.paper_id, reading_plan.model_dump()
+    )
+    write_core_v2_envelope(
         paths["observation_log"],
         "observation_log",
         paper.paper_id,
         observation_log.model_dump(),
         source_ids=sorted(dom.source_ids()),
     )
-    write_envelope(paths["claim_graph"], "claim_graph", paper.paper_id, claim_graph.model_dump())
-    write_envelope(
+    write_core_v2_envelope(
+        paths["claim_graph"], "claim_graph", paper.paper_id, claim_graph.model_dump()
+    )
+    write_core_v2_envelope(
         paths["audit_findings"],
         "audit_findings",
         paper.paper_id,
         [finding.model_dump() for finding in derived["audit_findings"]],
     )
-    write_envelope(
+    write_core_v2_envelope(
         paths["quality_metrics"],
         "core_quality_metrics",
         paper.paper_id,
         derived["quality_metrics"].model_dump(),
     )
-    write_envelope(
+    write_core_v2_envelope(
         paths["paper_memory_view"],
         "paper_memory_view",
         paper.paper_id,
         derived["memory_view"].model_dump(),
     )
-    write_envelope(
+    write_core_v2_envelope(
         paths["report_draft"],
         "graph_report_draft",
         paper.paper_id,
         derived["report_draft"].model_dump(),
     )
-    write_envelope(
+    write_core_v2_envelope(
         paths["report_audit_findings"],
         "report_audit_findings",
         paper.paper_id,
@@ -344,7 +354,7 @@ def write_core_v2_from_observation_log(
         "report_draft": root / "report_draft.v1.json",
         "report_audit_findings": root / "report_audit_findings.v1.json",
     }
-    write_envelope(
+    write_core_v2_envelope(
         paths["observation_log"],
         "observation_log",
         paper.paper_id,
@@ -352,42 +362,42 @@ def write_core_v2_from_observation_log(
         source_ids=sorted(dom.source_ids()),
         producer=producer,
     )
-    write_envelope(
+    write_core_v2_envelope(
         paths["claim_graph"],
         "claim_graph",
         paper.paper_id,
         claim_graph.model_dump(),
         producer=producer,
     )
-    write_envelope(
+    write_core_v2_envelope(
         paths["audit_findings"],
         "audit_findings",
         paper.paper_id,
         [finding.model_dump() for finding in derived["audit_findings"]],
         producer=producer,
     )
-    write_envelope(
+    write_core_v2_envelope(
         paths["quality_metrics"],
         "core_quality_metrics",
         paper.paper_id,
         derived["quality_metrics"].model_dump(),
         producer=producer,
     )
-    write_envelope(
+    write_core_v2_envelope(
         paths["paper_memory_view"],
         "paper_memory_view",
         paper.paper_id,
         derived["memory_view"].model_dump(),
         producer=producer,
     )
-    write_envelope(
+    write_core_v2_envelope(
         paths["report_draft"],
         "graph_report_draft",
         paper.paper_id,
         derived["report_draft"].model_dump(),
         producer=producer,
     )
-    write_envelope(
+    write_core_v2_envelope(
         paths["report_audit_findings"],
         "report_audit_findings",
         paper.paper_id,
@@ -426,35 +436,35 @@ def refresh_core_v2_audit_artifacts(
         "report_draft": root / "report_draft.v1.json",
         "report_audit_findings": root / "report_audit_findings.v1.json",
     }
-    write_envelope(
+    write_core_v2_envelope(
         paths["audit_findings"],
         "audit_findings",
         paper.paper_id,
         [finding.model_dump() for finding in derived["audit_findings"]],
         producer=producer,
     )
-    write_envelope(
+    write_core_v2_envelope(
         paths["quality_metrics"],
         "core_quality_metrics",
         paper.paper_id,
         derived["quality_metrics"].model_dump(),
         producer=producer,
     )
-    write_envelope(
+    write_core_v2_envelope(
         paths["paper_memory_view"],
         "paper_memory_view",
         paper.paper_id,
         derived["memory_view"].model_dump(),
         producer=producer,
     )
-    write_envelope(
+    write_core_v2_envelope(
         paths["report_draft"],
         "graph_report_draft",
         paper.paper_id,
         derived["report_draft"].model_dump(),
         producer=producer,
     )
-    write_envelope(
+    write_core_v2_envelope(
         paths["report_audit_findings"],
         "report_audit_findings",
         paper.paper_id,
@@ -592,7 +602,7 @@ def extract_numbers(text: str) -> list[dict[str, str]]:
     return [{"text": match.group(0)} for match in re.finditer(r"\b\d+(?:\.\d+)?%?\b", text)][:8]
 
 
-def write_envelope(
+def write_core_v2_envelope(
     path: Path,
     artifact_type: str,
     paper_id: str,
@@ -601,7 +611,8 @@ def write_envelope(
     source_ids: list[str] | None = None,
     producer: str = "paperlens_core_v2_bootstrap",
 ) -> None:
-    envelope = ArtifactEnvelope(
+    write_typed_artifact(
+        path,
         artifact_type=artifact_type,
         artifact_version="v1",
         data=data,
@@ -609,13 +620,12 @@ def write_envelope(
         source_ids=source_ids or [],
         metadata={"paper_id": paper_id, "schema_version": CORE_V2_SCHEMA_VERSION},
     )
-    write_json(path, json.loads(envelope.model_dump_json()))
 
 
 def load_core_v2_dom_and_plan(data_dir: Path, paper_id: str) -> tuple[PaperDOM, ReadingPlan]:
     root = data_dir / "core" / "v2" / paper_id
-    dom_envelope = read_envelope(root / "paper_dom.v1.json", expected_type="paper_dom")
-    plan_envelope = read_envelope(root / "reading_plan.v1.json", expected_type="reading_plan")
+    dom_envelope = read_typed_artifact(root / "paper_dom.v1.json", expected_type="paper_dom")
+    plan_envelope = read_typed_artifact(root / "reading_plan.v1.json", expected_type="reading_plan")
     if not isinstance(dom_envelope.data, dict) or not isinstance(plan_envelope.data, dict):
         raise ValueError(f"Core v2 paper_dom/reading_plan artifacts are invalid for {paper_id}")
     return PaperDOM.model_validate(dom_envelope.data), ReadingPlan.model_validate(
@@ -625,23 +635,13 @@ def load_core_v2_dom_and_plan(data_dir: Path, paper_id: str) -> tuple[PaperDOM, 
 
 def load_core_v2_dom_and_graph(data_dir: Path, paper_id: str) -> tuple[PaperDOM, ClaimGraph]:
     root = data_dir / "core" / "v2" / paper_id
-    dom_envelope = read_envelope(root / "paper_dom.v1.json", expected_type="paper_dom")
-    graph_envelope = read_envelope(root / "claim_graph.v1.json", expected_type="claim_graph")
+    dom_envelope = read_typed_artifact(root / "paper_dom.v1.json", expected_type="paper_dom")
+    graph_envelope = read_typed_artifact(root / "claim_graph.v1.json", expected_type="claim_graph")
     if not isinstance(dom_envelope.data, dict) or not isinstance(graph_envelope.data, dict):
         raise ValueError(f"Core v2 paper_dom/claim_graph artifacts are invalid for {paper_id}")
     return PaperDOM.model_validate(dom_envelope.data), ClaimGraph.model_validate(
         graph_envelope.data
     )
-
-
-def read_envelope(path: Path, *, expected_type: str) -> ArtifactEnvelope:
-    if not path.exists():
-        raise FileNotFoundError(f"Missing core v2 artifact: {path}")
-    try:
-        envelope = ArtifactEnvelope.model_validate_json(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        raise ValueError(f"Invalid core v2 artifact envelope: {path}") from exc
-    return envelope.require_type(expected_type)
 
 
 def build_observation_task_prompt(

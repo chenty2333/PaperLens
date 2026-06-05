@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 from paperlens_core.runtime.artifacts import ArtifactEnvelope
+from paperlens_core.runtime.artifact_store import (
+    make_artifact_envelope,
+    read_artifact_envelope,
+    read_typed_artifact,
+    write_artifact_envelope,
+    write_typed_artifact,
+)
 from paperlens_core.runtime.executor import (
     NodeExecutionError,
     NodeResult,
@@ -47,13 +54,18 @@ __all__ = [
     "context_pack_prompt",
     "dedupe_queries",
     "memory_uncertainty",
+    "make_artifact_envelope",
     "page_captions",
     "page_captions_text",
     "page_list_field",
     "page_no",
     "page_text",
     "pages_from_memory",
+    "read_artifact_envelope",
+    "read_typed_artifact",
     "run_finite_node",
     "tokenize",
     "unique_pages",
+    "write_artifact_envelope",
+    "write_typed_artifact",
 ]
