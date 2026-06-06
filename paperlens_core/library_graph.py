@@ -231,12 +231,17 @@ def graph_quality_summary(
     current_audit_findings: list[AuditFinding],
     current_publish_status: str,
 ) -> dict[str, Any]:
-    artifact_publish_status = artifact_manifest.get("publish_status") or quality.get(
+    artifact_publish_status = artifact_manifest.get("artifact_publish_status") or quality.get(
         "publish_status"
     )
-    effective_publish_status = artifact_publish_status
-    if artifact_manifest.get("status") == "COMPLETE" and artifact_publish_status:
-        effective_publish_status = current_publish_status
+    if artifact_manifest.get("status") == "COMPLETE":
+        effective_publish_status = (
+            artifact_manifest.get("publish_status")
+            or current_publish_status
+            or artifact_publish_status
+        )
+    else:
+        effective_publish_status = artifact_manifest.get("publish_status") or artifact_publish_status
     return {
         "artifact_set_status": artifact_manifest.get("status"),
         "artifact_set_consumable": artifact_manifest.get("consumable"),
@@ -275,9 +280,20 @@ def graph_non_consumable_policy(artifact_manifest: dict[str, Any]) -> str:
         return "missing_core_v2_manifest"
     if "missing:quality_metrics.v1.json" in issues:
         return "missing_core_v2_quality_metrics"
-    publish_status = str(artifact_manifest.get("publish_status") or "")
+    artifact_publish_status = str(artifact_manifest.get("artifact_publish_status") or "")
+    publish_status = str(
+        artifact_manifest.get("current_audit_publish_status")
+        or artifact_manifest.get("publish_status")
+        or ""
+    )
     if publish_status == "BLOCKED":
-        return "blocked_by_core_v2_audit"
+        if artifact_publish_status == "BLOCKED":
+            return "blocked_by_core_v2_audit"
+        return "blocked_by_current_graph_audit"
+    if artifact_manifest.get("current_audit_publish_status"):
+        if artifact_publish_status == publish_status:
+            return "not_reviewed_by_core_v2_audit"
+        return "not_reviewed_by_current_graph_audit"
     return "not_reviewed_by_core_v2_audit"
 
 

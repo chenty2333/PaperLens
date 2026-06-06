@@ -1156,19 +1156,22 @@ def test_core_graph_report_view_is_materialized_from_typed_artifacts(tmp_path):
     root = data_dir / "core" / "v2" / "p_test"
     dom = sample_dom()
     source_id = next(span.source_id for span in dom.spans if "block table method" in span.text)
+    reading_plan = reading_plan_subset(dom, ReadingTaskType.CLAIM_INVENTORY)
+    claim_task = reading_task(reading_plan, ReadingTaskType.CLAIM_INVENTORY)
     observation = ObservationCard(
         observation_id="obs_claim",
         paper_id="p_test",
-        task_id="read_02_claim_inventory",
+        task_id=claim_task.task_id,
         observation_type=ObservationType.CLAIM,
         statement="The paper proposes a block table method.",
         source_ids=[source_id],
+        covered_outputs=claim_task.required_outputs,
     )
     graph = graph_from_observations("p_test", [observation])
     draft = build_report_draft_from_graph(graph)
     artifact_payloads = {
         "paper_dom.v1.json": ("paper_dom", dom.model_dump(mode="json")),
-        "reading_plan.v1.json": ("reading_plan", {"paper_id": "p_test"}),
+        "reading_plan.v1.json": ("reading_plan", reading_plan.model_dump(mode="json")),
         "observation_log.v1.json": ("observation_log", {"paper_id": "p_test"}),
         "claim_graph.v1.json": ("claim_graph", graph.model_dump(mode="json")),
         "audit_findings.v1.json": ("audit_findings", []),
@@ -1762,6 +1765,69 @@ def test_core_v2_manifest_reports_incomplete_artifact_sets(tmp_path):
     assert manifest["publish_status"] is None
     assert manifest["consumable"] is False
     assert "missing:quality_metrics.v1.json" in manifest["issues"]
+
+
+def test_core_v2_manifest_reaudits_current_artifacts_before_consumable(tmp_path):
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    layout = {
+        "pages": [
+            {
+                "page_no": 1,
+                "text": "Abstract\n\nWe propose a block table method for serving.",
+                "section_candidates": [{"title": "Abstract", "level": 1}],
+            }
+        ]
+    }
+    dom = build_paper_dom_from_layout(
+        paper_id=paper.paper_id,
+        title=paper.canonical_title,
+        layout=layout,
+    )
+    claim_span = next(span for span in dom.spans if "block table method" in span.text)
+    narrow_plan = reading_plan_subset(dom, ReadingTaskType.CLAIM_INVENTORY)
+    full_plan = build_initial_reading_plan(dom)
+    claim_task = reading_task(narrow_plan, ReadingTaskType.CLAIM_INVENTORY)
+    write_core_v2_from_observation_log(
+        data_dir=tmp_path,
+        paper=paper,
+        dom=dom,
+        reading_plan=narrow_plan,
+        observation_log=ObservationLog(paper_id="p_test").append(
+            ObservationCard(
+                observation_id="obs_claim",
+                paper_id="p_test",
+                task_id=claim_task.task_id,
+                observation_type=ObservationType.CLAIM,
+                statement="The paper proposes a block table method.",
+                source_ids=[claim_span.source_id],
+                covered_outputs=claim_task.required_outputs,
+            )
+        ),
+        producer="unit_test",
+    )
+    root = tmp_path / "core" / "v2" / "p_test"
+    write_typed_artifact(
+        root / "reading_plan.v1.json",
+        artifact_type="reading_plan",
+        data=full_plan.model_dump(),
+        producer="unit_test_stale_plan",
+        metadata={"paper_id": paper.paper_id},
+    )
+
+    manifest = build_core_v2_manifest(root, "p_test")
+
+    assert manifest["status"] == "COMPLETE"
+    assert manifest["artifact_publish_status"] == PublishStatus.REVIEWED
+    assert manifest["current_audit_publish_status"] == PublishStatus.DRAFT_WEAK
+    assert manifest["publish_status"] == PublishStatus.DRAFT_WEAK
+    assert manifest["consumable"] is False
+    assert "missing_reading_required_output" in manifest["current_audit_issue_codes"]
 
 
 def test_refresh_core_v2_audit_artifacts_blocks_missing_dom_sources(tmp_path):

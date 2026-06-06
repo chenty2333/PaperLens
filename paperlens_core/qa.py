@@ -382,17 +382,31 @@ def core_v2_quality_context(
     current_audit_findings: list[AuditFinding] | None = None,
 ) -> dict[str, Any]:
     quality_metrics = core_manifest.get("required_artifacts", {}).get("quality_metrics", {})
-    artifact_publish_status = core_manifest.get("publish_status")
-    effective_publish_status = current_publish_status or artifact_publish_status
+    artifact_publish_status = core_manifest.get("artifact_publish_status") or core_manifest.get(
+        "publish_status"
+    )
+    effective_publish_status = (
+        current_publish_status
+        or core_manifest.get("current_audit_publish_status")
+        or core_manifest.get("publish_status")
+        or artifact_publish_status
+    )
     findings = current_audit_findings or []
     return {
         "status": core_manifest.get("status"),
         "publish_status": effective_publish_status,
         "artifact_publish_status": artifact_publish_status,
-        "current_audit_publish_status": current_publish_status,
-        "current_audit_error_count": audit_finding_count(findings, severity="ERROR"),
-        "current_audit_warning_count": audit_finding_count(findings, severity="WARNING"),
-        "current_audit_issue_codes": sorted({finding.code for finding in findings}),
+        "current_audit_publish_status": current_publish_status
+        or core_manifest.get("current_audit_publish_status"),
+        "current_audit_error_count": audit_finding_count(findings, severity="ERROR")
+        if findings
+        else core_manifest.get("current_audit_error_count"),
+        "current_audit_warning_count": audit_finding_count(findings, severity="WARNING")
+        if findings
+        else core_manifest.get("current_audit_warning_count"),
+        "current_audit_issue_codes": sorted({finding.code for finding in findings})
+        if findings
+        else core_manifest.get("current_audit_issue_codes", []),
         "consumable": core_manifest.get("consumable"),
         "issues": core_manifest.get("issues", []),
         "quality_metrics_artifact": quality_metrics,
@@ -405,9 +419,22 @@ def core_v2_non_consumable_policy(core_manifest: dict[str, Any]) -> str:
         return "missing_core_v2_manifest"
     if "missing:quality_metrics.v1.json" in issues:
         return "missing_core_v2_quality_metrics"
-    publish_status = str(core_manifest.get("publish_status") or "")
+    artifact_publish_status = str(core_manifest.get("artifact_publish_status") or "")
+    publish_status = str(
+        core_manifest.get("current_audit_publish_status")
+        or core_manifest.get("publish_status")
+        or ""
+    )
     if publish_status == "BLOCKED":
-        return "blocked_by_core_v2_audit"
+        if artifact_publish_status == "BLOCKED":
+            return "blocked_by_core_v2_audit"
+        return "blocked_by_current_graph_audit"
+    if core_manifest.get("current_audit_publish_status"):
+        if artifact_publish_status == publish_status:
+            return "not_reviewed_by_core_v2_audit"
+        return "not_reviewed_by_current_graph_audit"
+    if publish_status:
+        return "not_reviewed_by_core_v2_audit"
     return "not_reviewed_by_core_v2_audit"
 
 
