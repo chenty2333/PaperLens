@@ -139,6 +139,8 @@ def summarize_claim_graph_for_library(
             "concept_nodes": [],
             "evaluation_datasets": [],
             "evaluation_metrics": [],
+            "evaluation_dataset_mentions": [],
+            "evaluation_metric_mentions": [],
             "relations": [],
         }
     current_access = current_graph_non_consumable_policy(current_publish_status)
@@ -157,6 +159,8 @@ def summarize_claim_graph_for_library(
             "concept_nodes": [],
             "evaluation_datasets": [],
             "evaluation_metrics": [],
+            "evaluation_dataset_mentions": [],
+            "evaluation_metric_mentions": [],
             "relations": [],
         }
     source_index = core_v2_source_index(dom)
@@ -173,9 +177,13 @@ def summarize_claim_graph_for_library(
     evaluation_nodes = [
         item for kind in EVALUATION_NODE_KINDS for item in nodes_by_kind.get(kind, [])
     ]
-    evidence_text = " ".join(
-        json.dumps(item.get("evidence_samples", []), ensure_ascii=False)
-        for item in [*method_nodes, *claim_nodes, *evaluation_nodes]
+    dataset_mentions = extract_term_mentions(
+        evaluation_nodes,
+        extractor=extract_dataset_terms,
+    )
+    metric_mentions = extract_term_mentions(
+        evaluation_nodes,
+        extractor=extract_metric_terms,
     )
     return {
         **base_summary,
@@ -189,12 +197,10 @@ def summarize_claim_graph_for_library(
         "result_nodes": nodes_by_kind.get("result", [])[:8],
         "limitation_nodes": nodes_by_kind.get("limitation", [])[:8],
         "concept_nodes": nodes_by_kind.get("concept", [])[:8],
-        "evaluation_datasets": extract_dataset_terms(
-            " ".join([item["label"] for item in evaluation_nodes]) + " " + evidence_text
-        )[:12],
-        "evaluation_metrics": extract_metric_terms(
-            " ".join([item["label"] for item in evaluation_nodes]) + " " + evidence_text
-        )[:12],
+        "evaluation_datasets": [item["term"] for item in dataset_mentions[:12]],
+        "evaluation_metrics": [item["term"] for item in metric_mentions[:12]],
+        "evaluation_dataset_mentions": dataset_mentions[:12],
+        "evaluation_metric_mentions": metric_mentions[:12],
         "relations": (
             graph_relationship_edges(
                 memory_view=memory_view,
@@ -324,6 +330,8 @@ def build_graph_summary_search_text(summary: dict[str, Any]) -> str:
         json.dumps(summary.get("method_family", []), ensure_ascii=False),
         json.dumps(summary.get("evaluation_datasets", []), ensure_ascii=False),
         json.dumps(summary.get("evaluation_metrics", []), ensure_ascii=False),
+        json.dumps(summary.get("evaluation_dataset_mentions", []), ensure_ascii=False),
+        json.dumps(summary.get("evaluation_metric_mentions", []), ensure_ascii=False),
         json.dumps(summary.get("relations", []), ensure_ascii=False),
     ]
     for key in [
@@ -485,6 +493,12 @@ def compact_graph_summary_for_index(value: Any) -> dict[str, Any]:
         "evaluation_metrics": (summary.get("evaluation_metrics") or [])[:8]
         if isinstance(summary.get("evaluation_metrics"), list)
         else [],
+        "evaluation_dataset_mentions": compact_term_mentions(
+            summary.get("evaluation_dataset_mentions")
+        ),
+        "evaluation_metric_mentions": compact_term_mentions(
+            summary.get("evaluation_metric_mentions")
+        ),
     }
 
 
@@ -521,6 +535,24 @@ def compact_graph_nodes(value: Any) -> list[dict[str, Any]]:
             }
         )
     return nodes
+
+
+def compact_term_mentions(value: Any) -> list[dict[str, Any]]:
+    mentions = []
+    for item in list_payload(value)[:8]:
+        mentions.append(
+            {
+                "term": item.get("term"),
+                "node_ids": item.get("node_ids", [])[:6]
+                if isinstance(item.get("node_ids"), list)
+                else [],
+                "source_ids": item.get("source_ids", [])[:6]
+                if isinstance(item.get("source_ids"), list)
+                else [],
+                "pages": item.get("pages", [])[:6] if isinstance(item.get("pages"), list) else [],
+            }
+        )
+    return mentions
 
 
 def graph_summary_nodes(summary: dict[str, Any]) -> list[dict[str, Any]]:
@@ -676,9 +708,48 @@ def extract_dataset_terms(text: str) -> list[str]:
 def extract_metric_terms(text: str) -> list[str]:
     lowered = text.lower()
     terms = [term for term in METRIC_TERMS if term in lowered]
-    for match in re.finditer(r"\b\d+(?:\.\d+)?%?\b", text):
+    for match in re.finditer(r"(?<![A-Za-z0-9_])\d+(?:\.\d+)?%?(?![A-Za-z0-9_])", text):
         add_unique(terms, match.group(0))
     return terms
+
+
+def extract_term_mentions(
+    nodes: list[dict[str, Any]],
+    *,
+    extractor: Any,
+) -> list[dict[str, Any]]:
+    mentions: dict[str, dict[str, Any]] = {}
+    for node in nodes:
+        node_id = string_or_empty(node.get("node_id"))
+        source_ids = [
+            source_id for source_id in node.get("source_ids", []) if isinstance(source_id, str)
+        ]
+        pages = [page for page in node.get("pages", []) if isinstance(page, int)]
+        text_parts = [string_or_empty(node.get("label"))]
+        for sample in list_payload(node.get("evidence_samples")):
+            text_parts.append(
+                string_or_empty(sample.get("text"))
+                or string_or_empty(sample.get("caption"))
+                or string_or_empty(sample.get("equation"))
+            )
+        for term in extractor(" ".join(part for part in text_parts if part)):
+            entry = mentions.setdefault(
+                term,
+                {
+                    "term": term,
+                    "node_ids": [],
+                    "source_ids": [],
+                    "pages": [],
+                },
+            )
+            if node_id:
+                add_unique(entry["node_ids"], node_id)
+            for source_id in source_ids:
+                add_unique(entry["source_ids"], source_id)
+            for page in pages:
+                if page not in entry["pages"]:
+                    entry["pages"].append(page)
+    return list(mentions.values())
 
 
 def relative_core_path(path: Path) -> str:

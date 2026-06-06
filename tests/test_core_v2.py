@@ -2576,7 +2576,7 @@ def test_library_rebuild_indexes_core_v2_claim_graph_without_memory_v3(tmp_path)
         file_path="paper.pdf",
         file_hash="hash",
         canonical_title="Test Paper",
-        page_count=1,
+        page_count=3,
     )
     layout = {
         "pages": [
@@ -2589,6 +2589,11 @@ def test_library_rebuild_indexes_core_v2_claim_graph_without_memory_v3(tmp_path)
                 "page_no": 2,
                 "text": "Method\n\nThe block table mechanism organizes serving state.",
                 "section_candidates": [{"title": "Method", "level": 1}],
+            },
+            {
+                "page_no": 3,
+                "text": "Evaluation\n\nThe method improves latency by 27% on Dataset-A.",
+                "section_candidates": [{"title": "Evaluation", "level": 1}],
             },
         ]
     }
@@ -2604,6 +2609,7 @@ def test_library_rebuild_indexes_core_v2_claim_graph_without_memory_v3(tmp_path)
     )
     claim_span = next(span for span in dom.spans if "block table method" in span.text)
     mechanism_span = next(span for span in dom.spans if "organizes serving state" in span.text)
+    result_span = next(span for span in dom.spans if "27%" in span.text)
     write_core_v2_from_observation_log(
         data_dir=output_dir / ".paperlens" / "data",
         paper=paper,
@@ -2632,6 +2638,17 @@ def test_library_rebuild_indexes_core_v2_claim_graph_without_memory_v3(tmp_path)
                     {"source_id": "obs_mechanism", "target_id": "obs_claim", "kind": "explains"}
                 ],
             )
+        )
+        .append(
+            ObservationCard(
+                observation_id="obs_result",
+                paper_id="p_test",
+                task_id="read_06_result_extraction",
+                observation_type=ObservationType.RESULT,
+                statement="The method improves latency by 27% on Dataset-A.",
+                source_ids=[result_span.source_id],
+                extracted_numbers=[{"text": "27%"}],
+            )
         ),
         producer="unit_test",
     )
@@ -2650,11 +2667,24 @@ def test_library_rebuild_indexes_core_v2_claim_graph_without_memory_v3(tmp_path)
     assert records[0]["graph_summary"]["schema_version"] == "paperlens.graph_library_summary.v1"
     assert records[0]["graph_summary"]["relations"][0]["kind"] == "explains"
     assert records[0]["graph_summary"]["relations"][0]["source_id"] == "mechanism:obs_mechanism"
+    assert records[0]["graph_summary"]["evaluation_datasets"] == ["Dataset-A"]
+    assert "latency" in records[0]["graph_summary"]["evaluation_metrics"]
+    assert "27%" in records[0]["graph_summary"]["evaluation_metrics"]
+    assert "3" not in records[0]["graph_summary"]["evaluation_metrics"]
+    dataset_mention = records[0]["graph_summary"]["evaluation_dataset_mentions"][0]
+    metric_mentions = records[0]["graph_summary"]["evaluation_metric_mentions"]
+    assert dataset_mention["node_ids"] == ["result:obs_result"]
+    assert dataset_mention["source_ids"] == [result_span.source_id]
+    assert dataset_mention["pages"] == [3]
+    assert any(item["term"] == "27%" and item["source_ids"] == [result_span.source_id] for item in metric_mentions)
     assert records[0]["memory"]["claims"]
     assert records[0]["provenance"]["core_v2"]["source_ids"]
     assert records[0]["quality"]["graph_publish_status"] == PublishStatus.REVIEWED
     assert result["matches"][0]["paper"]["paper_id"] == "p_test"
     assert index["records"][0]["graph"]["node_counts"]["claim"] >= 1
+    assert index["records"][0]["graph"]["evaluation_dataset_mentions"][0]["source_ids"] == [
+        result_span.source_id
+    ]
     assert doctor_library(output_dir)["status"] == "PASS"
 
 
