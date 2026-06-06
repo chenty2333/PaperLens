@@ -242,6 +242,11 @@ def graph_quality_summary(
         "current_audit_issue_codes": sorted({finding.code for finding in current_audit_findings}),
         "memory_report_readiness": memory_view.get("report_readiness"),
         "evidence_coverage": quality.get("evidence_coverage"),
+        "reading_required_output_coverage": quality.get("reading_required_output_coverage"),
+        "reading_required_output_count": quality.get("reading_required_output_count"),
+        "reading_required_output_covered_count": quality.get(
+            "reading_required_output_covered_count"
+        ),
         "fact_node_count": quality.get("fact_node_count"),
         "supported_fact_node_count": quality.get("supported_fact_node_count"),
         "audit_error_count": quality.get("audit_error_count"),

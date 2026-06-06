@@ -145,6 +145,7 @@ def write_core_v2_artifacts(
     derived = build_core_v2_derived_views(
         dom=dom,
         claim_graph=claim_graph,
+        reading_plan=reading_plan,
         metadata={
             "title": paper.canonical_title,
             "authors": paper.authors,
@@ -367,6 +368,7 @@ def write_core_v2_from_observation_log(
     derived = build_core_v2_derived_views(
         dom=dom,
         claim_graph=claim_graph,
+        reading_plan=reading_plan,
         metadata={
             "title": paper.canonical_title,
             "observer_schema_version": CORE_V2_MODEL_OBSERVER_VERSION,
@@ -504,10 +506,12 @@ def refresh_core_v2_audit_artifacts(
     decision: ClassificationDecision | None = None,
     producer: str = "paperlens_core_v2_audit_suite",
 ) -> dict[str, Any]:
-    dom, claim_graph = load_core_v2_dom_and_graph(data_dir, paper.paper_id)
+    dom, reading_plan = load_core_v2_dom_and_plan(data_dir, paper.paper_id)
+    _, claim_graph = load_core_v2_dom_and_graph(data_dir, paper.paper_id)
     derived = build_core_v2_derived_views(
         dom=dom,
         claim_graph=claim_graph,
+        reading_plan=reading_plan,
         metadata={
             "title": paper.canonical_title,
             "authors": paper.authors,
@@ -573,6 +577,7 @@ def build_core_v2_derived_views(
     *,
     dom: PaperDOM,
     claim_graph: ClaimGraph,
+    reading_plan: ReadingPlan | None = None,
     metadata: dict[str, Any],
 ) -> dict[str, Any]:
     audit_findings = audit_claim_graph(claim_graph, dom)
@@ -583,6 +588,7 @@ def build_core_v2_derived_views(
         dom=dom,
         graph=claim_graph,
         findings=all_findings,
+        reading_plan=reading_plan,
     )
     memory_view = materialize_paper_memory(
         claim_graph,

@@ -419,6 +419,9 @@ def build_library_record(row: dict[str, Any]) -> dict[str, Any]:
         "graph_evidence_coverage": dict_value(graph_summary.get("quality")).get(
             "evidence_coverage"
         ),
+        "graph_reading_required_output_coverage": dict_value(graph_summary.get("quality")).get(
+            "reading_required_output_coverage"
+        ),
         "graph_fact_node_count": dict_value(graph_summary.get("quality")).get("fact_node_count"),
     }
     record = {
@@ -953,6 +956,9 @@ def compact_library_record_for_agent(
             "report_audit_verdict": quality.get("report_audit_verdict"),
             "graph_publish_status": quality.get("graph_publish_status"),
             "graph_evidence_coverage": quality.get("graph_evidence_coverage"),
+            "graph_reading_required_output_coverage": quality.get(
+                "graph_reading_required_output_coverage"
+            ),
         },
     }
     if score is not None:

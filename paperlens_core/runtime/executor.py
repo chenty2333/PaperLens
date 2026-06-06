@@ -135,6 +135,9 @@ class NodeContext:
                 f"{self.spec.node_id} exceeded max_tokens={self.spec.max_tokens}"
             )
 
+    def enforce_runtime_budget(self) -> None:
+        self._check_runtime_budget()
+
     def _check_runtime_budget(self) -> None:
         elapsed = time.time() - self.started_at
         if elapsed > self.spec.timeout_seconds:
@@ -179,6 +182,7 @@ def run_finite_node(
     try:
         context.require_step()
         output = handler(context)
+        context.enforce_runtime_budget()
         if output is not None and not isinstance(output, ArtifactEnvelope):
             raise NodeExecutionError(
                 f"{spec.node_id} returned non-artifact output={type(output).__name__}"

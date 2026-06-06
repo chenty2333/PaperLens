@@ -536,6 +536,40 @@ def test_claim_graph_memory_and_audit_flow_from_observations():
     assert metrics.publish_status == PublishStatus.REVIEWED
 
 
+def test_quality_metrics_track_reading_required_output_coverage():
+    dom = sample_dom()
+    reading_plan = build_initial_reading_plan(dom)
+    result_task = next(
+        task for task in reading_plan.tasks if task.task_type == ReadingTaskType.RESULT_EXTRACTION
+    )
+    result_span = next(span for span in dom.spans if "27%" in span.text)
+    observation = ObservationCard(
+        observation_id="obs_result",
+        paper_id="p_test",
+        task_id=result_task.task_id,
+        observation_type=ObservationType.RESULT,
+        statement="The method improves latency by 27% on Dataset-A.",
+        source_ids=[result_span.source_id],
+        confidence="high",
+        covered_outputs=result_task.required_outputs,
+        extracted_numbers=[{"text": "27%"}],
+    )
+    graph = graph_from_observations("p_test", [observation])
+
+    metrics = compute_core_quality_metrics(
+        dom=dom,
+        graph=graph,
+        findings=audit_claim_graph(graph, dom),
+        reading_plan=reading_plan,
+    )
+
+    assert metrics.reading_required_output_count == 14
+    assert metrics.reading_required_output_covered_count == 1
+    assert metrics.reading_required_output_coverage == 0.0714
+    assert "read_01_orientation:problem" in metrics.missing_reading_required_outputs
+    assert f"{result_task.task_id}:result" not in metrics.missing_reading_required_outputs
+
+
 def test_claim_graph_keeps_valid_observation_relationship_edges():
     dom = sample_dom()
     first_source_id = dom.spans[0].source_id
@@ -1377,6 +1411,23 @@ def test_finite_runtime_node_enforces_token_budget():
     assert "exceeded max_tokens=10" in result.issues[0]
 
 
+def test_finite_runtime_node_enforces_timeout_after_handler_returns():
+    spec = NodeSpec(node_id="slow_node", timeout_seconds=1)
+
+    def handler(context):
+        context.started_at -= 2
+        return ArtifactEnvelope(
+            artifact_type="slow_artifact",
+            producer="unit",
+            data=[],
+        )
+
+    result = run_finite_node(spec, [], handler)
+
+    assert result.status == NodeStatus.FAIL
+    assert "exceeded timeout_seconds=1" in result.issues[0]
+
+
 def test_stage03_writes_core_v2_artifact_envelopes(tmp_path):
     output_dir = tmp_path / "out"
     input_dir = tmp_path / "in"
@@ -1567,6 +1618,10 @@ def test_core_v2_model_observer_rewrites_observation_graph_artifacts(tmp_path):
     assert len(observation_log["data"]["cards"]) == calls["count"]
     assert graph["producer"] == "paperlens_core_v2_model_observer"
     assert metrics["data"]["publish_status"] == PublishStatus.REVIEWED
+    assert metrics["data"]["reading_required_output_count"] == 14
+    assert metrics["data"]["reading_required_output_covered_count"] == 14
+    assert metrics["data"]["reading_required_output_coverage"] == 1.0
+    assert metrics["data"]["missing_reading_required_outputs"] == []
     assert core_manifest["artifact_type"] == "core_v2_manifest"
     assert core_manifest["data"]["status"] == "COMPLETE"
     assert core_manifest["data"]["publish_status"] == PublishStatus.REVIEWED
@@ -3157,6 +3212,10 @@ def test_core_quality_snapshot_tracks_structural_and_qa_metrics(tmp_path):
     assert "extracted_number_count" in paper_snapshot
     assert "extracted_number_not_located_count" in paper_snapshot
     assert "extracted_number_locatable_rate" in paper_snapshot
+    assert paper_snapshot["reading_required_output_count"] == 14
+    assert paper_snapshot["reading_required_output_covered_count"] == 0
+    assert paper_snapshot["reading_required_output_coverage"] == 0.0
+    assert paper_snapshot["missing_reading_required_output_count"] == 14
     assert paper_snapshot["unsupported_fact_node_rate"] == 0.0
     assert paper_snapshot["qa"]["total"] == 3
     assert paper_snapshot["qa"]["graph_hit_count"] == 1
@@ -3169,6 +3228,7 @@ def test_core_quality_snapshot_tracks_structural_and_qa_metrics(tmp_path):
     assert snapshot["aggregate"]["qa_graph_context_selected_count"] == 2
     assert snapshot["aggregate"]["qa_cache_hit_rate"] == 0.3333
     assert "average_extracted_number_locatable_rate" in snapshot["aggregate"]
+    assert snapshot["aggregate"]["average_reading_required_output_coverage"] == 0.0
 
 
 def test_stage17_manifest_includes_core_quality_snapshot(tmp_path):

@@ -106,6 +106,18 @@ def build_paper_quality_snapshot(
             fact_node_count,
             default=0.0,
         ),
+        "reading_required_output_count": int_value(
+            core_metrics.get("reading_required_output_count")
+        ),
+        "reading_required_output_covered_count": int_value(
+            core_metrics.get("reading_required_output_covered_count")
+        ),
+        "reading_required_output_coverage": float_or_none(
+            core_metrics.get("reading_required_output_coverage")
+        ),
+        "missing_reading_required_output_count": len(
+            list_value(core_metrics.get("missing_reading_required_outputs"))
+        ),
         "missing_source_count": missing_source_count,
         "audit_error_count": int_value(core_metrics.get("audit_error_count")),
         "audit_warning_count": int_value(core_metrics.get("audit_warning_count")),
@@ -143,6 +155,9 @@ def aggregate_quality(
             papers, "extracted_number_locatable_rate"
         ),
         "average_unsupported_fact_node_rate": average_metric(papers, "unsupported_fact_node_rate"),
+        "average_reading_required_output_coverage": average_metric(
+            papers, "reading_required_output_coverage"
+        ),
         "average_unsupported_report_paragraph_rate": average_metric(
             papers, "unsupported_report_paragraph_rate"
         ),
@@ -304,6 +319,10 @@ def int_value(value: Any) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def list_value(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
 
 
 def paperlens_data_dir(output_dir: Path) -> Path:
