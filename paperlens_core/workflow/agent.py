@@ -4,7 +4,6 @@ import hashlib
 import json
 import os
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -15,10 +14,6 @@ from paperlens_core.config import CoreConfig
 from paperlens_core.control import ControlState
 from paperlens_core.db import ArtifactDb
 from paperlens_core.events import EventWriter, write_json
-from paperlens_core.pdf.ingest import scan_pdfs
-from paperlens_core.pdf.layout_index import build_layout_index
-from paperlens_core.pdf.pymupdf_parser import parse_pdf
-from paperlens_core.pdf.quality import parse_quality
 from paperlens_core.quality_snapshot import write_core_quality_snapshot
 from paperlens_core.report import (
     classification_counts,
@@ -33,7 +28,6 @@ from paperlens_core.schemas import (
     ArtifactVersion,
     ClassificationDecision,
     PaperRecord,
-    ReviewItem,
     SkimCard,
 )
 from paperlens_core.workflow.export import write_final_report_bundle
@@ -46,6 +40,11 @@ from paperlens_core.workflow.stages import (
     WORKFLOW_STAGE_ORDER,
     normalize_workflow_stage,
     resolve_workflow_stages,
+)
+from paperlens_core.workflow.parse import (
+    run_ingest_stage,
+    run_parse_stage,
+    run_parse_verify_stage,
 )
 from paperlens_core.workflow.skim import deterministic_skim_classify
 from paperlens_core.workflow.core_v2 import (
@@ -60,7 +59,6 @@ from paperlens_core.workflow.visual import (
     hash_file_bytes,
 )
 from paperlens_core.workflow.utils import (
-    chunked,
     dict_value,
     hash_text,
     load_layout_index,
@@ -308,222 +306,13 @@ class PaperLensWorkflow:
         self.db.upsert_artifact_version(artifact)
 
     def stage_00_ingest(self) -> None:
-        stage = "stage_00_ingest"
-        self.checkpoint(stage)
-        self.events.stage_started(stage, "Scanning PDFs")
-        self.papers = scan_pdfs(self.input_dir)
-        active_ids = [paper.paper_id for paper in self.papers]
-        self.db.set_state("active_run_id", self.events.run_id)
-        self.db.set_state("active_input_dir", str(self.input_dir))
-        self.db.set_state("active_paper_ids", active_ids)
-        for paper in self.papers:
-            paper.status = "INGESTED"
-            self.db.upsert_paper(paper)
-            self.mark_paper_state(paper.paper_id, stage)
-        self.events.stage_completed(stage, f"Found {len(self.papers)} PDF files")
+        run_ingest_stage(self)
 
     def stage_01_parse(self) -> None:
-        stage = "stage_01_parse"
-        self.checkpoint(stage)
-        self.events.stage_started(stage, "Parsing PDFs with PyMuPDF")
-        if not self.papers:
-            self.events.stage_completed(stage, "No PDFs to parse")
-            return
-
-        def parse_one(paper: PaperRecord) -> tuple[PaperRecord, list[Any], str, dict[str, Any]]:
-            parsed_paper, artifacts = parse_pdf(
-                paper,
-                self.evidence_dir,
-                render_zoom=self.config.render_zoom,
-            )
-            quality, metrics = parse_quality(artifacts)
-            return parsed_paper, artifacts, quality, metrics
-
-        completed = 0
-        parsed_by_id: dict[str, PaperRecord] = {}
-        max_workers = min(max(1, self.config.concurrency), len(self.papers))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {}
-            for paper in self.papers:
-                self.checkpoint(stage)
-                self.events.emit(
-                    "paper_started",
-                    stage=stage,
-                    message=f"Parsing {paper.canonical_title or paper.paper_id}",
-                    data={"paper_id": paper.paper_id},
-                )
-                futures[executor.submit(parse_one, paper)] = paper
-
-            for future in as_completed(futures):
-                paper = futures[future]
-                completed += 1
-                progress = completed / len(self.papers)
-                self.checkpoint(stage)
-                try:
-                    parsed_paper, artifacts, quality, metrics = future.result()
-                    parsed_paper.parse_quality = quality
-                    parsed_paper.status = "PARSE_VERIFIED"
-                    parsed_by_id[parsed_paper.paper_id] = parsed_paper
-                    self.db.upsert_paper(parsed_paper)
-                    self.db.insert_page_artifacts(artifacts)
-                    layout_index = build_layout_index(parsed_paper, artifacts, metrics)
-                    layout_path = self.data_dir / "artifacts" / "layout" / f"{paper.paper_id}.json"
-                    write_json(
-                        layout_path,
-                        {
-                            "paper": parsed_paper.model_dump(),
-                            "parse_quality": quality,
-                            "metrics": metrics,
-                            "layout_index": layout_index,
-                            "pages": [artifact.model_dump() for artifact in artifacts],
-                        },
-                    )
-                    self.register_file_artifact(
-                        layout_path,
-                        paper_id=paper.paper_id,
-                        artifact_type="layout_index",
-                    )
-                    for artifact in artifacts:
-                        if artifact.render_path:
-                            self.register_file_artifact(
-                                Path(artifact.render_path),
-                                paper_id=paper.paper_id,
-                                artifact_type="page_render",
-                            )
-                    side_statuses = []
-                    if quality == "OCR_REQUIRED":
-                        side_statuses.append("NEED_VISUAL_RECHECK")
-                        self.db.upsert_review_item(
-                            ReviewItem(
-                                item_id=f"vlm_scan:{paper.paper_id}",
-                                paper_id=paper.paper_id,
-                                item_type="VLM_PAGE_MODE",
-                                priority=1,
-                                reason="text extraction weak; route rendered page images to multimodal model",
-                                payload={"metrics": metrics},
-                            )
-                        )
-                    if quality == "VLM_PAGE_MODE":
-                        side_statuses.append("NEED_VISUAL_RECHECK")
-                        self.db.upsert_review_item(
-                            ReviewItem(
-                                item_id=f"vlm:{paper.paper_id}",
-                                paper_id=paper.paper_id,
-                                item_type="VLM_PAGE_MODE",
-                                priority=1,
-                                reason="parse_quality=VLM_PAGE_MODE",
-                                payload={"metrics": metrics},
-                            )
-                        )
-                    visual_pages = [page.page_no for page in artifacts if page.visual_required]
-                    if visual_pages:
-                        side_statuses.append("NEED_VISUAL_RECHECK")
-                        self.db.upsert_review_item(
-                            ReviewItem(
-                                item_id=f"visual:{paper.paper_id}",
-                                paper_id=paper.paper_id,
-                                item_type="NEED_VISUAL_RECHECK",
-                                priority=2,
-                                reason="visual_required_pages",
-                                payload={"pages": visual_pages},
-                            )
-                        )
-                    self.mark_paper_state(paper.paper_id, stage, side_statuses=side_statuses)
-                    self.events.emit(
-                        "paper_completed",
-                        stage=stage,
-                        progress=progress,
-                        message=f"Parsed {paper.paper_id}",
-                        data={"paper_id": paper.paper_id, "parse_quality": quality},
-                    )
-                except Exception as exc:
-                    paper.status = "FAILED"
-                    paper.parse_quality = "FAIL"
-                    self.db.upsert_paper(paper)
-                    self.mark_paper_state(paper.paper_id, stage, error=str(exc))
-                    self.events.error(
-                        stage,
-                        f"Failed to parse {paper.file_path}: {exc}",
-                        {"paper_id": paper.paper_id},
-                    )
-        self.papers = [parsed_by_id.get(paper.paper_id, paper) for paper in self.papers]
-        self.events.stage_completed(stage, "Parse stage completed")
+        run_parse_stage(self)
 
     def stage_02_parse_verify(self) -> None:
-        stage = "stage_02_parse_verify"
-        self.checkpoint(stage)
-        self.events.stage_started(stage, "Verifying parse quality and VLM page enrichment")
-        if not self.papers:
-            self.events.stage_completed(stage, "No PDFs to verify")
-            return
-        client = self.new_llm_client() if self.llm_enabled() else None
-        visual_rows = []
-        for paper in self.papers:
-            artifacts = self.db.get_page_artifacts(paper.paper_id)
-            visual_pages = self.visual_pages_for_parse_verification(paper, artifacts)
-            if client and visual_pages:
-                visual_results = []
-                for batch in chunked(visual_pages, self.config.visual_pages_per_call):
-                    visual_results.append(
-                        self.run_vlm_page_mode(
-                            client=client,
-                            paper=paper,
-                            artifacts=batch,
-                            stage=stage,
-                        )
-                    )
-                if visual_results:
-                    visual_rows.extend(visual_results)
-                    all_notes = [
-                        note
-                        for visual_result in visual_results
-                        for note in visual_result.get("page_notes", [])
-                    ]
-                    for page in artifacts:
-                        notes = [note for note in all_notes if note.get("page_no") == page.page_no]
-                        if notes:
-                            page.visual_notes = notes
-                            page.low_confidence_flags = [
-                                flag
-                                for flag in page.low_confidence_flags
-                                if flag != "visual_required"
-                            ]
-                            page.visual_required = False
-                    self.db.insert_page_artifacts(artifacts)
-                    paper.parse_quality = (
-                        "PASS_WITH_WEAKNESSES"
-                        if paper.parse_quality in {"OCR_REQUIRED", "VLM_PAGE_MODE"}
-                        else paper.parse_quality
-                    )
-                    paper.status = "PARSE_VERIFIED"
-                    self.db.upsert_paper(paper)
-            side = []
-            if paper.parse_quality in {"OCR_REQUIRED", "VLM_PAGE_MODE"}:
-                side.append("NEED_VISUAL_RECHECK")
-            self.mark_paper_state(paper.paper_id, stage, side_statuses=side)
-        _ = visual_rows
-        self.events.stage_completed(stage, "Parse verification completed")
-
-    def visual_pages_for_parse_verification(
-        self,
-        paper: PaperRecord,
-        artifacts: list[Any],
-    ) -> list[Any]:
-        mode = self.config.visual_verification_mode
-        if mode == "off":
-            return []
-        parse_needs_visual = paper.parse_quality in {
-            "OCR_REQUIRED",
-            "VLM_PAGE_MODE",
-            "PASS_WITH_WEAKNESSES",
-        }
-        if mode == "parse_issues" and not parse_needs_visual:
-            return []
-        return [
-            artifact
-            for artifact in artifacts
-            if artifact.render_path and (artifact.visual_required or parse_needs_visual)
-        ][: self.config.visual_verification_max_pages]
+        run_parse_verify_stage(self)
 
     def run_vlm_page_mode(
         self,
