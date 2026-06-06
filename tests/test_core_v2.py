@@ -2096,6 +2096,9 @@ def test_core_v2_qa_grounding_filters_unknown_source_ids_and_claims():
     assert grounded["source_attribution"]["paper_claims"] == [
         "The paper proposes a block table method."
     ]
+    main_answer = grounded["answer_markdown"].split("Evidence limits:")[0]
+    assert "The paper proposes a block table method." in main_answer
+    assert "99% accuracy" not in main_answer
     assert "Evidence limits:" in grounded["answer_markdown"]
     assert any(
         "Removed QA source IDs" in item
@@ -2147,6 +2150,49 @@ def test_core_v2_qa_grounding_backfills_source_ids_for_supported_paper_claims():
     assert grounded["cited_pages"] == [1]
     assert grounded["confidence"] == "high"
     assert grounded["source_attribution"]["evidence_limits"] == []
+
+
+def test_core_v2_qa_grounding_replaces_fully_unsupported_paper_answer():
+    core_context = {
+        "retrieval_policy": "claim_graph_nodes_with_paper_dom_source_ids",
+        "quality": {"publish_status": PublishStatus.REVIEWED},
+        "matches": [
+            {
+                "node_id": "claim:obs_claim",
+                "kind": "claim",
+                "label": "The paper proposes a block table method.",
+                "source_ids": ["span:p_test:p1:1"],
+                "evidence_spans": [
+                    {
+                        "source_id": "span:p_test:p1:1",
+                        "kind": "paragraph",
+                        "page_no": 1,
+                        "text": "We propose a block table method for serving.",
+                    }
+                ],
+            }
+        ],
+    }
+    answer = {
+        "answer_markdown": "The paper proves 99% accuracy.",
+        "cited_pages": [],
+        "cited_source_ids": [],
+        "confidence": "high",
+        "source_attribution": {
+            "paper_claims": ["The paper proves 99% accuracy."],
+            "paperlens_inferences": [],
+            "background_context": [],
+            "evidence_limits": [],
+        },
+    }
+
+    grounded = ground_qa_answer_in_core_v2_context(answer, core_context)
+
+    main_answer = grounded["answer_markdown"].split("Evidence limits:")[0]
+    assert "Reviewed ClaimGraph context does not support" in main_answer
+    assert "99% accuracy" not in main_answer
+    assert grounded["source_attribution"]["paper_claims"] == []
+    assert grounded["confidence"] == "medium"
 
 
 def test_export_writes_core_graph_report_view_for_reviewed_core_artifacts(tmp_path):

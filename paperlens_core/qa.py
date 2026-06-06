@@ -1229,11 +1229,19 @@ def ground_qa_answer_in_core_v2_context(
     )
     if removed_source_ids or unsupported_claims:
         grounded["confidence"] = lower_qa_confidence(str(grounded.get("confidence") or "low"))
-        grounded["answer_markdown"] = append_qa_evidence_limit_notes(
-            str(grounded.get("answer_markdown") or ""),
-            [removed_qa_source_ids_note(removed_source_ids)] if removed_source_ids else [],
-            [unsupported_qa_claims_note(unsupported_claims)] if unsupported_claims else [],
-        )
+        if unsupported_claims:
+            grounded["answer_markdown"] = guarded_grounded_qa_answer_markdown(
+                supported_claims=supported_claims,
+                paperlens_inferences=attribution["paperlens_inferences"],
+                background_context=attribution["background_context"],
+                evidence_limits=attribution["evidence_limits"],
+            )
+        else:
+            grounded["answer_markdown"] = append_qa_evidence_limit_notes(
+                str(grounded.get("answer_markdown") or ""),
+                [removed_qa_source_ids_note(removed_source_ids)] if removed_source_ids else [],
+                [],
+            )
     return grounded
 
 
@@ -1331,6 +1339,30 @@ def append_qa_evidence_limit_notes(
     lines = [answer_markdown.rstrip(), "", "Evidence limits:"]
     lines.extend(f"- {note}" for note in notes)
     return "\n".join(line for line in lines if line is not None).strip()
+
+
+def guarded_grounded_qa_answer_markdown(
+    *,
+    supported_claims: list[str],
+    paperlens_inferences: list[str],
+    background_context: list[str],
+    evidence_limits: list[str],
+) -> str:
+    lines = ["Grounded answer:"]
+    if supported_claims:
+        lines.extend(f"- {claim}" for claim in supported_claims)
+    else:
+        lines.append("- Reviewed ClaimGraph context does not support a paper-claim answer.")
+    if paperlens_inferences:
+        lines.extend(["", "PaperLens inference:"])
+        lines.extend(f"- {item}" for item in paperlens_inferences)
+    if background_context:
+        lines.extend(["", "Background context:"])
+        lines.extend(f"- {item}" for item in background_context)
+    if evidence_limits:
+        lines.extend(["", "Evidence limits:"])
+        lines.extend(f"- {item}" for item in evidence_limits)
+    return "\n".join(lines).strip()
 
 
 def normalize_source_attribution(
