@@ -5,10 +5,15 @@ import re
 from pathlib import Path
 from typing import Any
 
-from paperlens_core.audit import audit_claim_graph, publish_status_from_findings
+from paperlens_core.audit import (
+    audit_claim_graph,
+    audit_reading_required_outputs,
+    publish_status_from_findings,
+)
 from paperlens_core.audit.findings import AuditFinding
 from paperlens_core.dom import PaperDOM
 from paperlens_core.graph import ClaimGraph, GraphNode
+from paperlens_core.reading import ReadingPlan
 from paperlens_core.runtime import ArtifactEnvelope
 from paperlens_core.core_manifest import inspect_core_v2_artifact_root
 
@@ -69,6 +74,7 @@ def read_core_v2_graph_summary(output_dir: Path, paper_id: str) -> dict[str, Any
         return {}
     dom = PaperDOM.model_validate(dom_payload)
     graph = ClaimGraph.model_validate(graph_payload)
+    reading_plan = read_optional_reading_plan(root / "reading_plan.v1.json")
     quality = read_optional_envelope_data(root / "quality_metrics.v1.json", "core_quality_metrics")
     memory_view = read_optional_envelope_data(
         root / "paper_memory_view.v1.json", "paper_memory_view"
@@ -77,6 +83,7 @@ def read_core_v2_graph_summary(output_dir: Path, paper_id: str) -> dict[str, Any
     return summarize_claim_graph_for_library(
         dom=dom,
         graph=graph,
+        reading_plan=reading_plan,
         quality=quality if isinstance(quality, dict) else {},
         memory_view=memory_view if isinstance(memory_view, dict) else {},
         artifact_manifest=artifact_manifest,
@@ -88,13 +95,17 @@ def summarize_claim_graph_for_library(
     *,
     dom: PaperDOM,
     graph: ClaimGraph,
+    reading_plan: ReadingPlan | None,
     quality: dict[str, Any],
     memory_view: dict[str, Any],
     artifact_manifest: dict[str, Any],
     root: Path,
 ) -> dict[str, Any]:
     metadata = dict_value(memory_view.get("metadata"))
-    current_audit_findings = audit_claim_graph(graph, dom)
+    current_audit_findings = [
+        *audit_claim_graph(graph, dom),
+        *audit_reading_required_outputs(graph, reading_plan),
+    ]
     current_publish_status = publish_status_from_findings(current_audit_findings).value
     quality_summary = graph_quality_summary(
         quality=quality,
@@ -622,6 +633,16 @@ def read_optional_envelope_data(path: Path, expected_type: str) -> dict[str, Any
         return read_envelope_data(path, expected_type=expected_type)
     except Exception:
         return {}
+
+
+def read_optional_reading_plan(path: Path) -> ReadingPlan | None:
+    data = read_optional_envelope_data(path, "reading_plan")
+    if not isinstance(data, dict):
+        return None
+    try:
+        return ReadingPlan.model_validate(data)
+    except Exception:
+        return None
 
 
 def compact_labels(nodes: list[dict[str, Any]], *, limit: int) -> list[str]:
