@@ -478,6 +478,12 @@ def qa_context_objective(core_v2_context: dict[str, Any]) -> str:
             "core v2 ClaimGraph and PaperDOM source IDs. Use legacy PaperMemory only as "
             "supplemental context, and treat report text as orientation, not proof."
         )
+    if core_v2_context.get("retrieval_policy"):
+        return (
+            "Answer the user's question by dynamically grounding it in local paper evidence. "
+            "Core v2 exists but is not reviewed, so do not use legacy PaperMemory as "
+            "paper-claim evidence."
+        )
     return (
         "Answer the user's question by dynamically grounding it in available PaperMemory and "
         "local paper evidence. Treat report text as orientation, not proof."
@@ -492,6 +498,12 @@ def qa_memory_context(
 ) -> dict[str, Any]:
     if core_v2_context_is_consumable(core_v2_context):
         return core_v2_qa_memory_view(paper_id=paper_id, core_v2_context=core_v2_context)
+    if core_v2_context.get("retrieval_policy"):
+        return unreviewed_core_v2_qa_memory_view(
+            paper_id=paper_id,
+            paper_memory_v3=paper_memory_v3,
+            core_v2_context=core_v2_context,
+        )
     return paper_memory_v3
 
 
@@ -544,6 +556,32 @@ def core_v2_qa_memory_view(*, paper_id: str, core_v2_context: dict[str, Any]) ->
         "audit_trail": {
             "core_v2_quality": core_v2_context.get("quality"),
             "answer_source_policy": core_v2_context.get("answer_source_policy"),
+        },
+    }
+
+
+def unreviewed_core_v2_qa_memory_view(
+    *,
+    paper_id: str,
+    paper_memory_v3: dict[str, Any],
+    core_v2_context: dict[str, Any],
+) -> dict[str, Any]:
+    quality = dict_value(core_v2_context.get("quality"))
+    return {
+        "schema_version": "paperlens_core_v2_unreviewed_qa_memory_view.v1",
+        "paper_id": paper_id,
+        "reading_context": {
+            "source_of_truth": "none_until_reviewed_core_v2_claim_graph",
+            "retrieval_policy": core_v2_context.get("retrieval_policy"),
+            "publish_status": quality.get("publish_status"),
+            "legacy_memory_policy": "suppressed_for_paper_claims",
+        },
+        "claims": [],
+        "evidence": [],
+        "audit_trail": {
+            "core_v2_quality": quality,
+            "answer_source_policy": core_v2_context.get("answer_source_policy"),
+            "legacy_memory_available": bool(paper_memory_v3),
         },
     }
 
@@ -1256,8 +1294,9 @@ def build_ask_prompt(
             (
                 "Answer contract: source_attribution.paper_claims should contain only claims directly "
                 "supported by reviewed core v2 ClaimGraph nodes and PaperDOM source IDs when "
-                "available; otherwise use PaperMemory evidence/claims or relevant page excerpts "
-                "as fallback. "
+                "available. If core v2 exists but is unavailable, use relevant page excerpts "
+                "rather than legacy PaperMemory for paper-specific claims. Use PaperMemory "
+                "evidence/claims only when no core v2 context exists. "
                 "Use agent_context_pack as the active tool/context trace for this question. "
                 "When core_v2_claim_graph_context has matches, treat those graph node IDs and "
                 "PaperDOM source IDs as the preferred paper evidence. "
@@ -1312,6 +1351,12 @@ def memory_fallback_policy(core_v2_context: dict[str, Any]) -> str:
         return (
             "supplemental_or_fallback_only; paper-specific factual claims should cite core v2 "
             "ClaimGraph node IDs and PaperDOM source IDs first."
+        )
+    if core_v2_context.get("retrieval_policy"):
+        return (
+            "no_legacy_paper_claim_fallback; core v2 artifacts exist but are not reviewed, so "
+            "paper-specific factual claims must come from relevant page excerpts or remain "
+            "uncertain."
         )
     return "fallback_primary_until_reviewed_core_v2_claim_graph_is_available."
 

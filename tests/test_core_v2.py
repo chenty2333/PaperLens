@@ -2663,6 +2663,50 @@ def test_core_v2_qa_empty_reviewed_graph_match_does_not_fallback_to_legacy_memor
     assert offline["source_attribution"]["paper_claims"] == []
 
 
+def test_core_v2_qa_unreviewed_core_context_suppresses_legacy_memory(tmp_path):
+    core_context = {
+        "retrieval_policy": "blocked_by_current_graph_audit",
+        "answer_source_policy": "Core v2 ClaimGraph failed current deterministic audit.",
+        "quality": {
+            "publish_status": PublishStatus.BLOCKED,
+            "current_audit_issue_codes": ["missing_dom_source"],
+        },
+        "matches": [],
+    }
+    legacy_memory = {
+        "schema_version": "paper_memory.v3",
+        "paper_id": "p_test",
+        "problem_frame": {"problem": "Legacy problem should not enter QA prompt."},
+        "claims": [{"id": "legacy", "text": "Legacy blocked claim should not answer."}],
+        "evidence": [{"id": "E001", "interpretation": "Legacy evidence should not answer."}],
+    }
+
+    memory = qa_memory_context(
+        paper_id="p_test",
+        paper_memory_v3=legacy_memory,
+        core_v2_context=core_context,
+    )
+    prompt = build_ask_prompt(
+        report_path=tmp_path / "papers" / "p_test.md",
+        paper_id="p_test",
+        question="blocked core question?",
+        paper_memory_v3=memory,
+        pages=[{"page_no": 1, "text": "page text", "captions": [], "visual_notes": []}],
+        question_type="orientation",
+        core_v2_context=core_context,
+    )
+
+    assert memory["schema_version"] == "paperlens_core_v2_unreviewed_qa_memory_view.v1"
+    assert memory["reading_context"]["source_of_truth"] == "none_until_reviewed_core_v2_claim_graph"
+    assert memory["claims"] == []
+    assert memory["evidence"] == []
+    assert "no_legacy_paper_claim_fallback" in prompt
+    assert "fallback_primary_until_reviewed" not in prompt
+    assert "Legacy blocked claim should not answer" not in prompt
+    assert "Legacy evidence should not answer" not in prompt
+    assert "Legacy problem should not enter QA prompt" not in prompt
+
+
 def test_core_v2_qa_context_returns_no_matches_for_unrelated_question(tmp_path):
     output_dir = tmp_path / "out"
     data_dir = output_dir / ".paperlens" / "data"
