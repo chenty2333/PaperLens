@@ -5,9 +5,19 @@ import re
 from pathlib import Path
 from typing import Any
 
+from paperlens_core.audit import (
+    audit_claim_graph,
+    audit_reading_required_outputs,
+    publish_status_from_findings,
+)
+from paperlens_core.audit.findings import AuditFinding
 from paperlens_core.audit.suite import FACT_NODE_KINDS
+from paperlens_core.audit.suite import reading_required_output_keys
+from paperlens_core.dom import PaperDOM
 from paperlens_core.events import write_json
 from paperlens_core.graph import ClaimGraph
+from paperlens_core.reading import ReadingPlan
+from paperlens_core.report import GraphReportDraft, audit_report_draft_against_graph
 from paperlens_core.runtime import ArtifactEnvelope
 
 
@@ -53,16 +63,18 @@ def build_paper_quality_snapshot(
     qa_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     paper_id = paper_root.name
+    dom = read_paper_dom(paper_root / "paper_dom.v1.json")
     graph = read_claim_graph(paper_root / "claim_graph.v1.json")
+    reading_plan = read_reading_plan(paper_root / "reading_plan.v1.json")
     core_metrics = read_envelope_dict(
         paper_root / "quality_metrics.v1.json",
         expected_type="core_quality_metrics",
     )
-    audit_findings = read_envelope_list(
+    artifact_audit_findings = read_envelope_list(
         paper_root / "audit_findings.v1.json",
         expected_type="audit_findings",
     )
-    report_findings = read_envelope_list(
+    artifact_report_findings = read_envelope_list(
         paper_root / "report_audit_findings.v1.json",
         expected_type="report_audit_findings",
     )
@@ -70,19 +82,65 @@ def build_paper_quality_snapshot(
         paper_root / "report_draft.v1.json",
         expected_type="graph_report_draft",
     )
+    report_draft_model = read_graph_report_draft(paper_root / "report_draft.v1.json")
+    current_audit_available = dom is not None and graph is not None
+    current_audit_findings: list[AuditFinding] = []
+    if current_audit_available:
+        current_audit_findings = [
+            *audit_claim_graph(graph, dom),
+            *audit_reading_required_outputs(graph, reading_plan),
+        ]
+    current_report_available = graph is not None and report_draft_model is not None
+    current_report_findings: list[AuditFinding] = []
+    if current_report_available:
+        current_report_findings = audit_report_draft_against_graph(report_draft_model, graph)
+    current_findings_available = current_audit_available or current_report_available
+    current_findings = [*current_audit_findings, *current_report_findings]
+    current_audit_rows = (
+        findings_to_rows(current_audit_findings)
+        if current_audit_available
+        else artifact_audit_findings
+    )
+    current_report_rows = (
+        findings_to_rows(current_report_findings)
+        if current_report_available
+        else artifact_report_findings
+    )
+    artifact_publish_status = core_metrics.get("publish_status")
+    current_publish_status = (
+        publish_status_from_findings(current_findings).value if current_findings_available else None
+    )
+    publish_status = current_publish_status or artifact_publish_status
 
     fact_node_count = count_fact_nodes(graph)
     numeric_fact_node_count = count_numeric_fact_nodes(graph)
-    number_not_located_count = count_findings(audit_findings, "number_not_located_in_source")
-    unsupported_fact_node_count = count_findings(audit_findings, "unsupported_fact_node")
-    missing_source_count = count_findings(audit_findings, "missing_dom_source")
+    number_not_located_count = count_findings(current_audit_rows, "number_not_located_in_source")
+    unsupported_fact_node_count = count_findings(current_audit_rows, "unsupported_fact_node")
+    missing_source_count = count_findings(current_audit_rows, "missing_dom_source")
+    missing_required_output_count = count_findings(
+        current_audit_rows, "missing_reading_required_output"
+    )
+    current_required_output_count = (
+        len(reading_required_output_keys(reading_plan)) if reading_plan is not None else None
+    )
+    current_required_output_covered_count = (
+        current_required_output_count - missing_required_output_count
+        if current_required_output_count is not None
+        else None
+    )
     report_paragraph_count = count_report_paragraphs(report_draft)
-    unsupported_report_paragraph_count = count_report_unsupported_paragraphs(report_findings)
+    unsupported_report_paragraph_count = count_report_unsupported_paragraphs(current_report_rows)
     qa_metrics = qa_metrics_for_paper(qa_rows, paper_id)
 
     return {
         "paper_id": paper_id,
-        "publish_status": core_metrics.get("publish_status"),
+        "publish_status": publish_status,
+        "artifact_publish_status": artifact_publish_status,
+        "current_audit_publish_status": current_publish_status,
+        "current_audit_issue_codes": sorted(
+            {finding.get("code") for finding in [*current_audit_rows, *current_report_rows]}
+            - {None}
+        ),
         "fact_node_count": fact_node_count,
         "supported_fact_node_count": int_value(core_metrics.get("supported_fact_node_count")),
         "evidence_coverage": float_or_none(core_metrics.get("evidence_coverage")),
@@ -106,21 +164,26 @@ def build_paper_quality_snapshot(
             fact_node_count,
             default=0.0,
         ),
-        "reading_required_output_count": int_value(
-            core_metrics.get("reading_required_output_count")
-        ),
-        "reading_required_output_covered_count": int_value(
-            core_metrics.get("reading_required_output_covered_count")
-        ),
-        "reading_required_output_coverage": float_or_none(
-            core_metrics.get("reading_required_output_coverage")
-        ),
-        "missing_reading_required_output_count": len(
-            list_value(core_metrics.get("missing_reading_required_outputs"))
-        ),
+        "reading_required_output_count": current_required_output_count
+        if current_required_output_count is not None
+        else int_value(core_metrics.get("reading_required_output_count")),
+        "reading_required_output_covered_count": current_required_output_covered_count
+        if current_required_output_covered_count is not None
+        else int_value(core_metrics.get("reading_required_output_covered_count")),
+        "reading_required_output_coverage": rate(
+            current_required_output_covered_count,
+            current_required_output_count,
+            default=1.0,
+        )
+        if current_required_output_count is not None
+        and current_required_output_covered_count is not None
+        else float_or_none(core_metrics.get("reading_required_output_coverage")),
+        "missing_reading_required_output_count": missing_required_output_count
+        if current_audit_available
+        else len(list_value(core_metrics.get("missing_reading_required_outputs"))),
         "missing_source_count": missing_source_count,
-        "audit_error_count": int_value(core_metrics.get("audit_error_count")),
-        "audit_warning_count": int_value(core_metrics.get("audit_warning_count")),
+        "audit_error_count": count_findings_by_severity(current_audit_rows, "ERROR"),
+        "audit_warning_count": count_findings_by_severity(current_audit_rows, "WARNING"),
         "report_paragraph_count": report_paragraph_count,
         "unsupported_report_paragraph_count": unsupported_report_paragraph_count,
         "unsupported_report_paragraph_rate": rate(
@@ -209,6 +272,40 @@ def read_claim_graph(path: Path) -> ClaimGraph | None:
     return ClaimGraph.model_validate(data)
 
 
+def read_paper_dom(path: Path) -> PaperDOM | None:
+    data = read_envelope_dict(path, expected_type="paper_dom")
+    if not data:
+        return None
+    try:
+        return PaperDOM.model_validate(data)
+    except Exception:
+        return None
+
+
+def read_reading_plan(path: Path) -> ReadingPlan | None:
+    data = read_envelope_dict(path, expected_type="reading_plan")
+    if not data:
+        return None
+    try:
+        return ReadingPlan.model_validate(data)
+    except Exception:
+        return None
+
+
+def read_graph_report_draft(path: Path) -> GraphReportDraft | None:
+    data = read_envelope_dict(path, expected_type="graph_report_draft")
+    if not data:
+        return None
+    try:
+        return GraphReportDraft.model_validate(data)
+    except Exception:
+        return None
+
+
+def findings_to_rows(findings: list[AuditFinding]) -> list[dict[str, Any]]:
+    return [finding.model_dump(mode="json") for finding in findings]
+
+
 def read_envelope_dict(path: Path, *, expected_type: str) -> dict[str, Any]:
     data = read_envelope_data(path, expected_type=expected_type)
     return data if isinstance(data, dict) else {}
@@ -260,6 +357,10 @@ def count_numeric_fact_nodes(graph: ClaimGraph | None) -> int:
 
 def count_findings(findings: list[dict[str, Any]], code: str) -> int:
     return sum(1 for finding in findings if finding.get("code") == code)
+
+
+def count_findings_by_severity(findings: list[dict[str, Any]], severity: str) -> int:
+    return sum(1 for finding in findings if finding.get("severity") == severity)
 
 
 def count_report_paragraphs(report_draft: dict[str, Any]) -> int:
