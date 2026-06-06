@@ -172,6 +172,12 @@ def validate_paperlens_output(
                 f"Core v2 manifest is stale for {paper_id}: "
                 + ", ".join(manifest_mismatches[:3])
             )
+            continue
+        if inspected_manifest.get("consumable") is not True:
+            issues.append(
+                f"Core v2 manifest is not consumable for {paper_id}: "
+                f"publish_status={inspected_manifest.get('publish_status')}"
+            )
     result = {
         "status": "PASS" if not issues else "FAIL",
         "checked_links": checked_links,
