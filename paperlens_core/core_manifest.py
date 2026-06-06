@@ -89,6 +89,7 @@ def inspect_core_v2_artifact_root(root: Path, paper_id: str) -> dict[str, Any]:
                 )
     if manifest["issues"]:
         manifest["status"] = "INCOMPLETE"
+        manifest["publish_status"] = None
         manifest["consumable"] = False
     return manifest
 
@@ -144,7 +145,7 @@ def build_core_v2_manifest(root: Path, paper_id: str) -> dict[str, Any]:
             issues.append(f"current_audit_invalid:{exc}")
     complete = not issues
     current_publish_status = str(current_audit_summary.get("publish_status") or "") or None
-    publish_status = current_publish_status or artifact_publish_status
+    publish_status = current_publish_status if complete else None
     consumable = complete and publish_status in CORE_V2_CONSUMABLE_STATUSES
     return {
         "schema_version": CORE_V2_MANIFEST_SCHEMA_VERSION,

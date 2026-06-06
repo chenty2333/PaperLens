@@ -241,7 +241,7 @@ def graph_quality_summary(
             or artifact_publish_status
         )
     else:
-        effective_publish_status = artifact_manifest.get("publish_status") or artifact_publish_status
+        effective_publish_status = artifact_manifest.get("publish_status")
     return {
         "artifact_set_status": artifact_manifest.get("status"),
         "artifact_set_consumable": artifact_manifest.get("consumable"),

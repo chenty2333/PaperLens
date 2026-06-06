@@ -385,12 +385,15 @@ def core_v2_quality_context(
     artifact_publish_status = core_manifest.get("artifact_publish_status") or core_manifest.get(
         "publish_status"
     )
-    effective_publish_status = (
-        current_publish_status
-        or core_manifest.get("current_audit_publish_status")
-        or core_manifest.get("publish_status")
-        or artifact_publish_status
-    )
+    if core_manifest.get("status") == "COMPLETE":
+        effective_publish_status = (
+            current_publish_status
+            or core_manifest.get("current_audit_publish_status")
+            or core_manifest.get("publish_status")
+            or artifact_publish_status
+        )
+    else:
+        effective_publish_status = core_manifest.get("publish_status")
     findings = current_audit_findings or []
     return {
         "status": core_manifest.get("status"),

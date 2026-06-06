@@ -1837,6 +1837,74 @@ def test_core_v2_manifest_reports_incomplete_artifact_sets(tmp_path):
     assert "missing:quality_metrics.v1.json" in manifest["issues"]
 
 
+def test_core_v2_manifest_hides_publish_status_for_incomplete_artifact_sets(tmp_path):
+    output_dir = tmp_path / "out"
+    data_dir = output_dir / ".paperlens" / "data"
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    layout = {
+        "pages": [
+            {
+                "page_no": 1,
+                "text": "Abstract\n\nWe propose a block table method for serving.",
+                "section_candidates": [{"title": "Abstract", "level": 1}],
+            }
+        ]
+    }
+    dom = build_paper_dom_from_layout(
+        paper_id=paper.paper_id,
+        title=paper.canonical_title,
+        layout=layout,
+    )
+    source_id = next(span.source_id for span in dom.spans if "block table method" in span.text)
+    reading_plan = reading_plan_subset(dom, ReadingTaskType.CLAIM_INVENTORY)
+    claim_task = reading_task(reading_plan, ReadingTaskType.CLAIM_INVENTORY)
+    write_core_v2_from_observation_log(
+        data_dir=data_dir,
+        paper=paper,
+        dom=dom,
+        reading_plan=reading_plan,
+        observation_log=ObservationLog(paper_id="p_test").append(
+            ObservationCard(
+                observation_id="obs_claim",
+                paper_id="p_test",
+                task_id=claim_task.task_id,
+                observation_type=ObservationType.CLAIM,
+                statement="The paper proposes a block table method.",
+                source_ids=[source_id],
+                covered_outputs=claim_task.required_outputs,
+            )
+        ),
+        producer="unit_test",
+    )
+    root = data_dir / "core" / "v2" / "p_test"
+    (root / "report_draft.v1.json").unlink()
+
+    manifest = build_core_v2_manifest(root, "p_test")
+    context = load_core_v2_qa_context(
+        output_dir=output_dir,
+        paper_id="p_test",
+        question="block table method 是什么？",
+    )
+
+    assert manifest["status"] == "INCOMPLETE"
+    assert manifest["artifact_publish_status"] == PublishStatus.REVIEWED
+    assert manifest["publish_status"] is None
+    assert manifest["current_audit_publish_status"] is None
+    assert manifest["consumable"] is False
+    assert "missing:report_draft.v1.json" in manifest["issues"]
+    assert context["retrieval_policy"] == "not_reviewed_by_core_v2_audit"
+    assert context["quality"]["artifact_publish_status"] == PublishStatus.REVIEWED
+    assert context["quality"]["publish_status"] is None
+    assert context["quality"]["consumable"] is False
+    assert context["matches"] == []
+
+
 def test_core_v2_manifest_reaudits_current_artifacts_before_consumable(tmp_path):
     paper = PaperRecord(
         paper_id="p_test",
@@ -3678,6 +3746,67 @@ def test_library_rebuild_requires_quality_metrics_gate_for_core_v2_graph(tmp_pat
     assert (
         records[0]["graph_summary"]["quality"]["memory_report_readiness"] == PublishStatus.REVIEWED
     )
+    assert records[0]["memory"]["claims"] == []
+    assert result["matches"] == []
+
+
+def test_library_rebuild_hides_publish_status_for_incomplete_core_v2_graph(tmp_path):
+    output_dir = tmp_path / "out"
+    data_dir = output_dir / ".paperlens" / "data"
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    layout = {
+        "pages": [
+            {
+                "page_no": 1,
+                "text": "Abstract\n\nWe propose a block table method for serving.",
+                "section_candidates": [{"title": "Abstract", "level": 1}],
+            }
+        ]
+    }
+    dom = build_paper_dom_from_layout(
+        paper_id=paper.paper_id,
+        title=paper.canonical_title,
+        layout=layout,
+    )
+    source_id = next(span.source_id for span in dom.spans if "block table method" in span.text)
+    reading_plan = reading_plan_subset(dom, ReadingTaskType.CLAIM_INVENTORY)
+    claim_task = reading_task(reading_plan, ReadingTaskType.CLAIM_INVENTORY)
+    write_core_v2_from_observation_log(
+        data_dir=data_dir,
+        paper=paper,
+        dom=dom,
+        reading_plan=reading_plan,
+        observation_log=ObservationLog(paper_id="p_test").append(
+            ObservationCard(
+                observation_id="obs_claim",
+                paper_id="p_test",
+                task_id=claim_task.task_id,
+                observation_type=ObservationType.CLAIM,
+                statement="The paper proposes a block table method.",
+                source_ids=[source_id],
+                covered_outputs=claim_task.required_outputs,
+            )
+        ),
+        producer="unit_test",
+    )
+    (data_dir / "core" / "v2" / "p_test" / "report_draft.v1.json").unlink()
+
+    rebuild_library_from_output(output_dir)
+    records = read_library_records(output_dir)
+    result = search_library(output_dir=output_dir, query="block table serving", limit=3)
+
+    graph_summary = records[0]["graph_summary"]
+    assert graph_summary["graph_access"] == "not_reviewed_by_core_v2_audit"
+    assert graph_summary["quality"]["artifact_publish_status"] == PublishStatus.REVIEWED
+    assert graph_summary["quality"]["publish_status"] is None
+    assert graph_summary["quality"]["artifact_set_status"] == "INCOMPLETE"
+    assert "missing:report_draft.v1.json" in graph_summary["quality"]["artifact_set_issues"]
     assert records[0]["memory"]["claims"] == []
     assert result["matches"] == []
 
