@@ -343,10 +343,7 @@ def qa_memory_context(
 
 
 def core_v2_context_is_consumable(core_v2_context: dict[str, Any]) -> bool:
-    return (
-        core_v2_context.get("retrieval_policy") == "claim_graph_nodes_with_paper_dom_source_ids"
-        and bool(list_of_dicts(core_v2_context.get("matches")))
-    )
+    return core_v2_context.get("retrieval_policy") == "claim_graph_nodes_with_paper_dom_source_ids"
 
 
 def core_v2_qa_memory_view(*, paper_id: str, core_v2_context: dict[str, Any]) -> dict[str, Any]:
@@ -673,6 +670,26 @@ def offline_qa_answer(
             },
         }
     report_hint = f"`{report_path.as_posix()}`" if report_path else "当前论文的 core v2 数据"
+    if core_v2_context_is_consumable(core_v2_context):
+        return {
+            "paper_id": paper_id,
+            "answer_markdown": (
+                "离线模式下未调用模型；reviewed ClaimGraph 没有为当前问题返回可引用的 "
+                "PaperDOM 证据命中，因此不能生成论文事实回答。"
+            ),
+            "cited_pages": [],
+            "cited_source_ids": [],
+            "confidence": "low",
+            "question_type": question_type,
+            "source_attribution": {
+                "paper_claims": [],
+                "paperlens_inferences": [],
+                "background_context": [],
+                "evidence_limits": [
+                    "Reviewed ClaimGraph is available, but retrieval returned no matching source-backed nodes."
+                ],
+            },
+        }
     return {
         "paper_id": paper_id,
         "answer_markdown": f"当前是离线模式，不能调用模型回答。可先查看：{report_hint}。",
@@ -1134,6 +1151,11 @@ def core_v2_context_priority(core_v2_context: dict[str, Any]) -> str:
 
 def memory_fallback_policy(core_v2_context: dict[str, Any]) -> str:
     if core_v2_context_is_consumable(core_v2_context):
+        if not list_of_dicts(core_v2_context.get("matches")):
+            return (
+                "no_legacy_paper_claim_fallback; reviewed core v2 ClaimGraph is available but "
+                "retrieval returned no matching nodes for this question."
+            )
         return (
             "supplemental_or_fallback_only; paper-specific factual claims should cite core v2 "
             "ClaimGraph node IDs and PaperDOM source IDs first."

@@ -28,6 +28,7 @@ from paperlens_core.qa import (
     core_v2_context_priority,
     ground_qa_answer_in_core_v2_context,
     load_core_v2_qa_context,
+    offline_qa_answer,
     qa_memory_context,
 )
 from paperlens_core.quality_snapshot import write_core_quality_snapshot
@@ -2049,6 +2050,53 @@ def test_core_v2_qa_memory_view_promotes_reviewed_claim_graph_context(tmp_path):
     assert "core_v2_context_priority: primary_reviewed_claim_graph" in prompt
     assert "memory_fallback_policy:" in prompt
     assert "Legacy claim should not be primary" not in prompt
+
+
+def test_core_v2_qa_empty_reviewed_graph_match_does_not_fallback_to_legacy_memory(tmp_path):
+    core_context = {
+        "retrieval_policy": "claim_graph_nodes_with_paper_dom_source_ids",
+        "answer_source_policy": "Use graph node IDs and PaperDOM source IDs.",
+        "quality": {"publish_status": PublishStatus.REVIEWED},
+        "matches": [],
+    }
+    legacy_memory = {
+        "schema_version": "paper_memory.v3",
+        "paper_id": "p_test",
+        "claims": [{"id": "legacy", "text": "Legacy claim should not answer this question."}],
+    }
+
+    memory = qa_memory_context(
+        paper_id="p_test",
+        paper_memory_v3=legacy_memory,
+        core_v2_context=core_context,
+    )
+    prompt = build_ask_prompt(
+        report_path=tmp_path / "papers" / "p_test.md",
+        paper_id="p_test",
+        question="unmatched question?",
+        paper_memory_v3=memory,
+        pages=[{"page_no": 1, "text": "page text", "captions": [], "visual_notes": []}],
+        question_type="orientation",
+        core_v2_context=core_context,
+    )
+    offline = offline_qa_answer(
+        paper_id="p_test",
+        report_path=tmp_path / "papers" / "p_test.md",
+        question_type="orientation",
+        pages=[{"page_no": 1, "text": "page text"}],
+        core_v2_context=core_context,
+    )
+
+    assert core_v2_context_priority(core_context) == "primary_reviewed_claim_graph"
+    assert memory["schema_version"] == "paperlens_core_v2_qa_memory_view.v1"
+    assert memory["claims"] == []
+    assert "Legacy claim should not answer" not in json.dumps(memory, ensure_ascii=False)
+    assert "no_legacy_paper_claim_fallback" in prompt
+    assert "Legacy claim should not answer" not in prompt
+    assert "没有为当前问题返回可引用" in offline["answer_markdown"]
+    assert "p_test.md" not in offline["answer_markdown"]
+    assert offline["cited_source_ids"] == []
+    assert offline["source_attribution"]["paper_claims"] == []
 
 
 def test_core_v2_qa_grounding_filters_unknown_source_ids_and_claims():
