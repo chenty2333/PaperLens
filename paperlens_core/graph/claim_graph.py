@@ -99,11 +99,13 @@ OBSERVATION_NODE_KIND: dict[ObservationType, NodeKind] = {
 
 def graph_from_observations(paper_id: str, observations: list[ObservationCard]) -> ClaimGraph:
     graph = ClaimGraph(paper_id=paper_id)
+    obs_to_node: dict[str, str] = {}
     for card in observations:
         if card.paper_id != paper_id:
             raise ValueError(f"observation paper_id mismatch: {card.paper_id} != {paper_id}")
         node_kind = OBSERVATION_NODE_KIND[card.observation_type]
         node_id = observation_node_id(card)
+        obs_to_node[card.observation_id] = node_id
         graph.add_node(
             GraphNode(
                 node_id=node_id,
@@ -131,6 +133,26 @@ def graph_from_observations(paper_id: str, observations: list[ObservationCard]) 
                 )
             )
             graph.add_edge(GraphEdge(source_id=node_id, target_id=evidence_id, kind="supported_by"))
+
+    for card in observations:
+        source_node_id = obs_to_node.get(card.observation_id)
+        if source_node_id is None:
+            continue
+        for rel in card.proposed_relations:
+            target_node_id = obs_to_node.get(rel.target_observation_id)
+            if target_node_id is None:
+                continue
+            if source_node_id == target_node_id:
+                continue
+            graph.add_edge(
+                GraphEdge(
+                    source_id=source_node_id,
+                    target_id=target_node_id,
+                    kind=rel.kind,
+                    payload={"proposed_by": card.observation_id},
+                )
+            )
+
     return graph
 
 

@@ -385,13 +385,13 @@ def core_v2_quality_context(
 
 def core_v2_non_consumable_policy(core_manifest: dict[str, Any]) -> str:
     issues = set(str(issue) for issue in core_manifest.get("issues", []))
-    if "missing:core_manifest.v1.json" in issues:
+    if "missing:core_manifest.v2.json" in issues:
         return "missing_core_v2_manifest"
-    if "missing:paper_dom.v1.json" in issues:
+    if "missing:paper_dom.v2.json" in issues:
         return "missing_core_v2_paper_dom"
-    if "missing:claim_graph.v1.json" in issues:
+    if "missing:claim_graph.v2.json" in issues:
         return "missing_core_v2_claim_graph"
-    if "missing:quality_metrics.v1.json" in issues:
+    if "missing:quality_metrics.v2.json" in issues:
         return "missing_core_v2_quality_metrics"
     artifact_publish_status = str(core_manifest.get("artifact_publish_status") or "")
     publish_status = str(

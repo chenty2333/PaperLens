@@ -28,7 +28,7 @@ CORE_QUALITY_SNAPSHOT_ARTIFACT = "core_quality_snapshot"
 
 def write_core_quality_snapshot(output_dir: Path) -> Path:
     data = build_core_quality_snapshot(output_dir)
-    path = paperlens_data_dir(output_dir) / "core_quality_snapshot.v1.json"
+    path = paperlens_data_dir(output_dir) / "core_quality_snapshot.v2.json"
     envelope = ArtifactEnvelope(
         artifact_type=CORE_QUALITY_SNAPSHOT_ARTIFACT,
         artifact_version="v1",
@@ -65,26 +65,26 @@ def build_paper_quality_snapshot(
 ) -> dict[str, Any]:
     paper_id = paper_root.name
     artifact_manifest = inspect_core_v2_artifact_root(paper_root, paper_id)
-    dom = read_paper_dom(paper_root / "paper_dom.v1.json")
-    graph = read_claim_graph(paper_root / "claim_graph.v1.json")
-    reading_plan = read_reading_plan(paper_root / "reading_plan.v1.json")
+    dom = read_paper_dom(paper_root / "paper_dom.v2.json")
+    graph = read_claim_graph(paper_root / "claim_graph.v2.json")
+    reading_plan = read_reading_plan(paper_root / "reading_plan.v2.json")
     core_metrics = read_envelope_dict(
-        paper_root / "quality_metrics.v1.json",
+        paper_root / "quality_metrics.v2.json",
         expected_type="core_quality_metrics",
     )
     artifact_audit_findings = read_envelope_list(
-        paper_root / "audit_findings.v1.json",
+        paper_root / "audit_findings.v2.json",
         expected_type="audit_findings",
     )
     artifact_report_findings = read_envelope_list(
-        paper_root / "report_audit_findings.v1.json",
+        paper_root / "report_audit_findings.v2.json",
         expected_type="report_audit_findings",
     )
     report_draft = read_envelope_dict(
-        paper_root / "report_draft.v1.json",
+        paper_root / "report_draft.v2.json",
         expected_type="graph_report_draft",
     )
-    report_draft_model = read_graph_report_draft(paper_root / "report_draft.v1.json")
+    report_draft_model = read_graph_report_draft(paper_root / "report_draft.v2.json")
     current_audit_available = dom is not None and graph is not None
     current_audit_findings: list[AuditFinding] = []
     if current_audit_available:

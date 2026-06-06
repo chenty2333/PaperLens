@@ -20,16 +20,16 @@ def render_core_graph_report_view(
         return None
     root = data_dir / "core" / "v2" / paper_id
     try:
-        dom_envelope = read_typed_artifact(root / "paper_dom.v1.json", expected_type="paper_dom")
+        dom_envelope = read_typed_artifact(root / "paper_dom.v2.json", expected_type="paper_dom")
         graph_envelope = read_typed_artifact(
-            root / "claim_graph.v1.json", expected_type="claim_graph"
+            root / "claim_graph.v2.json", expected_type="claim_graph"
         )
         draft_envelope = read_typed_artifact(
-            root / "report_draft.v1.json",
+            root / "report_draft.v2.json",
             expected_type="graph_report_draft",
         )
         quality_envelope = read_typed_artifact(
-            root / "quality_metrics.v1.json",
+            root / "quality_metrics.v2.json",
             expected_type="core_quality_metrics",
         )
     except (FileNotFoundError, ValueError):

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from paperlens_core.reading.observation import (
+    PROPOSED_RELATION_KINDS,
     ObservationCard,
     ObservationLog,
     ObservationType,
+    ProposedRelation,
     make_observation_id,
 )
 from paperlens_core.reading.tasks import (
@@ -15,9 +17,11 @@ from paperlens_core.reading.tasks import (
 )
 
 __all__ = [
+    "PROPOSED_RELATION_KINDS",
     "ObservationCard",
     "ObservationLog",
     "ObservationType",
+    "ProposedRelation",
     "ReadingPlan",
     "ReadingTask",
     "ReadingTaskType",

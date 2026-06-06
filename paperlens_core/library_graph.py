@@ -67,12 +67,12 @@ def read_core_v2_graph_summary(output_dir: Path, paper_id: str) -> dict[str, Any
     if not root.exists():
         return {}
     artifact_manifest = inspect_core_v2_artifact_root(root, paper_id)
-    quality = read_optional_envelope_data(root / "quality_metrics.v1.json", "core_quality_metrics")
+    quality = read_optional_envelope_data(root / "quality_metrics.v2.json", "core_quality_metrics")
     memory_view = read_optional_envelope_data(
-        root / "paper_memory_view.v1.json", "paper_memory_view"
+        root / "paper_memory_view.v2.json", "paper_memory_view"
     )
-    dom_path = root / "paper_dom.v1.json"
-    graph_path = root / "claim_graph.v1.json"
+    dom_path = root / "paper_dom.v2.json"
+    graph_path = root / "claim_graph.v2.json"
     if not dom_path.exists() or not graph_path.exists():
         return unavailable_claim_graph_summary(
             root=root,
@@ -111,7 +111,7 @@ def read_core_v2_graph_summary(output_dir: Path, paper_id: str) -> dict[str, Any
             quality=quality if isinstance(quality, dict) else {},
             memory_view=memory_view if isinstance(memory_view, dict) else {},
         )
-    reading_plan = read_optional_reading_plan(root / "reading_plan.v1.json")
+    reading_plan = read_optional_reading_plan(root / "reading_plan.v2.json")
     return summarize_claim_graph_for_library(
         dom=dom,
         graph=graph,
@@ -141,10 +141,10 @@ def unavailable_claim_graph_summary(
             "grade": metadata.get("grade"),
         },
         "source": {
-            "paper_dom": relative_core_path(root / "paper_dom.v1.json"),
-            "claim_graph": relative_core_path(root / "claim_graph.v1.json"),
-            "quality_metrics": relative_core_path(root / "quality_metrics.v1.json"),
-            "paper_memory_view": relative_core_path(root / "paper_memory_view.v1.json"),
+            "paper_dom": relative_core_path(root / "paper_dom.v2.json"),
+            "claim_graph": relative_core_path(root / "claim_graph.v2.json"),
+            "quality_metrics": relative_core_path(root / "quality_metrics.v2.json"),
+            "paper_memory_view": relative_core_path(root / "paper_memory_view.v2.json"),
         },
         "quality": unavailable_graph_quality_summary(
             quality=quality,
@@ -206,10 +206,10 @@ def summarize_claim_graph_for_library(
             "grade": metadata.get("grade"),
         },
         "source": {
-            "paper_dom": relative_core_path(root / "paper_dom.v1.json"),
-            "claim_graph": relative_core_path(root / "claim_graph.v1.json"),
-            "quality_metrics": relative_core_path(root / "quality_metrics.v1.json"),
-            "paper_memory_view": relative_core_path(root / "paper_memory_view.v1.json"),
+            "paper_dom": relative_core_path(root / "paper_dom.v2.json"),
+            "claim_graph": relative_core_path(root / "claim_graph.v2.json"),
+            "quality_metrics": relative_core_path(root / "quality_metrics.v2.json"),
+            "paper_memory_view": relative_core_path(root / "paper_memory_view.v2.json"),
         },
         "quality": quality_summary,
         "node_counts": node_counts,
@@ -394,13 +394,13 @@ def graph_summary_is_consumable(artifact_manifest: dict[str, Any]) -> bool:
 
 def graph_non_consumable_policy(artifact_manifest: dict[str, Any]) -> str:
     issues = set(str(issue) for issue in artifact_manifest.get("issues", []))
-    if "missing:core_manifest.v1.json" in issues:
+    if "missing:core_manifest.v2.json" in issues:
         return "missing_core_v2_manifest"
-    if "missing:paper_dom.v1.json" in issues:
+    if "missing:paper_dom.v2.json" in issues:
         return "missing_core_v2_paper_dom"
-    if "missing:claim_graph.v1.json" in issues:
+    if "missing:claim_graph.v2.json" in issues:
         return "missing_core_v2_claim_graph"
-    if "missing:quality_metrics.v1.json" in issues:
+    if "missing:quality_metrics.v2.json" in issues:
         return "missing_core_v2_quality_metrics"
     artifact_publish_status = str(artifact_manifest.get("artifact_publish_status") or "")
     publish_status = str(

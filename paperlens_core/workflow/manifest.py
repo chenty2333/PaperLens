@@ -78,7 +78,7 @@ def run_manifest_stage(workflow: ManifestWorkflowContext) -> dict[str, Any]:
             "figure_crops": ".paperlens/figures/",
             "library_records": ".paperlens/library/library_records.jsonl",
             "core_v2": ".paperlens/data/core/v2/",
-            "core_quality_snapshot": ".paperlens/data/core_quality_snapshot.v1.json",
+            "core_quality_snapshot": ".paperlens/data/core_quality_snapshot.v2.json",
             "library_index": ".paperlens/library/index/search_index.json",
             "data": ".paperlens/data/",
             "model_call_summary": ".paperlens/data/model_call_summary.json",
@@ -198,7 +198,7 @@ def validate_paperlens_output(
         if not paper_root.exists():
             issues.append(f"Core v2 artifact root is missing for {paper_id}")
             continue
-        core_manifest_path = paper_root / "core_manifest.v1.json"
+        core_manifest_path = paper_root / "core_manifest.v2.json"
         if not core_manifest_path.exists():
             issues.append(f"Core v2 manifest is missing for {paper_id}")
             continue

@@ -166,6 +166,20 @@ SECTION_TASK_MAPPING: dict[str, tuple[ReadingTaskType, ...]] = {
 }
 
 
+TASK_DEPENDENCY_ORDER: tuple[ReadingTaskType, ...] = (
+    ReadingTaskType.ORIENTATION,
+    ReadingTaskType.CONCEPT_BRIDGE,
+    ReadingTaskType.RELATED_POSITIONING,
+    ReadingTaskType.CLAIM_INVENTORY,
+    ReadingTaskType.METHOD_MECHANISM,
+    ReadingTaskType.IMPLEMENTATION_PATH,
+    ReadingTaskType.EVALUATION_SETUP,
+    ReadingTaskType.RESULT_EXTRACTION,
+    ReadingTaskType.LIMITATIONS,
+    ReadingTaskType.REPRODUCIBILITY,
+)
+
+
 def build_initial_reading_plan(
     dom: PaperDOM, *, max_sources_per_task: int = 8, max_tokens_per_task: int = 16000
 ) -> ReadingPlan:
@@ -174,10 +188,13 @@ def build_initial_reading_plan(
     tasks: list[ReadingTask] = []
     task_index = 0
 
-    for task_type in ReadingTaskType:
+    for task_type in TASK_DEPENDENCY_ORDER:
         targets = _select_sources_for_task_type(
             dom, task_type, section_task_map, max_sources_per_task
         )
+        unique_targets = [sid for sid in targets if sid not in covered_source_ids]
+        if len(unique_targets) < len(targets) * 0.3 and task_index > 0:
+            targets = unique_targets
         if not targets:
             continue
         task_index += 1
@@ -336,7 +353,7 @@ def _fallback_tasks(
         section.source_id: normalize_heading_text(section.title) for section in dom.sections
     }
     tasks: list[ReadingTask] = []
-    for index, task_type in enumerate(ReadingTaskType, start=1):
+    for index, task_type in enumerate(TASK_DEPENDENCY_ORDER, start=1):
         targets = _positional_fallback(dom, task_type, max_sources_per_task, section_titles)
         if not targets:
             continue

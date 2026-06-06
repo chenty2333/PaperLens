@@ -23,18 +23,18 @@ from paperlens_core.runtime import read_artifact_envelope, write_typed_artifact
 
 CORE_V2_ENVELOPE_SCHEMA_VERSION = "paperlens_core.v2.bootstrap"
 CORE_V2_MANIFEST_SCHEMA_VERSION = "core_v2_manifest.v1"
-CORE_V2_MANIFEST_FILENAME = "core_manifest.v1.json"
+CORE_V2_MANIFEST_FILENAME = "core_manifest.v2.json"
 CORE_V2_CONSUMABLE_STATUSES = {"REVIEWED", "REVIEWED_WITH_LIMITS"}
 CORE_V2_REQUIRED_ARTIFACTS = {
-    "paper_dom": ("paper_dom.v1.json", "paper_dom"),
-    "reading_plan": ("reading_plan.v1.json", "reading_plan"),
-    "observation_log": ("observation_log.v1.json", "observation_log"),
-    "claim_graph": ("claim_graph.v1.json", "claim_graph"),
-    "audit_findings": ("audit_findings.v1.json", "audit_findings"),
-    "quality_metrics": ("quality_metrics.v1.json", "core_quality_metrics"),
-    "paper_memory_view": ("paper_memory_view.v1.json", "paper_memory_view"),
-    "report_draft": ("report_draft.v1.json", "graph_report_draft"),
-    "report_audit_findings": ("report_audit_findings.v1.json", "report_audit_findings"),
+    "paper_dom": ("paper_dom.v2.json", "paper_dom"),
+    "reading_plan": ("reading_plan.v2.json", "reading_plan"),
+    "observation_log": ("observation_log.v2.json", "observation_log"),
+    "claim_graph": ("claim_graph.v2.json", "claim_graph"),
+    "audit_findings": ("audit_findings.v2.json", "audit_findings"),
+    "quality_metrics": ("quality_metrics.v2.json", "core_quality_metrics"),
+    "paper_memory_view": ("paper_memory_view.v2.json", "paper_memory_view"),
+    "report_draft": ("report_draft.v2.json", "graph_report_draft"),
+    "report_audit_findings": ("report_audit_findings.v2.json", "report_audit_findings"),
 }
 
 
@@ -182,25 +182,25 @@ def current_core_v2_findings(root: Path) -> list[AuditFinding]:
     )
 
     dom = PaperDOM.model_validate(
-        read_required_artifact_data(root, "paper_dom.v1.json", expected_type="paper_dom")
+        read_required_artifact_data(root, "paper_dom.v2.json", expected_type="paper_dom")
     )
     reading_plan = ReadingPlan.model_validate(
-        read_required_artifact_data(root, "reading_plan.v1.json", expected_type="reading_plan")
+        read_required_artifact_data(root, "reading_plan.v2.json", expected_type="reading_plan")
     )
     observation_log = ObservationLog.model_validate(
         read_required_artifact_data(
             root,
-            "observation_log.v1.json",
+            "observation_log.v2.json",
             expected_type="observation_log",
         )
     )
     graph = ClaimGraph.model_validate(
-        read_required_artifact_data(root, "claim_graph.v1.json", expected_type="claim_graph")
+        read_required_artifact_data(root, "claim_graph.v2.json", expected_type="claim_graph")
     )
     report_draft = GraphReportDraft.model_validate(
         read_required_artifact_data(
             root,
-            "report_draft.v1.json",
+            "report_draft.v2.json",
             expected_type="graph_report_draft",
         )
     )

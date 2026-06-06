@@ -354,13 +354,13 @@ def load_evidence(output_dir: Path, paper_id: str) -> dict[str, Any]:
     manifest = inspect_core_v2_artifact_set(data_dir, paper_id)
     issues = list(manifest.get("issues") if isinstance(manifest.get("issues"), list) else [])
     try:
-        dom = read_typed_artifact(root / "paper_dom.v1.json", expected_type="paper_dom").data
-        graph = read_typed_artifact(root / "claim_graph.v1.json", expected_type="claim_graph").data
+        dom = read_typed_artifact(root / "paper_dom.v2.json", expected_type="paper_dom").data
+        graph = read_typed_artifact(root / "claim_graph.v2.json", expected_type="claim_graph").data
         quality = read_typed_artifact(
-            root / "quality_metrics.v1.json", expected_type="core_quality_metrics"
+            root / "quality_metrics.v2.json", expected_type="core_quality_metrics"
         ).data
         audit = read_typed_artifact(
-            root / "audit_findings.v1.json", expected_type="audit_findings"
+            root / "audit_findings.v2.json", expected_type="audit_findings"
         ).data
     except (FileNotFoundError, ValueError) as exc:
         return {

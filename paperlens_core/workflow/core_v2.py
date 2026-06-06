@@ -21,9 +21,11 @@ from paperlens_core.events import EventWriter
 from paperlens_core.graph import ClaimGraph, build_claim_graph
 from paperlens_core.memory import materialize_paper_memory
 from paperlens_core.reading import (
+    PROPOSED_RELATION_KINDS,
     ObservationCard,
     ObservationLog,
     ObservationType,
+    ProposedRelation,
     ReadingPlan,
     ReadingTask,
     ReadingTaskType,
@@ -303,6 +305,22 @@ OBSERVATION_CARDS_SCHEMA: dict[str, Any] = {
                                     "properties": {"text": {"type": "string"}},
                                 },
                             },
+                            "proposed_relations": {
+                                "type": "array",
+                                "maxItems": 4,
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": ["target_observation_id", "kind"],
+                                    "properties": {
+                                        "target_observation_id": {"type": "string"},
+                                        "kind": {
+                                            "type": "string",
+                                            "enum": sorted(PROPOSED_RELATION_KINDS),
+                                        },
+                                    },
+                                },
+                            },
                         },
                     },
                 }
@@ -346,15 +364,15 @@ def write_core_v2_artifacts(
     root = data_dir / "core" / "v2" / paper.paper_id
     root.mkdir(parents=True, exist_ok=True)
     paths = {
-        "paper_dom": root / "paper_dom.v1.json",
-        "reading_plan": root / "reading_plan.v1.json",
-        "observation_log": root / "observation_log.v1.json",
-        "claim_graph": root / "claim_graph.v1.json",
-        "audit_findings": root / "audit_findings.v1.json",
-        "quality_metrics": root / "quality_metrics.v1.json",
-        "paper_memory_view": root / "paper_memory_view.v1.json",
-        "report_draft": root / "report_draft.v1.json",
-        "report_audit_findings": root / "report_audit_findings.v1.json",
+        "paper_dom": root / "paper_dom.v2.json",
+        "reading_plan": root / "reading_plan.v2.json",
+        "observation_log": root / "observation_log.v2.json",
+        "claim_graph": root / "claim_graph.v2.json",
+        "audit_findings": root / "audit_findings.v2.json",
+        "quality_metrics": root / "quality_metrics.v2.json",
+        "paper_memory_view": root / "paper_memory_view.v2.json",
+        "report_draft": root / "report_draft.v2.json",
+        "report_audit_findings": root / "report_audit_findings.v2.json",
     }
     write_core_v2_envelope(paths["paper_dom"], "paper_dom", paper.paper_id, dom.model_dump())
     write_core_v2_envelope(
@@ -564,27 +582,27 @@ def write_core_v2_from_observation_log(
     )
     root = data_dir / "core" / "v2" / paper.paper_id
     write_core_v2_envelope(
-        root / "paper_dom.v1.json",
+        root / "paper_dom.v2.json",
         "paper_dom",
         paper.paper_id,
         dom.model_dump(),
         producer="paperlens_core_v2_input",
     )
     write_core_v2_envelope(
-        root / "reading_plan.v1.json",
+        root / "reading_plan.v2.json",
         "reading_plan",
         paper.paper_id,
         reading_plan.model_dump(),
         producer="paperlens_core_v2_input",
     )
     paths = {
-        "observation_log": root / "observation_log.v1.json",
-        "claim_graph": root / "claim_graph.v1.json",
-        "audit_findings": root / "audit_findings.v1.json",
-        "quality_metrics": root / "quality_metrics.v1.json",
-        "paper_memory_view": root / "paper_memory_view.v1.json",
-        "report_draft": root / "report_draft.v1.json",
-        "report_audit_findings": root / "report_audit_findings.v1.json",
+        "observation_log": root / "observation_log.v2.json",
+        "claim_graph": root / "claim_graph.v2.json",
+        "audit_findings": root / "audit_findings.v2.json",
+        "quality_metrics": root / "quality_metrics.v2.json",
+        "paper_memory_view": root / "paper_memory_view.v2.json",
+        "report_draft": root / "report_draft.v2.json",
+        "report_audit_findings": root / "report_audit_findings.v2.json",
     }
     write_core_v2_envelope(
         paths["observation_log"],
@@ -713,11 +731,11 @@ def refresh_core_v2_audit_artifacts(
     )
     root = data_dir / "core" / "v2" / paper.paper_id
     paths = {
-        "audit_findings": root / "audit_findings.v1.json",
-        "quality_metrics": root / "quality_metrics.v1.json",
-        "paper_memory_view": root / "paper_memory_view.v1.json",
-        "report_draft": root / "report_draft.v1.json",
-        "report_audit_findings": root / "report_audit_findings.v1.json",
+        "audit_findings": root / "audit_findings.v2.json",
+        "quality_metrics": root / "quality_metrics.v2.json",
+        "paper_memory_view": root / "paper_memory_view.v2.json",
+        "report_draft": root / "report_draft.v2.json",
+        "report_audit_findings": root / "report_audit_findings.v2.json",
     }
     write_core_v2_envelope(
         paths["audit_findings"],
@@ -923,8 +941,8 @@ def write_core_v2_envelope(
 
 def load_core_v2_dom_and_plan(data_dir: Path, paper_id: str) -> tuple[PaperDOM, ReadingPlan]:
     root = data_dir / "core" / "v2" / paper_id
-    dom_envelope = read_typed_artifact(root / "paper_dom.v1.json", expected_type="paper_dom")
-    plan_envelope = read_typed_artifact(root / "reading_plan.v1.json", expected_type="reading_plan")
+    dom_envelope = read_typed_artifact(root / "paper_dom.v2.json", expected_type="paper_dom")
+    plan_envelope = read_typed_artifact(root / "reading_plan.v2.json", expected_type="reading_plan")
     if not isinstance(dom_envelope.data, dict) or not isinstance(plan_envelope.data, dict):
         raise ValueError(f"Core v2 paper_dom/reading_plan artifacts are invalid for {paper_id}")
     return PaperDOM.model_validate(dom_envelope.data), ReadingPlan.model_validate(
@@ -935,7 +953,7 @@ def load_core_v2_dom_and_plan(data_dir: Path, paper_id: str) -> tuple[PaperDOM, 
 def load_core_v2_observation_log(data_dir: Path, paper_id: str) -> ObservationLog:
     root = data_dir / "core" / "v2" / paper_id
     log_envelope = read_typed_artifact(
-        root / "observation_log.v1.json",
+        root / "observation_log.v2.json",
         expected_type="observation_log",
     )
     if not isinstance(log_envelope.data, dict):
@@ -945,8 +963,8 @@ def load_core_v2_observation_log(data_dir: Path, paper_id: str) -> ObservationLo
 
 def load_core_v2_dom_and_graph(data_dir: Path, paper_id: str) -> tuple[PaperDOM, ClaimGraph]:
     root = data_dir / "core" / "v2" / paper_id
-    dom_envelope = read_typed_artifact(root / "paper_dom.v1.json", expected_type="paper_dom")
-    graph_envelope = read_typed_artifact(root / "claim_graph.v1.json", expected_type="claim_graph")
+    dom_envelope = read_typed_artifact(root / "paper_dom.v2.json", expected_type="paper_dom")
+    graph_envelope = read_typed_artifact(root / "claim_graph.v2.json", expected_type="claim_graph")
     if not isinstance(dom_envelope.data, dict) or not isinstance(graph_envelope.data, dict):
         raise ValueError(f"Core v2 paper_dom/claim_graph artifacts are invalid for {paper_id}")
     return PaperDOM.model_validate(dom_envelope.data), ClaimGraph.model_validate(
@@ -1072,6 +1090,9 @@ def observation_cards_from_model_envelope(
             statement=statement,
             source_ids=source_ids,
         )
+        proposed_relations = _parse_proposed_relations(
+            item.get("proposed_relations"), task.task_id
+        )
         result.append(
             ObservationCard(
                 observation_id=observation_id,
@@ -1089,6 +1110,7 @@ def observation_cards_from_model_envelope(
                     for number in list_payload(item.get("extracted_numbers"))
                     if isinstance(number, dict)
                 ][:8],
+                proposed_relations=proposed_relations,
             )
         )
     if not result:
@@ -1099,6 +1121,26 @@ def observation_cards_from_model_envelope(
             f"Observation task {task.task_id} did not cover required_outputs: "
             + ", ".join(missing_outputs)
         )
+    return result
+
+
+def _parse_proposed_relations(value: Any, task_id: str) -> list[ProposedRelation]:
+    if not isinstance(value, list):
+        return []
+    result: list[ProposedRelation] = []
+    seen_kinds: set[tuple[str, str]] = set()
+    for item in value[:4]:
+        if not isinstance(item, dict):
+            continue
+        target_id = str(item.get("target_observation_id") or "").strip()
+        kind = str(item.get("kind") or "").strip()
+        if not target_id or kind not in PROPOSED_RELATION_KINDS:
+            continue
+        key = (target_id, kind)
+        if key in seen_kinds:
+            continue
+        seen_kinds.add(key)
+        result.append(ProposedRelation(target_observation_id=target_id, kind=kind))
     return result
 
 

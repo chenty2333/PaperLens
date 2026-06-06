@@ -20,6 +20,42 @@ class ObservationType(StrEnum):
     CONCEPT = "concept"
 
 
+PROPOSED_RELATION_KINDS = {
+    "contradicted_by",
+    "depends_on",
+    "explains",
+    "implements",
+    "evaluated_by",
+    "limited_by",
+    "compared_with",
+}
+
+
+class ProposedRelation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_observation_id: str
+    kind: str
+
+    @field_validator("target_observation_id")
+    @classmethod
+    def nonempty_id(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("target_observation_id cannot be blank")
+        return value
+
+    @field_validator("kind")
+    @classmethod
+    def valid_kind(cls, value: str) -> str:
+        value = value.strip()
+        if value not in PROPOSED_RELATION_KINDS:
+            raise ValueError(
+                f"proposed relation kind must be one of {sorted(PROPOSED_RELATION_KINDS)}: {value}"
+            )
+        return value
+
+
 class ObservationCard(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -34,6 +70,7 @@ class ObservationCard(BaseModel):
     uncertainty: str | None = None
     covered_outputs: list[str] = Field(default_factory=list)
     extracted_numbers: list[dict[str, Any]] = Field(default_factory=list)
+    proposed_relations: list[ProposedRelation] = Field(default_factory=list)
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     @field_validator("paper_id", "task_id", "statement")
