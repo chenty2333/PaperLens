@@ -234,28 +234,36 @@ def graph_quality_summary(
     artifact_publish_status = artifact_manifest.get("artifact_publish_status") or quality.get(
         "publish_status"
     )
+    manifest_current_publish_status = (
+        artifact_manifest.get("current_audit_publish_status") or current_publish_status
+    )
     if artifact_manifest.get("status") == "COMPLETE":
         effective_publish_status = (
             artifact_manifest.get("publish_status")
-            or current_publish_status
+            or manifest_current_publish_status
             or artifact_publish_status
         )
     else:
         effective_publish_status = artifact_manifest.get("publish_status")
+    current_issue_codes = artifact_manifest.get("current_audit_issue_codes")
+    if not isinstance(current_issue_codes, list):
+        current_issue_codes = sorted({finding.code for finding in current_audit_findings})
     return {
         "artifact_set_status": artifact_manifest.get("status"),
         "artifact_set_consumable": artifact_manifest.get("consumable"),
         "artifact_set_issues": artifact_manifest.get("issues", []),
         "publish_status": effective_publish_status,
         "artifact_publish_status": artifact_publish_status,
-        "current_audit_publish_status": current_publish_status,
-        "current_audit_error_count": current_audit_finding_count(
-            current_audit_findings, severity="ERROR"
+        "current_audit_publish_status": manifest_current_publish_status,
+        "current_audit_error_count": first_present(
+            artifact_manifest.get("current_audit_error_count"),
+            current_audit_finding_count(current_audit_findings, severity="ERROR"),
         ),
-        "current_audit_warning_count": current_audit_finding_count(
-            current_audit_findings, severity="WARNING"
+        "current_audit_warning_count": first_present(
+            artifact_manifest.get("current_audit_warning_count"),
+            current_audit_finding_count(current_audit_findings, severity="WARNING"),
         ),
-        "current_audit_issue_codes": sorted({finding.code for finding in current_audit_findings}),
+        "current_audit_issue_codes": current_issue_codes,
         "memory_report_readiness": memory_view.get("report_readiness"),
         "evidence_coverage": quality.get("evidence_coverage"),
         "reading_required_output_coverage": quality.get("reading_required_output_coverage"),
@@ -311,6 +319,10 @@ def current_audit_finding_count(
     severity: str,
 ) -> int:
     return sum(1 for finding in findings if finding.severity == severity)
+
+
+def first_present(value: Any, fallback: Any) -> Any:
+    return fallback if value is None else value
 
 
 def summarize_graph_node(

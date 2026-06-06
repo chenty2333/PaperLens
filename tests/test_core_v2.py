@@ -3654,6 +3654,75 @@ def test_library_rebuild_does_not_index_stale_reviewed_graph_with_current_readin
     assert result["matches"] == []
 
 
+def test_library_rebuild_uses_manifest_report_audit_status(tmp_path):
+    output_dir = tmp_path / "out"
+    data_dir = output_dir / ".paperlens" / "data"
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    layout = {
+        "pages": [
+            {
+                "page_no": 1,
+                "text": "Abstract\n\nWe propose a block table method for serving.",
+                "section_candidates": [{"title": "Abstract", "level": 1}],
+            }
+        ]
+    }
+    dom = build_paper_dom_from_layout(
+        paper_id=paper.paper_id,
+        title=paper.canonical_title,
+        layout=layout,
+    )
+    claim_span = next(span for span in dom.spans if "block table method" in span.text)
+    reading_plan = reading_plan_subset(dom, ReadingTaskType.CLAIM_INVENTORY)
+    claim_task = reading_task(reading_plan, ReadingTaskType.CLAIM_INVENTORY)
+    write_core_v2_from_observation_log(
+        data_dir=data_dir,
+        paper=paper,
+        dom=dom,
+        reading_plan=reading_plan,
+        observation_log=ObservationLog(paper_id="p_test").append(
+            ObservationCard(
+                observation_id="obs_claim",
+                paper_id="p_test",
+                task_id=claim_task.task_id,
+                observation_type=ObservationType.CLAIM,
+                statement="The paper proposes a block table method.",
+                source_ids=[claim_span.source_id],
+                covered_outputs=claim_task.required_outputs,
+            )
+        ),
+        producer="unit_test",
+    )
+    draft_path = data_dir / "core" / "v2" / "p_test" / "report_draft.v1.json"
+    draft_envelope = json.loads(draft_path.read_text(encoding="utf-8"))
+    draft_envelope["data"]["sections"][0]["paragraphs"][0][
+        "markdown"
+    ] = "The paper proves an unrelated 99% accuracy result."
+    draft_path.write_text(json.dumps(draft_envelope, ensure_ascii=False), encoding="utf-8")
+
+    rebuild_library_from_output(output_dir)
+    records = read_library_records(output_dir)
+    result = search_library(output_dir=output_dir, query="block table serving", limit=3)
+
+    graph_summary = records[0]["graph_summary"]
+    assert graph_summary["quality"]["artifact_publish_status"] == PublishStatus.REVIEWED
+    assert graph_summary["quality"]["publish_status"] == PublishStatus.BLOCKED
+    assert graph_summary["quality"]["current_audit_publish_status"] == PublishStatus.BLOCKED
+    assert "report_paragraph_text_not_grounded_in_declared_nodes" in graph_summary["quality"][
+        "current_audit_issue_codes"
+    ]
+    assert graph_summary["graph_access"] == "blocked_by_current_graph_audit"
+    assert graph_summary["claim_nodes"] == []
+    assert records[0]["memory"]["claims"] == []
+    assert result["matches"] == []
+
+
 def test_library_rebuild_does_not_index_draft_weak_bootstrap_graph(tmp_path):
     output_dir = tmp_path / "out"
     data_dir = output_dir / ".paperlens" / "data"
