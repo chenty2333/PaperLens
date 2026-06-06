@@ -378,9 +378,12 @@ def audit_observation_log(
 def audit_claim_graph_from_observation_log(
     graph: ClaimGraph,
     log: ObservationLog,
+    relation_candidates: list[Any] | None = None,
 ) -> list[AuditFinding]:
     try:
-        expected = build_claim_graph(log.paper_id, list(log.cards))
+        expected = build_claim_graph(
+            log.paper_id, list(log.cards), relation_candidates=relation_candidates
+        )
     except ValueError as exc:
         return [
             AuditFinding(

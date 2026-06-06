@@ -10,6 +10,7 @@ from paperlens_core.audit import (
     audit_claim_graph_from_observation_log,
     audit_observation_log,
     audit_reading_required_outputs,
+    audit_relation_candidates,
     compute_core_quality_metrics,
 )
 from paperlens_core.agents.llm import JsonLlmClient, llm_call_context
@@ -714,6 +715,7 @@ def write_core_v2_from_observation_log(
         observation_log=observation_log,
         claim_graph=claim_graph,
         reading_plan=reading_plan,
+        relation_log=relation_log if relation_log and relation_log.candidates else None,
         metadata={
             "title": paper.canonical_title,
             "observer_schema_version": CORE_V2_MODEL_OBSERVER_VERSION,
@@ -737,6 +739,7 @@ def write_core_v2_from_observation_log(
     paths = {
         "observation_log": root / "observation_log.v2.json",
         "claim_graph": root / "claim_graph.v2.json",
+        "relation_candidate_log": root / "relation_candidate_log.v2.json",
         "audit_findings": root / "audit_findings.v2.json",
         "quality_metrics": root / "quality_metrics.v2.json",
         "paper_memory_view": root / "paper_memory_view.v2.json",
@@ -758,6 +761,14 @@ def write_core_v2_from_observation_log(
         claim_graph.model_dump(),
         producer=producer,
     )
+    if relation_log and relation_log.candidates:
+        write_core_v2_envelope(
+            paths["relation_candidate_log"],
+            "relation_candidate_log",
+            paper.paper_id,
+            relation_log.model_dump(),
+            producer=producer,
+        )
     write_core_v2_envelope(
         paths["audit_findings"],
         "audit_findings",
@@ -854,11 +865,13 @@ def refresh_core_v2_audit_artifacts(
     dom, reading_plan = load_core_v2_dom_and_plan(data_dir, paper.paper_id)
     observation_log = load_core_v2_observation_log(data_dir, paper.paper_id)
     _, claim_graph = load_core_v2_dom_and_graph(data_dir, paper.paper_id)
+    relation_log = _load_relation_candidate_log(data_dir, paper.paper_id)
     derived = build_core_v2_derived_views(
         dom=dom,
         observation_log=observation_log,
         claim_graph=claim_graph,
         reading_plan=reading_plan,
+        relation_log=relation_log if relation_log and relation_log.candidates else None,
         metadata={
             "title": paper.canonical_title,
             "authors": paper.authors,
@@ -926,6 +939,7 @@ def build_core_v2_derived_views(
     observation_log: ObservationLog,
     claim_graph: ClaimGraph,
     reading_plan: ReadingPlan | None = None,
+    relation_log: RelationCandidateLog | None = None,
     metadata: dict[str, Any],
 ) -> dict[str, Any]:
     observation_findings = (
@@ -933,11 +947,23 @@ def build_core_v2_derived_views(
         if reading_plan is not None
         else []
     )
+    relation_candidates = list(relation_log.candidates) if relation_log else None
+    relation_findings = (
+        audit_relation_candidates(
+            relation_log,
+            {card.observation_id for card in observation_log.cards},
+        )
+        if relation_log
+        else []
+    )
     audit_findings = [
         *observation_findings,
-        *audit_claim_graph_from_observation_log(claim_graph, observation_log),
+        *audit_claim_graph_from_observation_log(
+            claim_graph, observation_log, relation_candidates=relation_candidates
+        ),
         *audit_claim_graph(claim_graph, dom),
         *audit_reading_required_outputs(claim_graph, reading_plan),
+        *relation_findings,
     ]
     report_draft = build_report_draft_from_graph(claim_graph)
     report_audit_findings = audit_report_draft_against_graph(report_draft, claim_graph)
@@ -1087,6 +1113,25 @@ def load_core_v2_dom_and_plan(data_dir: Path, paper_id: str) -> tuple[PaperDOM, 
     return PaperDOM.model_validate(dom_envelope.data), ReadingPlan.model_validate(
         plan_envelope.data
     )
+
+
+def _load_relation_candidate_log(
+    data_dir: Path, paper_id: str
+) -> RelationCandidateLog | None:
+    root = data_dir / "core" / "v2" / paper_id
+    path = root / "relation_candidate_log.v2.json"
+    if not path.exists():
+        return None
+    try:
+        envelope = read_typed_artifact(path, expected_type="relation_candidate_log")
+    except (FileNotFoundError, ValueError):
+        return None
+    if not isinstance(envelope.data, dict):
+        return None
+    try:
+        return RelationCandidateLog.model_validate(envelope.data)
+    except Exception:
+        return None
 
 
 def load_core_v2_observation_log(data_dir: Path, paper_id: str) -> ObservationLog:

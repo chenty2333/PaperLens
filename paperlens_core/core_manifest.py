@@ -13,11 +13,12 @@ from paperlens_core.audit import (
     audit_claim_graph_from_observation_log,
     audit_observation_log,
     audit_reading_required_outputs,
+    audit_relation_candidates,
     publish_status_from_findings,
 )
 from paperlens_core.dom import PaperDOM
 from paperlens_core.graph import ClaimGraph
-from paperlens_core.reading import ObservationLog, ReadingPlan
+from paperlens_core.reading import ObservationLog, ReadingPlan, RelationCandidateLog
 from paperlens_core.runtime import read_artifact_envelope, write_typed_artifact
 
 
@@ -30,6 +31,7 @@ CORE_V2_REQUIRED_ARTIFACTS = {
     "reading_plan": ("reading_plan.v2.json", "reading_plan"),
     "observation_log": ("observation_log.v2.json", "observation_log"),
     "claim_graph": ("claim_graph.v2.json", "claim_graph"),
+    "relation_candidate_log": ("relation_candidate_log.v2.json", "relation_candidate_log"),
     "audit_findings": ("audit_findings.v2.json", "audit_findings"),
     "quality_metrics": ("quality_metrics.v2.json", "core_quality_metrics"),
     "paper_memory_view": ("paper_memory_view.v2.json", "paper_memory_view"),
@@ -108,7 +110,8 @@ def build_core_v2_manifest(root: Path, paper_id: str) -> dict[str, Any]:
             "exists": path.exists(),
         }
         if not path.exists():
-            issues.append(f"missing:{filename}")
+            if key != "relation_candidate_log":
+                issues.append(f"missing:{filename}")
             required_artifacts[key] = entry
             continue
         entry["sha256"] = sha256_file(path)
@@ -204,13 +207,37 @@ def current_core_v2_findings(root: Path) -> list[AuditFinding]:
             expected_type="graph_report_draft",
         )
     )
+    relation_log = _load_relation_log(root)
+    relation_candidates = list(relation_log.candidates) if relation_log else None
+    observation_ids = {card.observation_id for card in observation_log.cards}
     return [
         *audit_observation_log(observation_log, dom, reading_plan),
-        *audit_claim_graph_from_observation_log(graph, observation_log),
+        *audit_claim_graph_from_observation_log(
+            graph, observation_log, relation_candidates=relation_candidates
+        ),
         *audit_claim_graph(graph, dom),
         *audit_reading_required_outputs(graph, reading_plan),
         *audit_report_draft_against_graph(report_draft, graph),
+        *(audit_relation_candidates(relation_log, observation_ids) if relation_log else []),
     ]
+
+
+def _load_relation_log(root: Path) -> RelationCandidateLog | None:
+    path = root / "relation_candidate_log.v2.json"
+    if not path.exists():
+        return None
+    try:
+        envelope = read_artifact_envelope(path)
+    except (FileNotFoundError, ValueError):
+        return None
+    if envelope.artifact_type != "relation_candidate_log":
+        return None
+    if not isinstance(envelope.data, dict):
+        return None
+    try:
+        return RelationCandidateLog.model_validate(envelope.data)
+    except Exception:
+        return None
 
 
 def audit_finding_count(findings: list[AuditFinding], *, severity: AuditSeverity) -> int:
