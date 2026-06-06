@@ -31,7 +31,7 @@ def write_core_quality_snapshot(output_dir: Path) -> Path:
     path = paperlens_data_dir(output_dir) / "core_quality_snapshot.v2.json"
     envelope = ArtifactEnvelope(
         artifact_type=CORE_QUALITY_SNAPSHOT_ARTIFACT,
-        artifact_version="v1",
+        artifact_version="v2",
         producer="paperlens_core_quality_snapshot",
         data=data,
     )

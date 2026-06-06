@@ -31,12 +31,15 @@ CORE_V2_REQUIRED_ARTIFACTS = {
     "reading_plan": ("reading_plan.v2.json", "reading_plan"),
     "observation_log": ("observation_log.v2.json", "observation_log"),
     "claim_graph": ("claim_graph.v2.json", "claim_graph"),
-    "relation_candidate_log": ("relation_candidate_log.v2.json", "relation_candidate_log"),
     "audit_findings": ("audit_findings.v2.json", "audit_findings"),
     "quality_metrics": ("quality_metrics.v2.json", "core_quality_metrics"),
     "paper_memory_view": ("paper_memory_view.v2.json", "paper_memory_view"),
     "report_draft": ("report_draft.v2.json", "graph_report_draft"),
     "report_audit_findings": ("report_audit_findings.v2.json", "report_audit_findings"),
+}
+
+CORE_V2_OPTIONAL_ARTIFACTS = {
+    "relation_candidate_log": ("relation_candidate_log.v2.json", "relation_candidate_log"),
 }
 
 
@@ -51,7 +54,7 @@ def write_core_v2_manifest(
     write_typed_artifact(
         path,
         artifact_type="core_v2_manifest",
-        artifact_version="v1",
+        artifact_version="v2",
         data=manifest,
         producer=producer,
         metadata={"paper_id": paper_id, "schema_version": CORE_V2_ENVELOPE_SCHEMA_VERSION},
@@ -101,8 +104,10 @@ def inspect_core_v2_artifact_root(root: Path, paper_id: str) -> dict[str, Any]:
 def build_core_v2_manifest(root: Path, paper_id: str) -> dict[str, Any]:
     issues: list[str] = []
     required_artifacts: dict[str, dict[str, Any]] = {}
+    optional_artifacts: dict[str, dict[str, Any]] = {}
     artifact_publish_status: str | None = None
-    for key, (filename, expected_type) in CORE_V2_REQUIRED_ARTIFACTS.items():
+
+    def _check_artifact(key: str, filename: str, expected_type: str) -> dict[str, Any]:
         path = root / filename
         entry: dict[str, Any] = {
             "path": filename,
@@ -110,17 +115,13 @@ def build_core_v2_manifest(root: Path, paper_id: str) -> dict[str, Any]:
             "exists": path.exists(),
         }
         if not path.exists():
-            if key != "relation_candidate_log":
-                issues.append(f"missing:{filename}")
-            required_artifacts[key] = entry
-            continue
+            return entry
         entry["sha256"] = sha256_file(path)
         try:
             envelope = read_artifact_envelope(path)
         except ValueError as exc:
             issues.append(f"invalid_envelope:{filename}:{exc}")
-            required_artifacts[key] = entry
-            continue
+            return entry
         entry.update(
             {
                 "artifact_type": envelope.artifact_type,
@@ -140,8 +141,19 @@ def build_core_v2_manifest(root: Path, paper_id: str) -> dict[str, Any]:
             if data_paper_id and data_paper_id != paper_id:
                 issues.append(f"data_paper_id_mismatch:{filename}:{data_paper_id}")
             if key == "quality_metrics":
+                nonlocal artifact_publish_status
                 artifact_publish_status = str(envelope.data.get("publish_status") or "") or None
+        return entry
+
+    for key, (filename, expected_type) in CORE_V2_REQUIRED_ARTIFACTS.items():
+        entry = _check_artifact(key, filename, expected_type)
+        if not entry["exists"]:
+            issues.append(f"missing:{filename}")
         required_artifacts[key] = entry
+
+    for key, (filename, expected_type) in CORE_V2_OPTIONAL_ARTIFACTS.items():
+        entry = _check_artifact(key, filename, expected_type)
+        optional_artifacts[key] = entry
     current_audit_summary: dict[str, Any] = {}
     if not issues:
         try:
@@ -164,6 +176,7 @@ def build_core_v2_manifest(root: Path, paper_id: str) -> dict[str, Any]:
         "current_audit_issue_codes": current_audit_summary.get("issue_codes", []),
         "consumable": consumable,
         "required_artifacts": required_artifacts,
+        "optional_artifacts": optional_artifacts,
         "issues": issues,
     }
 

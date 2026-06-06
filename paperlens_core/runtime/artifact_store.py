@@ -12,7 +12,7 @@ def make_artifact_envelope(
     artifact_type: str,
     data: dict[str, Any] | list[Any],
     producer: str,
-    artifact_version: str = "v1",
+    artifact_version: str = "v2",
     source_ids: list[str] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> ArtifactEnvelope:
@@ -32,7 +32,7 @@ def write_typed_artifact(
     artifact_type: str,
     data: dict[str, Any] | list[Any],
     producer: str,
-    artifact_version: str = "v1",
+    artifact_version: str = "v2",
     source_ids: list[str] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> ArtifactEnvelope:

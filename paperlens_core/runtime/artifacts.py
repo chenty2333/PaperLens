@@ -20,7 +20,7 @@ class ArtifactEnvelope(BaseModel):
     """
 
     artifact_type: str
-    artifact_version: str = "v1"
+    artifact_version: str = "v2"
     data: dict[str, Any] | list[Any]
     producer: str
     source_ids: list[str] = Field(default_factory=list)

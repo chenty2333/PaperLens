@@ -761,7 +761,7 @@ def write_core_v2_from_observation_log(
         claim_graph.model_dump(),
         producer=producer,
     )
-    if relation_log and relation_log.candidates:
+    if relation_log is not None:
         write_core_v2_envelope(
             paths["relation_candidate_log"],
             "relation_candidate_log",
@@ -1096,7 +1096,7 @@ def write_core_v2_envelope(
     write_typed_artifact(
         path,
         artifact_type=artifact_type,
-        artifact_version="v1",
+        artifact_version="v2",
         data=data,
         producer=producer,
         source_ids=source_ids or [],

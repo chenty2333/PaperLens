@@ -50,7 +50,7 @@ class PageArtifact(BaseModel):
     visual_required: bool = False
     section_candidates: list[dict[str, Any]] = Field(default_factory=list)
     crop_paths: list[str] = Field(default_factory=list)
-    artifact_version: str = "v1"
+    artifact_version: str = "v2"
 
 
 class ArtifactVersion(BaseModel):
