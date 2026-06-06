@@ -33,13 +33,14 @@ def build_layout_index(
         captions.extend(_with_page(page, item, "caption") for item in page.captions)
         for index, block in enumerate(page.blocks[:24], start=1):
             text = " ".join(str(block.get("text") or "").split())
-            if len(text) < 40:
+            source_id = str(block.get("source_id") or "").strip()
+            if len(text) < 40 or not source_id:
                 continue
             evidence_candidates.append(
                 {
                     "paper_id": page.paper_id,
                     "page_no": page.page_no,
-                    "text_span_id": f"page_{page.page_no}_block_{index}",
+                    "source_id": source_id,
                     "bbox": block.get("bbox"),
                     "text_preview": text[:320],
                 }

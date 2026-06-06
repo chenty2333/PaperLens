@@ -86,20 +86,6 @@ class ReviewItem(BaseModel):
     updated_at: str = Field(default_factory=now_iso)
 
 
-class EvidenceRef(BaseModel):
-    paper_id: str
-    page_no: int
-    section: str | None = None
-    text_span_id: str | None = None
-    bbox: list[float] | None = None
-    figure_id: str | None = None
-    table_id: str | None = None
-    quote_hash: str | None = None
-    artifact_version: str = "v1"
-    agent_run_id: str | None = None
-    verification_status: str = "UNVERIFIED"
-
-
 class SkimCard(BaseModel):
     paper_id: str
     problem: str | None = None
@@ -107,7 +93,7 @@ class SkimCard(BaseModel):
     system_scope: str | None = None
     evaluation_type: str | None = None
     danger_signals: list[str] = Field(default_factory=list)
-    evidence_refs: list[EvidenceRef] = Field(default_factory=list)
+    evidence_source_ids: list[str] = Field(default_factory=list)
     confidence: float = 0.0
 
 

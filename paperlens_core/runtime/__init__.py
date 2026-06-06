@@ -39,7 +39,6 @@ from paperlens_core.runtime.paper import (
     page_text,
     source_ids_from_results,
     tokenize,
-    unique_pages,
 )
 
 __all__ = [
@@ -72,7 +71,6 @@ __all__ = [
     "safe_cache_segment",
     "source_ids_from_results",
     "tokenize",
-    "unique_pages",
     "write_artifact_envelope",
     "write_llm_cache",
     "write_typed_artifact",

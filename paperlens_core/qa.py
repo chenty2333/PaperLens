@@ -22,6 +22,7 @@ from paperlens_core.graph import ClaimGraph
 from paperlens_core.library import read_library_records
 from paperlens_core.runtime import PaperLensRuntime
 from paperlens_core.runtime import context_pack_prompt
+from paperlens_core.runtime import page_source_ids
 from paperlens_core.workflow.core_v2 import (
     load_core_v2_dom_and_graph,
     load_core_v2_dom_and_plan,
@@ -149,7 +150,9 @@ def answer_question(
         ),
         context=qa_context,
         focus_queries=[question, augmented_query],
-        focus_pages=[page.get("page_no") for page in pages if isinstance(page.get("page_no"), int)],
+        focus_source_ids=unique_strings(
+            source_id for page in pages for source_id in page_source_ids(page)
+        ),
         read_artifacts=pages,
         output_contract={
             "type": "QAAnswer",
@@ -160,7 +163,7 @@ def answer_question(
             ),
         },
         search_limit=5,
-        page_text_limit=1000,
+        source_text_limit=1000,
     ).as_dict()
     if config.offline_debug or config.provider.kind == "none":
         answer = offline_qa_answer(
@@ -520,7 +523,7 @@ def core_v2_qa_context_view(*, paper_id: str, core_v2_context: dict[str, Any]) -
                 "provenance": match.get("provenance") or "explicit",
                 "confidence": match.get("confidence") or "medium",
                 "critic_status": "checked",
-                "evidence_refs": source_ids,
+                "source_ids": source_ids,
                 "source": "core_v2_claim_graph",
             }
         )
@@ -962,6 +965,25 @@ def run_paper_qa_agent(
         paper_id=paper_id,
         trace_path=paperlens_data_dir(output_dir) / "agent_trace.jsonl",
         system_prompt=ASK_SYSTEM_PROMPT,
+        max_steps=4,
+        max_model_calls=4,
+        max_tool_calls=8,
+        max_tokens=12000,
+        timeout_seconds=180.0,
+        allowed_tools=(
+            "paper.search_text",
+            "paper.read_sources",
+            "paper.find_figures",
+            "qa_context.search",
+            "qa_context.get_claim",
+            "evidence.lookup",
+        ),
+        input_contract={
+            "artifact_type": "paper_qa_answer",
+            "paper_specific_claims": "must use ClaimGraph nodes or PaperDOM source_ids",
+            "forbidden_dependency": "final markdown report is not evidence",
+            "page_numbers": "navigation metadata only; not proof identifiers",
+        },
     )
     return loop.run(
         initial_context={
@@ -1034,7 +1056,9 @@ def write_qa_trace(
         "agent_context": {
             "stage": (agent_context or {}).get("stage"),
             "objective": (agent_context or {}).get("objective"),
-            "focus_pages": ((agent_context or {}).get("working_context") or {}).get("focus_pages"),
+            "focus_source_ids": ((agent_context or {}).get("working_context") or {}).get(
+                "focus_source_ids"
+            ),
             "tool_count": len((agent_context or {}).get("tool_trace") or []),
         },
     }

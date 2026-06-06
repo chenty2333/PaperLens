@@ -207,9 +207,11 @@ def build_paper_dom_from_layout(
                     level=1,
                 )
             )
-        text = str(page.get("text") or "")
-        for index, paragraph in enumerate(split_paragraphs(text), start=1):
-            source_id = stable_source_id(paper_id, "span", page_key, index)
+        for index, paragraph_item in enumerate(page_text_units(page, page_key, paper_id), start=1):
+            paragraph = paragraph_item["text"]
+            source_id = paragraph_item["source_id"] or stable_source_id(
+                paper_id, "span", page_key, index
+            )
             span = PaperSpan(
                 source_id=source_id,
                 paper_id=paper_id,
@@ -267,7 +269,8 @@ def extract_visual_nodes(
         caption = str(item.get("caption") or item.get("text") or "").strip() or None
         bbox = item.get("bbox") if isinstance(item.get("bbox"), list) else None
         payload = {
-            "source_id": stable_source_id(paper_id, kind, page_key, index),
+            "source_id": str(item.get("source_id") or "").strip()
+            or stable_source_id(paper_id, kind, page_key, index),
             "paper_id": paper_id,
             "page_no": page_no,
             "caption": caption,
@@ -275,6 +278,36 @@ def extract_visual_nodes(
         }
         result.append(PaperFigure(**payload) if kind == "figure" else PaperTable(**payload))
     return result
+
+
+def page_text_units(page: dict[str, Any], page_key: str, paper_id: str) -> list[dict[str, str]]:
+    units = []
+    for index, block in enumerate(list_value(page.get("blocks")), start=1):
+        if not isinstance(block, dict):
+            continue
+        text = clean_text(str(block.get("text") or ""))
+        if not text:
+            continue
+        source_id = str(block.get("source_id") or "").strip()
+        units.append(
+            {
+                "source_id": source_id or stable_source_id(paper_id, "span", page_key, index),
+                "text": text,
+            }
+        )
+    if units:
+        return units
+    return [
+        {
+            "source_id": stable_source_id(paper_id, "span", page_key, index),
+            "text": paragraph,
+        }
+        for index, paragraph in enumerate(split_paragraphs(str(page.get("text") or "")), start=1)
+    ]
+
+
+def clean_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def extract_equations(

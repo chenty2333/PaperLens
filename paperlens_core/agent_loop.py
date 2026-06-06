@@ -8,17 +8,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from paperlens_core.agents.llm import JsonLlmClient, LlmJsonResult, llm_call_context, parse_json_text
+from paperlens_core.agents.llm import JsonLlmClient, LlmJsonResult, llm_call_context
 from paperlens_core.runtime import (
     PaperLensRuntime,
+    RuntimeBudgetExceeded,
     compact_text,
     page_captions,
     page_list_field,
     page_no,
     page_source_ids,
-    page_text,
-    source_ids_from_results,
 )
+from paperlens_core.runtime.executor import token_count_from_usage
 
 
 AGENT_LOOP_PROMPT_VERSION = "agent-loop-v2-typed-turn"
@@ -106,6 +106,10 @@ class AgentLoopStepLimitExceeded(RuntimeError):
     pass
 
 
+class AgentLoopPolicyViolation(RuntimeError):
+    pass
+
+
 class PaperToolRegistry:
     def __init__(
         self,
@@ -125,23 +129,13 @@ class PaperToolRegistry:
     def tool_descriptions(self) -> list[dict[str, Any]]:
         return [
             {
-                "name": "paper.map",
-                "description": "List the paper pages with short text/caption hints. Use this to choose where to read next.",
-                "arguments": {"query": "optional string"},
-            },
-            {
                 "name": "paper.search_text",
                 "description": "Search parsed paper text and captions. Good for locating claims, terms, sections, numbers, baselines, and evaluation evidence.",
                 "arguments": {"query": "string", "limit": "optional integer"},
             },
             {
-                "name": "paper.read_pages",
-                "description": "Read specific page numbers from parsed text/captions/figure metadata. Prefer paper.read_sources when source_ids are available.",
-                "arguments": {"pages": "array of page numbers", "text_limit": "optional integer"},
-            },
-            {
                 "name": "paper.read_sources",
-                "description": "Read PaperDOM source IDs returned by paper.search_text, paper.map, paper.find_figures, qa_context.search, or evidence.lookup.",
+                "description": "Read PaperDOM source IDs returned by paper.search_text, paper.find_figures, qa_context.search, or evidence.lookup.",
                 "arguments": {
                     "source_ids": "array of PaperDOM source IDs",
                     "text_limit": "optional integer",
@@ -171,17 +165,10 @@ class PaperToolRegistry:
 
     def execute(self, request: AgentToolRequest) -> AgentToolObservation:
         try:
-            if request.tool == "paper.map":
-                result = self._paper_map(request.arguments)
-            elif request.tool == "paper.search_text":
+            if request.tool == "paper.search_text":
                 result = self.runtime.search_text(
                     str(request.arguments.get("query") or ""),
                     limit=positive_int(request.arguments.get("limit"), default=8),
-                ).as_dict()
-            elif request.tool == "paper.read_pages":
-                result = self.runtime.read_pages(
-                    request.arguments.get("pages") or request.arguments.get("page_numbers") or [],
-                    text_limit=positive_int(request.arguments.get("text_limit"), default=2200),
                 ).as_dict()
             elif request.tool == "paper.read_sources":
                 result = self._paper_read_sources(request.arguments)
@@ -214,34 +201,6 @@ class PaperToolRegistry:
                 error=str(exc),
                 result={},
             )
-
-    def _paper_map(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        query_terms = tokenize(str(arguments.get("query") or ""))
-        pages = []
-        for page in self.layout_pages:
-            text = page_text(page)
-            captions = page_captions(page)
-            hint = " ".join(
-                [
-                    compact_text(text, limit=260),
-                    compact_text(json.dumps(captions[:2], ensure_ascii=False), limit=180),
-                ]
-            )
-            if query_terms and not any(term in hint.lower() for term in query_terms):
-                continue
-            pages.append(
-                {
-                    "page_no": page_no(page),
-                    "source_ids": page_source_ids(page),
-                    "text_hint": compact_text(text, limit=360),
-                    "captions": captions[:3],
-                    "figures": page_list_field(page, "figures")[:2],
-                    "tables": page_list_field(page, "tables")[:2],
-                }
-            )
-        if not pages and query_terms:
-            return self._paper_map({})
-        return {"tool": "paper.map", "query": arguments.get("query") or "", "results": pages}
 
     def _paper_read_sources(self, arguments: dict[str, Any]) -> dict[str, Any]:
         requested = [
@@ -280,11 +239,6 @@ class PaperToolRegistry:
         for page in self.layout_pages:
             if source_id in page_source_ids(page):
                 return page
-        page_number = page_no_from_source_id(source_id)
-        if page_number is not None:
-            for page in self.layout_pages:
-                if page_no(page) == page_number:
-                    return page
         return None
 
     def _qa_context_search(self, query: str) -> dict[str, Any]:
@@ -301,15 +255,20 @@ class PaperToolRegistry:
                 text = json.dumps(item, ensure_ascii=False)
                 score = sum(text.lower().count(term) for term in terms) if terms else 1
                 if score:
-                    haystacks.append((score, key, compact_json_item(item)))
+                    haystacks.append((score, key, compact_json_item(item), recursive_source_ids(item)))
         haystacks.sort(key=lambda item: -item[0])
         return {
             "tool": "qa_context.search",
             "query": query,
             "results": [
-                {"section": section, "item": item}
-                for _score, section, item in haystacks[:12]
+                {"section": section, "item": item, "source_ids": source_ids}
+                for _score, section, item, source_ids in haystacks[:12]
             ],
+            "source_ids": dedupe_strings(
+                source_id
+                for _score, _section, _item, source_ids in haystacks[:12]
+                for source_id in source_ids
+            ),
         }
 
     def _qa_context_get_claim(self, claim_id: str) -> dict[str, Any]:
@@ -346,11 +305,26 @@ class AgentLoop:
         trace_path: Path | None = None,
         system_prompt: str | None = None,
         max_steps: int = 8,
+        max_model_calls: int | None = None,
+        max_tool_calls: int = 16,
+        max_tokens: int | None = 12000,
+        timeout_seconds: float = 180.0,
+        allowed_tools: Iterable[str] | None = None,
+        input_contract: dict[str, Any] | None = None,
         control_check: Callable[[], None] | None = None,
         pause_check: Callable[[], None] | None = None,
     ) -> None:
         if max_steps < 1:
             raise ValueError("AgentLoop max_steps must be >= 1")
+        resolved_max_model_calls = max_model_calls if max_model_calls is not None else max_steps
+        if resolved_max_model_calls < 1:
+            raise ValueError("AgentLoop max_model_calls must be >= 1")
+        if max_tool_calls < 0:
+            raise ValueError("AgentLoop max_tool_calls must be >= 0")
+        if max_tokens is not None and max_tokens < 1:
+            raise ValueError("AgentLoop max_tokens must be >= 1 when set")
+        if timeout_seconds <= 0:
+            raise ValueError("AgentLoop timeout_seconds must be > 0")
         self.client = client
         self.tools = tools
         self.session_name = session_name
@@ -362,6 +336,12 @@ class AgentLoop:
         self.trace_path = trace_path
         self.system_prompt = system_prompt or AGENT_LOOP_SYSTEM_PROMPT
         self.max_steps = max_steps
+        self.max_model_calls = resolved_max_model_calls
+        self.max_tool_calls = max_tool_calls
+        self.max_tokens = max_tokens
+        self.timeout_seconds = float(timeout_seconds)
+        self.allowed_tools = resolve_allowed_tools(tools, allowed_tools)
+        self.input_contract = dict(input_contract or {})
         self.control_check = control_check
         self.pause_check = pause_check
 
@@ -370,13 +350,36 @@ class AgentLoop:
         trace: list[dict[str, Any]] = []
         usage: dict[str, Any] = {}
         request_ids: list[str] = []
+        started_at = time.time()
         step = 0
+        model_calls = 0
+        tool_calls = 0
+        tokens_used = 0
         while step < self.max_steps:
+            self._enforce_timeout(
+                started_at,
+                trace=trace,
+                usage=usage,
+                request_ids=request_ids,
+                step=step,
+            )
             step += 1
             if self.pause_check:
                 self.pause_check()
             if self.control_check:
                 self.control_check()
+            model_calls += 1
+            if model_calls > self.max_model_calls:
+                self._raise_budget_exceeded(
+                    trace,
+                    reason="max_model_calls",
+                    step=step,
+                    usage=usage,
+                    request_ids=request_ids,
+                    model_calls=model_calls,
+                    tokens_used=tokens_used,
+                    tool_calls=tool_calls,
+                )
             prompt = self._build_prompt(
                 initial_context=initial_context or {},
                 observations=observations,
@@ -395,9 +398,21 @@ class AgentLoop:
                     user_prompt=prompt,
                     schema_name="paperlens_agent_turn",
                     schema=AGENT_TURN_SCHEMA,
-                    max_tokens=None,
+                    max_tokens=self.max_tokens,
                 )
             merge_usage(usage, raw.usage)
+            tokens_used += token_count_from_usage(raw.usage)
+            if self.max_tokens is not None and tokens_used > self.max_tokens:
+                self._raise_budget_exceeded(
+                    trace,
+                    reason="max_tokens",
+                    step=step,
+                    usage=usage,
+                    request_ids=request_ids,
+                    model_calls=model_calls,
+                    tokens_used=tokens_used,
+                    tool_calls=tool_calls,
+                )
             if raw.request_id:
                 request_ids.append(raw.request_id)
             turn = normalize_agent_turn(raw)
@@ -408,11 +423,14 @@ class AgentLoop:
                 "paper_id": self.paper_id,
                 "step": step,
                 "duration_seconds": round(time.time() - started, 3),
+                "elapsed_seconds": round(time.time() - started_at, 3),
                 "action": turn["action"],
                 "message": turn["message"],
                 "usage": raw.usage,
                 "request_id": raw.request_id,
                 "tool_request_count": len(turn["tool_requests"]),
+                "model_calls": model_calls,
+                "tokens_used": tokens_used,
             }
             trace.append(trace_row)
             self._append_trace(trace_row)
@@ -474,13 +492,70 @@ class AgentLoop:
                     self.pause_check()
                 if self.control_check:
                     self.control_check()
+                self._enforce_timeout(
+                    started_at,
+                    trace=trace,
+                    usage=usage,
+                    request_ids=request_ids,
+                    step=step,
+                )
+                tool_calls += 1
+                if tool_calls > self.max_tool_calls:
+                    self._raise_budget_exceeded(
+                        trace,
+                        reason="max_tool_calls",
+                        step=step,
+                        usage=usage,
+                        request_ids=request_ids,
+                        model_calls=model_calls,
+                        tokens_used=tokens_used,
+                        tool_calls=tool_calls,
+                    )
+                if request.tool not in self.allowed_tools:
+                    row = {
+                        "event": "disallowed_tool",
+                        "session": self.session_name,
+                        "stage": self.stage,
+                        "paper_id": self.paper_id,
+                        "step": step,
+                        "tool": request.tool,
+                        "allowed_tools": list(self.allowed_tools),
+                    }
+                    trace.append(row)
+                    self._append_trace(row)
+                    raise AgentLoopPolicyViolation(
+                        f"{self.session_name} attempted disallowed tool={request.tool}"
+                    )
                 observation = self.tools.execute(request)
+                observation_source_ids = observation.source_ids or tool_result_source_ids(
+                    observation.result
+                )
+                if (
+                    observation.ok
+                    and list_payload(observation.result.get("results"))
+                    and not observation_source_ids
+                ):
+                    row = {
+                        "event": "tool_missing_source_ids",
+                        "session": self.session_name,
+                        "stage": self.stage,
+                        "paper_id": self.paper_id,
+                        "step": step,
+                        "tool": request.tool,
+                        "request_id": request.id,
+                    }
+                    trace.append(row)
+                    self._append_trace(row)
+                    raise AgentLoopPolicyViolation(
+                        f"{self.session_name} tool={request.tool} returned no source_ids"
+                    )
                 row = {
                     "event": "tool_observation",
                     "session": self.session_name,
                     "stage": self.stage,
                     "paper_id": self.paper_id,
                     "step": step,
+                    "tool_calls": tool_calls,
                     "request": {
                         "id": request.id,
                         "tool": request.tool,
@@ -498,6 +573,13 @@ class AgentLoop:
             "stage": self.stage,
             "paper_id": self.paper_id,
             "max_steps": self.max_steps,
+            "max_model_calls": self.max_model_calls,
+            "max_tool_calls": self.max_tool_calls,
+            "max_tokens": self.max_tokens,
+            "timeout_seconds": self.timeout_seconds,
+            "model_calls": model_calls,
+            "tool_calls": tool_calls,
+            "tokens_used": tokens_used,
             "usage": usage,
             "request_ids": request_ids,
         }
@@ -521,7 +603,17 @@ class AgentLoop:
             "title": self.tools.title,
             "objective": self.objective,
             "step": step,
-            "available_tools": self.tools.tool_descriptions(),
+            "available_tools": self._available_tool_descriptions(),
+            "runtime_contract": {
+                "allowed_tools": list(self.allowed_tools),
+                "max_steps": self.max_steps,
+                "max_model_calls": self.max_model_calls,
+                "max_tool_calls": self.max_tool_calls,
+                "max_tokens": self.max_tokens,
+                "timeout_seconds": self.timeout_seconds,
+                "input_contract": self.input_contract,
+                "tool_result_contract": "Every successful tool observation must carry PaperDOM or ClaimGraph source_ids.",
+            },
             "initial_context": initial_context,
             "previous_tool_observations": observations,
             "final_schema_name": self.final_schema_name,
@@ -536,6 +628,66 @@ class AgentLoop:
         }
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
 
+    def _available_tool_descriptions(self) -> list[dict[str, Any]]:
+        return [
+            description
+            for description in self.tools.tool_descriptions()
+            if str(description.get("name") or "").strip() in self.allowed_tools
+        ]
+
+    def _enforce_timeout(
+        self,
+        started_at: float,
+        *,
+        trace: list[dict[str, Any]],
+        usage: dict[str, Any],
+        request_ids: list[str],
+        step: int,
+    ) -> None:
+        elapsed = time.time() - started_at
+        if elapsed <= self.timeout_seconds:
+            return
+        self._raise_budget_exceeded(
+            trace,
+            reason="timeout_seconds",
+            step=step,
+            usage=usage,
+            request_ids=request_ids,
+            elapsed_seconds=round(elapsed, 3),
+        )
+
+    def _raise_budget_exceeded(
+        self,
+        trace: list[dict[str, Any]],
+        *,
+        reason: str,
+        step: int,
+        usage: dict[str, Any],
+        request_ids: list[str],
+        **metadata: Any,
+    ) -> None:
+        row = {
+            "event": "agent_budget_exceeded",
+            "session": self.session_name,
+            "stage": self.stage,
+            "paper_id": self.paper_id,
+            "step": step,
+            "reason": reason,
+            "budget": {
+                "max_steps": self.max_steps,
+                "max_model_calls": self.max_model_calls,
+                "max_tool_calls": self.max_tool_calls,
+                "max_tokens": self.max_tokens,
+                "timeout_seconds": self.timeout_seconds,
+            },
+            "usage": usage,
+            "request_ids": request_ids,
+            "metadata": metadata,
+        }
+        trace.append(row)
+        self._append_trace(row)
+        raise RuntimeBudgetExceeded(f"{self.session_name} exceeded {reason}")
+
     def _append_trace(self, row: dict[str, Any]) -> None:
         if self.trace_path is None:
             return
@@ -547,7 +699,7 @@ class AgentLoop:
 def normalize_agent_turn(raw: LlmJsonResult) -> dict[str, Any]:
     data = raw.data if isinstance(raw.data, dict) else {}
     action = str(data.get("action") or "").strip()
-    final = normalize_final_payload(data)
+    final = data.get("final") if isinstance(data.get("final"), dict) else {}
     if action not in {"tool_request", "final"}:
         action = "final" if final else "tool_request"
     requests = data.get("tool_requests") if isinstance(data.get("tool_requests"), list) else []
@@ -556,67 +708,57 @@ def normalize_agent_turn(raw: LlmJsonResult) -> dict[str, Any]:
         "message": str(data.get("message") or "").strip(),
         "tool_requests": [item for item in requests if isinstance(item, dict)],
         "final": final,
-        "final_json": json_text_value(data.get("final_json")),
     }
-
-
-def parse_final_json(text: str, schema_name: str) -> dict[str, Any]:
-    if not text.strip():
-        raise ValueError(f"Agent returned final action without final_json for {schema_name}")
-    return parse_json_text(text)
 
 
 def parse_final_payload(value: Any, schema_name: str) -> dict[str, Any]:
     if isinstance(value, dict) and value:
         return value
-    if isinstance(value, str) and value.strip():
-        return parse_final_json(value, schema_name)
     raise ValueError(f"Agent returned final action without final for {schema_name}")
-
-
-def parse_arguments_json(text: Any) -> dict[str, Any]:
-    if isinstance(text, dict):
-        return text
-    try:
-        parsed = parse_json_text(json_text_value(text))
-    except Exception:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
 
 
 def parse_arguments_payload(item: dict[str, Any]) -> dict[str, Any]:
     arguments = item.get("arguments")
     if isinstance(arguments, dict):
         return arguments
-    return parse_arguments_json(item.get("arguments_json") or "{}")
+    return {}
 
 
-def normalize_final_payload(data: dict[str, Any]) -> dict[str, Any] | str:
-    final = data.get("final")
-    if isinstance(final, dict) and final:
-        return final
-    alternate_final = data.get("final_json")
-    if isinstance(alternate_final, dict):
-        return alternate_final
-    return json_text_value(alternate_final)
-
-
-def json_text_value(value: Any) -> str:
-    if isinstance(value, str):
-        return value.strip()
-    if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False)
-    return str(value or "").strip()
+def resolve_allowed_tools(tools: Any, allowed_tools: Iterable[str] | None) -> tuple[str, ...]:
+    declared = tuple(
+        str(description.get("name") or "").strip()
+        for description in tools.tool_descriptions()
+        if str(description.get("name") or "").strip()
+    )
+    if allowed_tools is None:
+        return declared
+    resolved = tuple(dict.fromkeys(str(item).strip() for item in allowed_tools if str(item).strip()))
+    unknown = [item for item in resolved if item not in declared]
+    if unknown:
+        raise ValueError(f"AgentLoop allowed_tools are not declared: {', '.join(unknown)}")
+    return resolved
 
 
 def tool_result_source_ids(result: dict[str, Any]) -> list[str]:
-    explicit = [
-        str(item).strip()
-        for item in list_payload(result.get("source_ids"))
-        if str(item).strip()
-    ]
-    nested = source_ids_from_results(list_payload(result.get("results")))
-    return dedupe_strings([*explicit, *nested])
+    return dedupe_strings(recursive_source_ids(result))
+
+
+def recursive_source_ids(value: Any) -> list[str]:
+    source_ids: list[str] = []
+    if isinstance(value, dict):
+        source_id = str(value.get("source_id") or "").strip()
+        if source_id:
+            source_ids.append(source_id)
+        for key in ("source_ids", "cited_source_ids", "evidence_source_ids", "target_source_ids"):
+            source_ids.extend(
+                str(item).strip() for item in list_payload(value.get(key)) if str(item).strip()
+            )
+        for nested in value.values():
+            source_ids.extend(recursive_source_ids(nested))
+    elif isinstance(value, list):
+        for item in value:
+            source_ids.extend(recursive_source_ids(item))
+    return source_ids
 
 
 def list_payload(value: Any) -> list[Any]:
@@ -627,42 +769,16 @@ def source_text_for_page(page: Any, source_id: str, *, limit: int) -> str:
     for block in page_list_field(page, "blocks"):
         if not isinstance(block, dict):
             continue
-        block_source = str(block.get("source_id") or block.get("text_span_id") or "").strip()
+        block_source = str(block.get("source_id") or "").strip()
         if block_source == source_id:
             return compact_text(str(block.get("text") or ""), limit=limit)
-    index = source_index(source_id) if source_id.startswith("span:") else None
-    if index is not None:
-        paragraphs = split_text_paragraphs(page_text(page))
-        if 0 < index <= len(paragraphs):
-            return compact_text(paragraphs[index - 1], limit=limit)
-    return compact_text(page_text(page), limit=limit)
-
-
-def page_no_from_source_id(source_id: str) -> int | None:
-    match = re.search(r":p(\d+)(?::|$)", source_id)
-    if not match:
-        return None
-    try:
-        return int(match.group(1))
-    except ValueError:
-        return None
-
-
-def source_index(source_id: str) -> int | None:
-    match = re.search(r":(\d+)$", source_id)
-    if not match:
-        return None
-    try:
-        return int(match.group(1))
-    except ValueError:
-        return None
-
-
-def split_text_paragraphs(text: str) -> list[str]:
-    chunks = [re.sub(r"\s+", " ", item).strip() for item in re.split(r"\n\s*\n", text)]
-    if len(chunks) <= 1:
-        chunks = [re.sub(r"\s+", " ", item).strip() for item in text.splitlines()]
-    return [item for item in chunks if item]
+    for field_name in ("figures", "tables"):
+        for item in page_list_field(page, field_name):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("source_id") or "").strip() == source_id:
+                return compact_text(json.dumps(item, ensure_ascii=False), limit=limit)
+    return ""
 
 
 def dedupe_strings(values: Iterable[Any]) -> list[str]:
@@ -700,7 +816,15 @@ def compact_json_item(item: Any) -> Any:
     if isinstance(item, dict):
         compacted: dict[str, Any] = {}
         for key, value in item.items():
-            if isinstance(value, str):
+            if key in {"source_ids", "cited_source_ids", "evidence_source_ids", "target_source_ids"}:
+                compacted[key] = [
+                    str(source_id).strip()
+                    for source_id in list_payload(value)
+                    if str(source_id).strip()
+                ][:24]
+            elif key == "source_id":
+                compacted[key] = str(value or "").strip()
+            elif isinstance(value, str):
                 compacted[key] = compact_text(value, limit=700)
             elif isinstance(value, (dict, list)):
                 compacted[key] = compact_text(json.dumps(value, ensure_ascii=False), limit=700)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from paperlens_core.schemas import ClassificationDecision, EvidenceRef, PaperRecord, SkimCard
+from paperlens_core.schemas import ClassificationDecision, PaperRecord, SkimCard
 
 
 def _report_slug(value: str) -> str:
@@ -107,18 +107,6 @@ def cluster_rows_by_scope(rows: list[dict[str, Any]]) -> dict[str, list[dict[str
             cluster = skim.system_scope or skim.method_type or "Unknown"
         clusters.setdefault(cluster, []).append(row)
     return clusters
-
-
-def dedupe_evidence_refs(refs: list[EvidenceRef]) -> list[EvidenceRef]:
-    seen = set()
-    result = []
-    for ref in refs:
-        key = (ref.paper_id, ref.page_no, tuple(ref.bbox or []), ref.quote_hash, ref.text_span_id)
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(ref)
-    return result
 
 
 def classification_counts(decisions: list[ClassificationDecision]) -> dict[str, int]:

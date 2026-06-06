@@ -332,12 +332,16 @@ def build_library_record(row: dict[str, Any]) -> dict[str, Any]:
             claims=claims,
         ),
     }
-    evidence_refs: list[dict[str, Any]] = []
+    evidence_source_ids = unique_strings(
+        item.get("source_id")
+        for item in evidence_items
+        if isinstance(item, dict) and string_or_none(item.get("source_id"))
+    )
     memory_quality = {
         "claim_count": len(claims),
         "concept_count": len(concepts),
         "evidence_item_count": len(memory["evidence_items"]),
-        "evidence_ref_count": len(evidence_refs),
+        "evidence_source_id_count": len(evidence_source_ids),
         "has_core_abstraction": bool(memory["core_idea"]),
         "graph_publish_status": dict_value(graph_summary.get("quality")).get("publish_status"),
         "graph_evidence_coverage": dict_value(graph_summary.get("quality")).get(
@@ -379,7 +383,7 @@ def build_library_record(row: dict[str, Any]) -> dict[str, Any]:
         "graph_summary": graph_summary,
         "quality": memory_quality,
         "provenance": {
-            "evidence_refs": evidence_refs,
+            "source_ids": evidence_source_ids,
             "core_v2": graph_provenance(graph_summary),
         },
         "outputs": outputs,
@@ -521,28 +525,30 @@ class LibraryToolRegistry:
         limit = int_or_none(arguments.get("limit")) or 8
         limit = max(1, min(limit, 20))
         matches = search_library_records(self.records, query=query, limit=limit, public=False)
+        results = [
+            compact_library_record_for_agent(hit["paper"], score=hit["score"], include_memory=False)
+            for hit in matches
+        ]
         return {
             "tool": "library.search",
             "query": query,
-            "results": [
-                compact_library_record_for_agent(
-                    hit["paper"], score=hit["score"], include_memory=False
-                )
-                for hit in matches
-            ],
+            "results": results,
+            "source_ids": library_result_source_ids(results),
         }
 
     def _get_record(self, arguments: dict[str, Any]) -> dict[str, Any]:
         paper_id = string_or_empty(arguments.get("paper_id"))
         record = find_library_record(self.records, paper_id)
+        results = (
+            [compact_library_record_for_agent(record, include_memory=True)]
+            if record is not None
+            else []
+        )
         return {
             "tool": "library.get_record",
             "query": paper_id,
-            "results": (
-                [compact_library_record_for_agent(record, include_memory=True)]
-                if record is not None
-                else []
-            ),
+            "results": results,
+            "source_ids": library_result_source_ids(results),
         }
 
 
@@ -645,6 +651,18 @@ def run_library_qa_agent(
         paper_id="__library__",
         trace_path=paperlens_data_dir(output_dir) / "agent_trace.jsonl",
         system_prompt=LIBRARY_ASK_SYSTEM_PROMPT,
+        max_steps=4,
+        max_model_calls=4,
+        max_tool_calls=8,
+        max_tokens=14000,
+        timeout_seconds=180.0,
+        allowed_tools=("library.search", "library.get_record"),
+        input_contract={
+            "artifact_type": "library_qa_answer",
+            "paper_specific_claims": "must come from graph_summary nodes, claims, or provenance source_ids",
+            "report_paths": "navigation only; not evidence",
+            "cross_paper_synthesis": "must name which local paper records support it",
+        },
     )
     return loop.run(
         initial_context={
@@ -846,10 +864,18 @@ def compact_library_record_for_agent(
     quality = dict_value(record.get("quality"))
     provenance = dict_value(record.get("provenance"))
     graph_summary = dict_value(record.get("graph_summary"))
+    core_v2_provenance = graph_provenance(graph_summary)
+    record_source_ids = unique_strings(
+        [
+            *raw_list_payload(provenance.get("source_ids")),
+            *raw_list_payload(core_v2_provenance.get("source_ids")),
+        ]
+    )
     payload: dict[str, Any] = {
         "paper_id": record.get("paper_id"),
         "title": record.get("title"),
         "grade": record.get("grade"),
+        "source_ids": record_source_ids[:24],
         "tags": record.get("tags", [])[:10] if isinstance(record.get("tags"), list) else [],
         "brief": compact_text(memory.get("brief") or memory.get("core_idea"), max_chars=380),
         "core_idea": compact_text(memory.get("core_idea"), max_chars=420),
@@ -905,14 +931,23 @@ def compact_library_record_for_agent(
             ],
         }
         payload["provenance"] = {
-            "evidence_refs": provenance.get("evidence_refs", [])[:16]
-            if isinstance(provenance.get("evidence_refs"), list)
-            else [],
-            "core_v2": provenance.get("core_v2")
-            if isinstance(provenance.get("core_v2"), dict)
-            else {},
+            "source_ids": record_source_ids[:24],
+            "core_v2": core_v2_provenance,
         }
     return payload
+
+
+def library_result_source_ids(results: list[dict[str, Any]]) -> list[str]:
+    source_ids = []
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        source_ids.extend(raw_list_payload(result.get("source_ids")))
+        provenance = dict_value(result.get("provenance"))
+        source_ids.extend(raw_list_payload(provenance.get("source_ids")))
+        graph_summary = dict_value(result.get("graph_summary"))
+        source_ids.extend(raw_list_payload(graph_provenance(graph_summary).get("source_ids")))
+    return unique_strings(source_ids)
 
 
 def render_offline_library_answer(question: str, matches: list[dict[str, Any]]) -> str:
@@ -1026,10 +1061,23 @@ def list_payload(value: Any) -> list[dict[str, Any]]:
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
+def raw_list_payload(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
 def merge_unique(first: list[str], second: list[str]) -> list[str]:
     result = []
     for item in [*first, *second]:
         text = string_or_empty(item)
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
+def unique_strings(values: Any) -> list[str]:
+    result = []
+    for item in values or []:
+        text = string_or_none(item)
         if text and text not in result:
             result.append(text)
     return result

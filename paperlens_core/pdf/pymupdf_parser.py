@@ -6,6 +6,7 @@ import io
 from pathlib import Path
 from typing import Any
 
+from paperlens_core.dom import stable_source_id
 from paperlens_core.schemas import PageArtifact, PaperRecord
 
 try:
@@ -34,6 +35,16 @@ def block_tuple_to_dict(block: tuple[Any, ...]) -> dict[str, Any]:
         "block_no": block[5] if len(block) > 5 else None,
         "block_type": block[6] if len(block) > 6 else None,
     }
+
+
+def assign_block_source_ids(paper_id: str, page_no: int, blocks: list[dict[str, Any]]) -> None:
+    page_key = f"p{page_no}"
+    text_index = 0
+    for block in blocks:
+        if not str(block.get("text") or "").strip():
+            continue
+        text_index += 1
+        block["source_id"] = stable_source_id(paper_id, "span", page_key, text_index)
 
 
 def word_tuple_to_dict(word: tuple[Any, ...]) -> dict[str, Any]:
@@ -156,6 +167,7 @@ def extract_tables(page: Any) -> list[dict[str, Any]]:
         tables.append(
             {
                 "table_id": f"tbl_{index}",
+                "source_id": None,
                 "bbox": bbox,
                 "row_count": getattr(table, "row_count", None),
                 "col_count": getattr(table, "col_count", None),
@@ -186,6 +198,7 @@ def infer_captions(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "label": f"{caption_type} {number}".lower(),
                     "text": text,
                     "bbox": block.get("bbox"),
+                    "source_id": block.get("source_id"),
                 }
             )
     return captions
@@ -251,6 +264,7 @@ def infer_figures(images: list[dict[str, Any]], captions: list[dict[str, Any]]) 
         figures.append(
             {
                 "figure_id": f"fig_{index}",
+                "source_id": None,
                 "bbox": image.get("bbox"),
                 "caption_id": caption.get("caption_id") if caption else None,
                 "caption": caption.get("text") if caption else None,
@@ -276,6 +290,19 @@ def attach_table_captions(
             payload["label"] = caption.get("label")
         enriched.append(payload)
     return enriched
+
+
+def assign_visual_source_ids(
+    paper_id: str,
+    page_no: int,
+    figures: list[dict[str, Any]],
+    tables: list[dict[str, Any]],
+) -> None:
+    page_key = f"p{page_no}"
+    for index, figure in enumerate(figures, start=1):
+        figure["source_id"] = stable_source_id(paper_id, "figure", page_key, index)
+    for index, table in enumerate(tables, start=1):
+        table["source_id"] = stable_source_id(paper_id, "table", page_key, index)
 
 
 def metadata_authors(value: str | None) -> list[str]:
@@ -350,6 +377,7 @@ def parse_pdf(
             if page_no == 1:
                 first_page_text = text
             blocks = [block_tuple_to_dict(block) for block in page.get_text("blocks", sort=True)]
+            assign_block_source_ids(paper.paper_id, page_no, blocks)
             words = [word_tuple_to_dict(word) for word in page.get_text("words", sort=True)]
             page_dict = page.get_text("dict")
             images = extract_images(page_dict)
@@ -357,6 +385,7 @@ def parse_pdf(
             tables = attach_table_captions(extract_tables(page), captions)
             sections = infer_section_candidates(blocks)
             figures = infer_figures(images, captions)
+            assign_visual_source_ids(paper.paper_id, page_no, figures, tables)
 
             render_path = render_dir / f"page_{page_no:04d}.png"
             matrix = fitz.Matrix(render_zoom, render_zoom)

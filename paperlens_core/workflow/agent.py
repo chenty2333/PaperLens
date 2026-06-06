@@ -4,7 +4,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -18,7 +17,6 @@ from paperlens_core.config import CoreConfig
 from paperlens_core.control import ControlState
 from paperlens_core.db import ArtifactDb
 from paperlens_core.events import EventWriter, write_json
-from paperlens_core.library import write_paperlens_library
 from paperlens_core.pdf.ingest import scan_pdfs
 from paperlens_core.pdf.layout_index import build_layout_index
 from paperlens_core.pdf.pymupdf_parser import parse_pdf
@@ -26,26 +24,21 @@ from paperlens_core.pdf.qa import parse_quality
 from paperlens_core.quality_snapshot import write_core_quality_snapshot
 from paperlens_core.report import (
     classification_counts,
-    compact_reason,
-    markdown_title,
     paper_report_filename,
-    render_core_graph_report_view,
-    render_paperlens_report,
 )
 from paperlens_core.runtime import (
     llm_cache_path,
     read_llm_cache,
     write_llm_cache,
 )
-from paperlens_core.library_graph import read_core_v2_graph_summary
 from paperlens_core.schemas import (
     ArtifactVersion,
     ClassificationDecision,
-    EvidenceRef,
     PaperRecord,
     ReviewItem,
     SkimCard,
 )
+from paperlens_core.workflow.export import write_final_report_bundle
 from paperlens_core.state import transition_state
 from paperlens_core.workflow.manifest import (
     summarize_model_calls,
@@ -56,10 +49,17 @@ from paperlens_core.workflow.stages import (
     normalize_workflow_stage,
     resolve_workflow_stages,
 )
+from paperlens_core.workflow.skim import deterministic_skim_classify
 from paperlens_core.workflow.core_v2 import (
     refresh_core_v2_audit_artifacts,
     run_core_v2_model_observation_tasks,
     write_core_v2_artifacts,
+)
+from paperlens_core.workflow.visual import (
+    VLM_PAGE_NOTES_SCHEMA,
+    VLM_PAGE_READER_SYSTEM_PROMPT,
+    build_vlm_page_prompt,
+    hash_file_bytes,
 )
 
 
@@ -1009,122 +1009,6 @@ class PaperLensWorkflow:
         return manifest
 
 
-VLM_PAGE_READER_SYSTEM_PROMPT = """
-You are the PaperLens VLMPageReader.
-Read rendered PDF page images directly. Extract only visible page facts useful for later
-evidence binding: architecture diagrams, tables, plots, captions, section titles, and text
-that was likely missed by text extraction. Do not invent content. Return JSON only.
-""".strip()
-
-
-VLM_PAGE_NOTES_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["visual_summary", "page_notes", "risk_notes"],
-    "properties": {
-        "visual_summary": {"type": "string"},
-        "risk_notes": {"type": "array", "items": {"type": "string"}},
-        "page_notes": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["page_no", "visible_text", "figures", "tables", "evidence_queries"],
-                "properties": {
-                    "page_no": {"type": "integer", "minimum": 1},
-                    "visible_text": {"type": "array", "items": {"type": "string"}},
-                    "figures": {"type": "array", "items": {"type": "string"}},
-                    "tables": {"type": "array", "items": {"type": "string"}},
-                    "evidence_queries": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "additionalProperties": False,
-                            "required": ["keyword", "quote"],
-                            "properties": {
-                                "keyword": {"type": ["string", "null"]},
-                                "quote": {"type": ["string", "null"]},
-                            },
-                        },
-                    },
-                },
-            },
-        },
-    },
-}
-
-
-def deterministic_skim_classify(
-    paper: PaperRecord,
-    artifacts: list[Any],
-    keyword_pool: list[str],
-) -> tuple[SkimCard, ClassificationDecision]:
-    text = "\n".join(page.text for page in artifacts[:3])
-    signals = keyword_hits(text + "\n" + (paper.canonical_title or ""), keyword_pool)
-    first_ref = first_evidence_ref(paper.paper_id, artifacts, signals)
-    card = SkimCard(
-        paper_id=paper.paper_id,
-        problem=first_sentence(text) or paper.canonical_title,
-        method_type=infer_method_type(text),
-        system_scope=infer_scope(text),
-        evaluation_type=infer_evaluation(text),
-        danger_signals=signals,
-        evidence_refs=[first_ref] if first_ref else [],
-        confidence=min(0.9, 0.35 + 0.12 * len(signals)),
-    )
-    return card, classify_paper(paper, card)
-
-
-def build_vlm_page_prompt(*, paper: PaperRecord, artifacts: list[Any]) -> str:
-    pages = []
-    for artifact in artifacts:
-        pages.append(
-            {
-                "page_no": artifact.page_no,
-                "render_path": artifact.render_path,
-                "parse_flags": artifact.low_confidence_flags,
-                "text_preview": normalize_excerpt(artifact.text or "", limit=900),
-                "captions": artifact.captions[:4],
-            }
-        )
-    return "\n\n".join(
-        [
-            f"paper_id: {paper.paper_id}",
-            f"title: {paper.canonical_title or 'unknown'}",
-            f"parse_quality: {paper.parse_quality or 'unknown'}",
-            "Images are supplied in the same order as this page metadata.",
-            "Extract visible page facts, figure/table readings, and evidence queries.",
-            json.dumps(pages, ensure_ascii=False),
-        ]
-    )
-
-
-def dedupe_artifacts_by_page(artifacts: list[Any]) -> list[Any]:
-    seen = set()
-    result = []
-    for artifact in artifacts:
-        page_no = getattr(artifact, "page_no", None)
-        if page_no in seen:
-            continue
-        seen.add(page_no)
-        result.append(artifact)
-    return result
-
-
-def hash_file_bytes(path: Path) -> str:
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
-    except OSError:
-        return "missing"
-
-
-def normalize_excerpt(text: str, *, limit: int) -> str:
-    cleaned = re.sub(r"\s+", " ", text).strip()
-    if len(cleaned) <= limit:
-        return cleaned
-    return cleaned[:limit].rsplit(" ", 1)[0] + " ..."
-
-
 def normalize_for_search(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().lower()
 
@@ -1133,211 +1017,9 @@ def hash_text(value: str) -> str:
     return hashlib.sha256(normalize_for_search(value).encode("utf-8")).hexdigest()[:16]
 
 
-def keyword_hits(text: str, keywords: list[str]) -> list[str]:
-    lowered = text.lower()
-    hits = []
-    for keyword in keywords:
-        if keyword.lower() in lowered:
-            hits.append(keyword)
-    return sorted(set(hits), key=str.lower)
-
-
-def first_sentence(text: str) -> str | None:
-    cleaned = re.sub(r"\s+", " ", text).strip()
-    if not cleaned:
-        return None
-    match = re.match(r"(.{30,240}?[.!?])\s", cleaned)
-    return match.group(1) if match else cleaned[:240]
-
-
-def first_evidence_ref(
-    paper_id: str,
-    artifacts: list[Any],
-    signals: list[str],
-) -> EvidenceRef | None:
-    if not artifacts:
-        return None
-    needle = signals[0] if signals else None
-    for page in artifacts:
-        if needle and needle.lower() not in page.text.lower():
-            continue
-        bbox = page.words[0]["bbox"] if page.words else None
-        return EvidenceRef(
-            paper_id=paper_id,
-            page_no=page.page_no,
-            bbox=bbox,
-            text_span_id=f"page_{page.page_no}_first_match",
-            verification_status="WEAK_VERIFIED",
-        )
-    page = artifacts[0]
-    return EvidenceRef(
-        paper_id=paper_id,
-        page_no=page.page_no,
-        bbox=page.words[0]["bbox"] if page.words else None,
-        text_span_id=f"page_{page.page_no}_first_span",
-        verification_status="WEAK_VERIFIED",
-    )
-
-
-def infer_method_type(text: str) -> str:
-    lowered = text.lower()
-    if "system" in lowered or "runtime" in lowered:
-        return "system"
-    if "analysis" in lowered or "formal" in lowered:
-        return "analysis"
-    if "survey" in lowered:
-        return "survey"
-    return "unknown"
-
-
-def infer_scope(text: str) -> str:
-    lowered = text.lower()
-    if "webassembly" in lowered or "wasm" in lowered:
-        return "webassembly_runtime"
-    if "kernel" in lowered:
-        return "kernel"
-    if "virtual machine" in lowered or "vm" in lowered:
-        return "vm"
-    return "unknown"
-
-
-def infer_evaluation(text: str) -> str:
-    lowered = text.lower()
-    if "benchmark" in lowered or "throughput" in lowered or "latency" in lowered:
-        return "performance"
-    if "case study" in lowered:
-        return "case_study"
-    if "proof" in lowered:
-        return "formal"
-    return "unknown"
-
-
-def classify_paper(paper: PaperRecord, card: SkimCard) -> ClassificationDecision:
-    if paper.parse_quality in {"OCR_REQUIRED", "VLM_PAGE_MODE"}:
-        return ClassificationDecision(
-            paper_id=paper.paper_id,
-            class_label="HOLD",
-            confidence=0.3,
-            false_negative_risk=0.8,
-            reason_codes=[str(paper.parse_quality).lower()],
-        )
-    if paper.parse_quality == "PASS_WITH_WEAKNESSES" and not card.evidence_refs:
-        return ClassificationDecision(
-            paper_id=paper.paper_id,
-            class_label="HOLD",
-            confidence=0.35,
-            false_negative_risk=0.7,
-            reason_codes=["weak_parse_without_evidence"],
-        )
-    signal_count = len(card.danger_signals)
-    if signal_count >= 3:
-        label = "A"
-    elif signal_count >= 1:
-        label = "B"
-    else:
-        label = "C"
-    return ClassificationDecision(
-        paper_id=paper.paper_id,
-        class_label=label,
-        confidence=min(0.92, 0.45 + 0.15 * signal_count),
-        false_negative_risk=max(0.25 if label == "C" else 0.1, 0.75 - 0.16 * signal_count),
-        reason_codes=[f"keyword:{signal}" for signal in card.danger_signals]
-        or ["no_keyword_signal"],
-    )
-
-
 def chunked(items: list[Any], size: int) -> list[list[Any]]:
     size = max(1, size)
     return [items[index : index + size] for index in range(0, len(items), size)]
-
-
-def bounded_env_int(name: str, *, default: int, minimum: int, maximum: int) -> int:
-    try:
-        value = int(os.getenv(name, str(default)))
-    except ValueError:
-        value = default
-    return max(minimum, min(value, maximum))
-
-
-def write_final_report_bundle(
-    *,
-    output_dir: Path,
-    data_dir: Path,
-    papers: list[PaperRecord],
-    skim_cards: list[SkimCard],
-    decisions: list[ClassificationDecision],
-    review_items: list[ReviewItem],
-    budget: dict[str, Any],
-    budget_provider: Any | None = None,
-    config: dict[str, Any],
-    topic: str | None,
-    idea: str | None,
-) -> list[Path]:
-    formal_run = not bool(config.get("offline_debug"))
-    output_language = str(config.get("output_language") or "zh")
-    if output_language not in {"zh", "en"}:
-        output_language = "zh"
-    read_mode = str(config.get("read_mode") or "standard")
-    if read_mode != "standard":
-        raise ValueError("PaperLens Core currently supports only read_mode='standard'")
-    skim_by_id = {card.paper_id: card for card in skim_cards}
-    decision_by_id = {decision.paper_id: decision for decision in decisions}
-    paper_report_rows: list[dict[str, Any]] = []
-    written: list[Path] = []
-
-    for paper in papers:
-        skim = skim_by_id.get(paper.paper_id)
-        decision = decision_by_id.get(paper.paper_id)
-        report_name = paper_report_filename(paper)
-        report_path = output_dir / "papers" / report_name
-        report_markdown = render_core_graph_report_view(
-            data_dir=data_dir,
-            paper_id=paper.paper_id,
-            title=paper.canonical_title or paper.paper_id,
-        )
-        if report_markdown is None:
-            raise RuntimeError(
-                f"Core v2 report is required for {paper.paper_id}; export only publishes "
-                "reviewed ClaimGraph reports"
-            )
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(report_markdown, encoding="utf-8")
-        written.append(report_path)
-        graph_summary = read_core_v2_graph_summary(output_dir, paper.paper_id)
-        paper_report_rows.append(
-            {
-                "paper": paper,
-                "skim": skim,
-                "decision": decision,
-                "report_name": report_name,
-                "core_graph_report_name": report_name,
-                "report_title": markdown_title(report_markdown) or paper.canonical_title,
-                "core_v2_graph_summary": graph_summary,
-            }
-        )
-
-    final_budget = budget_provider() if budget_provider else budget
-    paperlens_report = render_paperlens_report(
-        rows=paper_report_rows,
-        review_items=review_items,
-        budget=final_budget,
-        topic=topic,
-        idea=idea,
-        formal_run=formal_run,
-        output_language=output_language,
-    )
-    main_path = output_dir / "PaperLens.md"
-    main_path.write_text(paperlens_report, encoding="utf-8")
-    written.append(main_path)
-    written.extend(
-        write_paperlens_library(
-            output_dir=output_dir,
-            rows=paper_report_rows,
-            topic=topic,
-            idea=idea,
-        )
-    )
-    return written
 
 
 def utc_timestamp() -> str:
@@ -1357,12 +1039,3 @@ def load_layout_index(data_dir: Path, paper_id: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return value if isinstance(value, dict) else {}
-
-
-def copy_resources(resources_dir: Path, output_dir: Path) -> None:
-    if not resources_dir.exists():
-        return
-    target = output_dir / "resources_snapshot"
-    if target.exists():
-        shutil.rmtree(target)
-    shutil.copytree(resources_dir, target)

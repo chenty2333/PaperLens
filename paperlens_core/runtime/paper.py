@@ -5,9 +5,6 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from paperlens_core.dom import stable_source_id
-from paperlens_core.dom.paper_dom import split_paragraphs
-
 
 CONTEXT_PACK_SCHEMA_VERSION = "paperlens.context_pack.v1"
 
@@ -106,26 +103,26 @@ class PaperLensRuntime:
             results=[item for _score, _page_no, item in scored[:limit]],
         )
 
-    def read_pages(self, page_numbers: Iterable[int], *, text_limit: int = 1400) -> ToolObservation:
-        requested = []
-        for value in page_numbers:
-            try:
-                number = int(value)
-            except (TypeError, ValueError):
-                continue
-            if number > 0 and number not in requested:
-                requested.append(number)
-        by_no = {page_no(page): page for page in self.pages}
+    def read_sources(
+        self,
+        source_ids: Iterable[str],
+        *,
+        text_limit: int = 1400,
+    ) -> ToolObservation:
+        requested = dedupe_source_ids(source_ids)
         results = []
-        for number in requested:
-            page = by_no.get(number)
+        matched_ids = []
+        for source_id in requested:
+            page = self._page_for_source_id(source_id)
             if page is None:
                 continue
+            matched_ids.append(source_id)
             results.append(
                 {
-                    "page_no": number,
-                    "source_ids": page_source_ids(page),
-                    "text": compact_text(page_text(page), limit=text_limit),
+                    "source_id": source_id,
+                    "source_ids": [source_id],
+                    "page_no": page_no(page),
+                    "text": runtime_source_text_for_page(page, source_id, limit=text_limit),
                     "captions": page_captions(page)[:5],
                     "figures": page_list_field(page, "figures")[:4],
                     "tables": page_list_field(page, "tables")[:4],
@@ -133,8 +130,17 @@ class PaperLensRuntime:
                 }
             )
         return ToolObservation(
-            tool="paper.read_pages", query=",".join(map(str, requested)), results=results
+            tool="paper.read_sources",
+            query=",".join(requested),
+            results=results,
+            source_ids=matched_ids,
         )
+
+    def _page_for_source_id(self, source_id: str) -> Any | None:
+        for page in self.pages:
+            if source_id in page_source_ids(page):
+                return page
+        return None
 
     def find_figures(self, query: str, *, limit: int = 4) -> ToolObservation:
         terms = tokenize(query)
@@ -187,36 +193,35 @@ class PaperLensRuntime:
         classification: str | None = None,
         context: dict[str, Any] | None = None,
         focus_queries: Iterable[str] = (),
-        focus_pages: Iterable[int] = (),
+        focus_source_ids: Iterable[str] = (),
         read_artifacts: Iterable[Any] = (),
         output_contract: dict[str, Any] | None = None,
         search_limit: int = 4,
-        page_text_limit: int = 900,
+        source_text_limit: int = 900,
     ) -> ContextPack:
         context = context if isinstance(context, dict) else {}
         queries = dedupe_queries(focus_queries)
-        explicit_pages = unique_pages(focus_pages)
+        explicit_source_ids = dedupe_source_ids(focus_source_ids)
         tool_trace: list[dict[str, Any]] = []
-        candidate_pages: list[int] = []
+        candidate_source_ids: list[str] = []
         for query in queries[:5]:
             observation = self.search_text(query, limit=search_limit)
             tool_trace.append(observation.as_dict())
             for result in observation.results[:2]:
-                add_page(candidate_pages, result.get("page_no"))
-        for page in explicit_pages:
-            add_page(candidate_pages, page)
-        if candidate_pages:
+                for source_id in list_payload(result.get("source_ids"))[:4]:
+                    add_source_id(candidate_source_ids, source_id)
+        for source_id in explicit_source_ids:
+            add_source_id(candidate_source_ids, source_id)
+        if candidate_source_ids:
             tool_trace.append(
-                self.read_pages(candidate_pages[:8], text_limit=page_text_limit).as_dict()
+                self.read_sources(candidate_source_ids[:16], text_limit=source_text_limit).as_dict()
             )
         if queries:
             tool_trace.append(self.find_figures(" ".join(queries[:2]), limit=3).as_dict())
-        already_read = sorted(
-            {
-                number
-                for number in (page_no(page) for page in read_artifacts)
-                if isinstance(number, int)
-            }
+        already_read_source_ids = dedupe_source_ids(
+            source_id
+            for artifact in read_artifacts
+            for source_id in page_source_ids(artifact)
         )
         base = build_always_context(
             paper_id=paper_id,
@@ -226,10 +231,12 @@ class PaperLensRuntime:
         )
         working = {
             "focus_queries": queries[:5],
-            "focus_pages": candidate_pages[:8],
-            "already_read_pages": already_read,
-            "unread_candidate_pages": [
-                page for page in candidate_pages[:8] if page not in set(already_read)
+            "focus_source_ids": candidate_source_ids[:16],
+            "already_read_source_ids": already_read_source_ids[:24],
+            "unread_candidate_source_ids": [
+                source_id
+                for source_id in candidate_source_ids[:16]
+                if source_id not in set(already_read_source_ids)
             ],
             "context_uncertainty": context_uncertainty(context),
         }
@@ -246,8 +253,8 @@ class PaperLensRuntime:
             },
             budget={
                 "search_queries": min(len(queries), 5),
-                "candidate_pages": min(len(candidate_pages), 8),
-                "page_text_limit": page_text_limit,
+                "candidate_source_ids": min(len(candidate_source_ids), 16),
+                "source_text_limit": source_text_limit,
                 "whole_paper_in_context": False,
             },
         )
@@ -272,8 +279,8 @@ def build_always_context(
                 "provenance": claim.get("provenance"),
                 "confidence": claim.get("confidence"),
                 "critic_status": claim.get("critic_status"),
-                "evidence_refs": claim.get("evidence_refs")
-                if isinstance(claim.get("evidence_refs"), list)
+                "source_ids": claim.get("source_ids")
+                if isinstance(claim.get("source_ids"), list)
                 else [],
             }
         )
@@ -337,22 +344,6 @@ def context_pack_prompt(pack: ContextPack | dict[str, Any] | None) -> str:
         return "{}"
     payload = pack.as_dict() if isinstance(pack, ContextPack) else pack
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
-
-
-def unique_pages(values: Iterable[Any]) -> list[int]:
-    pages: list[int] = []
-    for value in values:
-        add_page(pages, value)
-    return pages
-
-
-def add_page(pages: list[int], value: Any) -> None:
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        return
-    if number > 0 and number not in pages:
-        pages.append(number)
 
 
 def dedupe_queries(values: Iterable[Any]) -> list[str]:
@@ -422,18 +413,12 @@ def page_text_source_ids(page: Any, *, terms: list[str] | None = None) -> list[s
         text = str(block.get("text") or "")
         if terms and not any(term in normalize_for_search(text) for term in terms):
             continue
-        source_id = str(block.get("source_id") or block.get("text_span_id") or "").strip()
+        source_id = str(block.get("source_id") or "").strip()
         if source_id:
             source_ids.append(source_id)
-        elif text.strip():
-            source_ids.append(generated_source_id(page, "span", index))
     if source_ids:
         return dedupe_source_ids(source_ids)
-    for index, paragraph in enumerate(split_paragraphs(page_text(page)), start=1):
-        if terms and not any(term in normalize_for_search(paragraph) for term in terms):
-            continue
-        source_ids.append(generated_source_id(page, "span", index))
-    return dedupe_source_ids(source_ids)
+    return []
 
 
 def page_visual_source_ids(page: Any) -> list[str]:
@@ -442,10 +427,24 @@ def page_visual_source_ids(page: Any) -> list[str]:
         for index, item in enumerate(page_list_field(page, field_name), start=1):
             if isinstance(item, dict):
                 source_id = str(item.get("source_id") or "").strip()
-                source_ids.append(source_id or generated_source_id(page, kind, index))
-            elif item is not None:
-                source_ids.append(generated_source_id(page, kind, index))
+                if source_id:
+                    source_ids.append(source_id)
     return dedupe_source_ids(source_ids)
+
+
+def runtime_source_text_for_page(page: Any, source_id: str, *, limit: int) -> str:
+    for block in page_list_field(page, "blocks"):
+        if not isinstance(block, dict):
+            continue
+        if str(block.get("source_id") or "").strip() == source_id:
+            return compact_text(str(block.get("text") or ""), limit=limit)
+    for field_name in ("figures", "tables"):
+        for item in page_list_field(page, field_name):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("source_id") or "").strip() == source_id:
+                return compact_text(json.dumps(item, ensure_ascii=False), limit=limit)
+    return ""
 
 
 def explicit_source_ids(page: Any) -> list[str]:
@@ -462,16 +461,6 @@ def source_ids_from_results(results: list[dict[str, Any]]) -> list[str]:
     return dedupe_source_ids(source_ids)
 
 
-def generated_source_id(page: Any, kind: str, index: int) -> str:
-    number = page_no(page) or "unknown"
-    return stable_source_id(page_paper_id(page), kind, f"p{number}", index)
-
-
-def page_paper_id(page: Any) -> str:
-    value = page.get("paper_id") if isinstance(page, dict) else getattr(page, "paper_id", None)
-    return str(value or "unknown").strip() or "unknown"
-
-
 def dedupe_source_ids(values: Iterable[Any]) -> list[str]:
     result = []
     for value in values:
@@ -479,6 +468,12 @@ def dedupe_source_ids(values: Iterable[Any]) -> list[str]:
         if source_id and source_id not in result:
             result.append(source_id)
     return result
+
+
+def add_source_id(source_ids: list[str], value: Any) -> None:
+    source_id = str(value or "").strip()
+    if source_id and source_id not in source_ids:
+        source_ids.append(source_id)
 
 
 def dict_value(value: Any) -> dict[str, Any]:
