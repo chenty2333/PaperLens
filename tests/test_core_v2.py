@@ -1212,6 +1212,75 @@ def test_core_graph_report_view_is_materialized_from_typed_artifacts(tmp_path):
     assert f"PaperDOM sources: `{source_id}`" in markdown
 
 
+def test_core_graph_report_view_uses_manifest_current_publish_status(tmp_path):
+    data_dir = tmp_path / "data"
+    output_dir = tmp_path / "out"
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    layout = {
+        "pages": [
+            {
+                "page_no": 1,
+                "text": "Abstract\n\nWe propose a block table method for serving.",
+                "section_candidates": [{"title": "Abstract", "level": 1}],
+            }
+        ]
+    }
+    dom = build_paper_dom_from_layout(
+        paper_id=paper.paper_id,
+        title=paper.canonical_title,
+        layout=layout,
+    )
+    source_id = next(span.source_id for span in dom.spans if "block table method" in span.text)
+    reading_plan = reading_plan_subset(dom, ReadingTaskType.CLAIM_INVENTORY)
+    claim_task = reading_task(reading_plan, ReadingTaskType.CLAIM_INVENTORY)
+    write_core_v2_from_observation_log(
+        data_dir=data_dir,
+        paper=paper,
+        dom=dom,
+        reading_plan=reading_plan,
+        observation_log=ObservationLog(paper_id="p_test").append(
+            ObservationCard(
+                observation_id="obs_claim",
+                paper_id="p_test",
+                task_id=claim_task.task_id,
+                observation_type=ObservationType.CLAIM,
+                statement="The paper proposes a block table method.",
+                source_ids=[source_id],
+                confidence="low",
+                covered_outputs=claim_task.required_outputs,
+            )
+        ),
+        producer="unit_test",
+    )
+    root = data_dir / "core" / "v2" / "p_test"
+    write_typed_artifact(
+        root / "quality_metrics.v1.json",
+        artifact_type="core_quality_metrics",
+        data={"paper_id": "p_test", "publish_status": PublishStatus.REVIEWED},
+        producer="unit_test_stale_quality",
+        metadata={"paper_id": "p_test"},
+    )
+
+    path = write_core_graph_report_view(
+        output_dir=output_dir,
+        data_dir=data_dir,
+        paper_id="p_test",
+        title="Test Paper",
+        report_name="test.md",
+    )
+
+    assert path is not None
+    markdown = path.read_text(encoding="utf-8")
+    assert "Publish status: `REVIEWED_WITH_LIMITS`" in markdown
+    assert "Publish status: `REVIEWED`" not in markdown
+
+
 def test_report_audit_rejects_declared_evidence_not_linked_to_declared_node():
     dom = sample_dom()
     first_source_id = dom.spans[0].source_id

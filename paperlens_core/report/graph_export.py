@@ -44,7 +44,10 @@ def write_core_graph_report_view(
     dom = PaperDOM.model_validate(dom_envelope.data)
     graph = ClaimGraph.model_validate(graph_envelope.data)
     draft = GraphReportDraft.model_validate(draft_envelope.data)
-    quality = quality_envelope.data if isinstance(quality_envelope.data, dict) else {}
+    quality = graph_report_quality_context(
+        quality_envelope.data if isinstance(quality_envelope.data, dict) else {},
+        manifest=manifest,
+    )
     markdown = render_graph_report_markdown(
         title=title or paper_id,
         draft=draft,
@@ -62,3 +65,23 @@ def core_graph_report_filename(report_name: str) -> str:
     if report_name.endswith(".md"):
         return report_name[:-3] + ".core_graph.md"
     return report_name + ".core_graph.md"
+
+
+def graph_report_quality_context(
+    quality: dict[str, object],
+    *,
+    manifest: dict[str, object],
+) -> dict[str, object]:
+    result = dict(quality)
+    for key in [
+        "publish_status",
+        "artifact_publish_status",
+        "current_audit_publish_status",
+        "current_audit_error_count",
+        "current_audit_warning_count",
+        "current_audit_issue_codes",
+    ]:
+        value = manifest.get(key)
+        if value is not None:
+            result[key] = value
+    return result
