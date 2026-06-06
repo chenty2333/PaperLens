@@ -297,16 +297,20 @@ def render_graph_report_markdown(
         lines.extend(["", f"**{label}** {anchor}"])
     lines.append("")
 
+    seen_text_keys: set[str] = set()
     for section in draft.sections:
         section_title = reader_section_title(section, output_language=output_language)
-        section_texts = [
-            text
-            for text in (
-                reader_markdown(paragraph.markdown, output_language=output_language)
-                for paragraph in section.paragraphs
-            )
-            if text
-        ]
+        section_texts = dedupe_reader_texts(
+            [
+                text
+                for text in (
+                    reader_markdown(paragraph.markdown, output_language=output_language)
+                    for paragraph in section.paragraphs
+                )
+                if text
+            ],
+            seen_text_keys=seen_text_keys,
+        )
         if not section_texts:
             continue
         lines.extend([f"## {section_title}", ""])
@@ -383,14 +387,14 @@ def review_status_label(status: str, *, output_language: str) -> str:
         return {
             "REVIEWED": "passed",
             "REVIEWED_WITH_LIMITS": "passed with limits",
-            "DRAFT_WEAK": "weak draft",
-            "BLOCKED": "blocked",
+            "DRAFT_WEAK": "draft with evidence limits",
+            "BLOCKED": "needs evidence check",
         }.get(normalized, "completed")
     return {
         "REVIEWED": "已通过",
         "REVIEWED_WITH_LIMITS": "通过但有边界",
-        "DRAFT_WEAK": "弱草稿",
-        "BLOCKED": "未通过",
+        "DRAFT_WEAK": "可读草稿",
+        "BLOCKED": "需要核对证据",
     }.get(normalized, "已完成")
 
 
@@ -438,6 +442,50 @@ def reader_markdown(markdown: str, *, output_language: str = "zh") -> str:
     return "\n".join(line for line in cleaned_lines if line.strip()).strip()
 
 
+def dedupe_reader_texts(texts: list[str], *, seen_text_keys: set[str]) -> list[str]:
+    result = []
+    for text in texts:
+        key = reader_text_key(text)
+        if not key:
+            continue
+        if key in seen_text_keys:
+            continue
+        if any(reader_text_similarity(key, existing) > 0.55 for existing in seen_text_keys):
+            continue
+        seen_text_keys.add(key)
+        result.append(text)
+    return result
+
+
+def reader_text_key(text: str) -> str:
+    cleaned = clean_internal_markers(strip_observation_prefix(text))
+    return " ".join(sorted(reader_text_tokens(cleaned))[:120])
+
+
+def reader_text_tokens(text: str) -> set[str]:
+    tokens: set[str] = set()
+    for chunk in re.findall(r"[\u4e00-\u9fff]+|[a-z0-9][a-z0-9_+./%-]{2,}", text.lower()):
+        if re.fullmatch(r"[\u4e00-\u9fff]+", chunk):
+            if len(chunk) <= 12:
+                tokens.add(chunk)
+            for size in (2, 3, 4):
+                if len(chunk) >= size:
+                    tokens.update(
+                        chunk[index : index + size] for index in range(len(chunk) - size + 1)
+                    )
+            continue
+        tokens.add(chunk.strip("._-/"))
+    return {token for token in tokens if token}
+
+
+def reader_text_similarity(left: str, right: str) -> float:
+    left_tokens = set(left.split())
+    right_tokens = set(right.split())
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / max(len(left_tokens), len(right_tokens))
+
+
 def strip_observation_prefix(text: str) -> str:
     return re.sub(
         r"^(问题定位|核心主张|方法机制|实现路径|评估设置|实验结果|限制边界|概念桥接|相关工作定位|可复现性)证据：\s*",
@@ -450,11 +498,21 @@ def is_english_mechanical_evidence(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
         return True
-    if stripped.lower().startswith(("abstract-", "abstract—", "to solve ", "where c ")):
+    if stripped.lower().startswith(
+        (
+            "abstract-",
+            "abstract—",
+            "to solve ",
+            "where c ",
+            "the proposed ",
+            "we present ",
+            "we propose ",
+        )
+    ):
         return True
     cjk = len(re.findall(r"[\u4e00-\u9fff]", stripped))
     latin = len(re.findall(r"[A-Za-z]", stripped))
-    return cjk < 8 and latin > 40
+    return cjk < 8 and latin > 24
 
 
 def is_internal_report_line(line: str) -> bool:

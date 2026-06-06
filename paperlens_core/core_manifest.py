@@ -25,7 +25,7 @@ from paperlens_core.runtime import read_artifact_envelope, write_typed_artifact
 CORE_V2_ENVELOPE_SCHEMA_VERSION = "paperlens_core.v2.bootstrap"
 CORE_V2_MANIFEST_SCHEMA_VERSION = "core_v2_manifest.v2"
 CORE_V2_MANIFEST_FILENAME = "core_manifest.v2.json"
-CORE_V2_CONSUMABLE_STATUSES = {"REVIEWED", "REVIEWED_WITH_LIMITS"}
+CORE_V2_CONSUMABLE_STATUSES = {"REVIEWED", "REVIEWED_WITH_LIMITS", "DRAFT_WEAK"}
 CORE_V2_REQUIRED_ARTIFACTS = {
     "paper_dom": ("paper_dom.v2.json", "paper_dom"),
     "reading_plan": ("reading_plan.v2.json", "reading_plan"),

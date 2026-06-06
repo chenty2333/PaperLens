@@ -144,6 +144,14 @@ TASK_KEYWORDS: dict[ReadingTaskType, tuple[str, ...]] = {
         "database",
         "baseline",
         "metric",
+        "training",
+        "testing",
+        "source domain",
+        "target domain",
+        "tid2013",
+        "kadid",
+        "sjt",
+        "wpc",
         "plcc",
         "srocc",
         "krocc",
@@ -155,8 +163,16 @@ TASK_KEYWORDS: dict[ReadingTaskType, tuple[str, ...]] = {
         "table",
         "figure",
         "performance",
+        "comparison",
+        "proposed",
         "outperform",
+        "best",
+        "improvement",
         "gain",
+        "plcc",
+        "srocc",
+        "krocc",
+        "rmse",
     ),
     ReadingTaskType.LIMITATIONS: ("limitation", "discussion", "failure", "future work"),
     ReadingTaskType.CONCEPT_BRIDGE: ("background", "preliminary", "definition"),
@@ -318,16 +334,33 @@ def _select_sources_for_task_type(
         if any(keyword in haystack for keyword in keywords):
             matches.append(span.source_id)
 
+    if task_type in {
+        ReadingTaskType.METHOD_MECHANISM,
+        ReadingTaskType.IMPLEMENTATION_PATH,
+        ReadingTaskType.CONCEPT_BRIDGE,
+    }:
+        matches.extend(item.source_id for item in dom.figures if source_text(item))
+    if task_type in {
+        ReadingTaskType.EVALUATION_SETUP,
+        ReadingTaskType.RESULT_EXTRACTION,
+    }:
+        matches.extend(item.source_id for item in [*dom.tables, *dom.figures] if source_text(item))
     if task_type in EQUATION_READING_TASKS:
         matches.extend(item.source_id for item in dom.equations)
-    if task_type == ReadingTaskType.RESULT_EXTRACTION:
-        matches.extend(item.source_id for item in [*dom.figures, *dom.tables])
 
-    matches = prioritize_task_source_ids(matches, spans_by_id, keywords, task_type)
+    matches = prioritize_task_source_ids(matches, dom, keywords, task_type, section_titles)
+    sources_by_id = source_lookup(dom)
     deduped: list[str] = []
+    seen_text_keys: set[str] = set()
     for source_id in matches:
-        if source_id and source_id not in deduped:
-            deduped.append(source_id)
+        if not source_id or source_id in deduped:
+            continue
+        text_key = source_dedupe_key(sources_by_id.get(source_id))
+        if text_key and text_key in seen_text_keys:
+            continue
+        if text_key:
+            seen_text_keys.add(text_key)
+        deduped.append(source_id)
         if len(deduped) >= limit:
             return deduped
 
@@ -338,36 +371,165 @@ def _select_sources_for_task_type(
 
 def prioritize_task_source_ids(
     source_ids: list[str],
-    spans_by_id: dict[str, Any],
+    dom: PaperDOM,
     keywords: tuple[str, ...],
     task_type: ReadingTaskType,
+    section_titles: dict[str, str] | None = None,
 ) -> list[str]:
+    section_titles = section_titles or {
+        section.source_id: normalize_heading_text(section.title) for section in dom.sections
+    }
+    sources_by_id = source_lookup(dom)
+    max_page = max_source_page(dom)
     indexed = list(enumerate(source_ids))
 
     def sort_key(item: tuple[int, str]) -> tuple[float, int]:
         index, source_id = item
-        span = spans_by_id.get(source_id)
-        if span is None:
-            return (0.0, index)
-        text = " ".join(str(getattr(span, "text", "") or "").split())
+        source = sources_by_id.get(source_id)
+        if source is None:
+            return (9999.0, index)
+        text = " ".join(source_text(source).split())
         text_lower = text.lower()
         length = len(text)
-        score = min(length, 1800) / 10.0
-        if is_bad_candidate_text(text):
+        kind = str(getattr(source, "kind", "") or "")
+        score = min(length, 1800) / 12.0
+        if kind == "span" and is_bad_candidate_span(source, section_titles):
             score -= 320.0
         if length < 80:
             score -= 120.0
         if length >= 120:
             score += 80.0
-        if any(keyword in text_lower for keyword in keywords):
-            score += 180.0
+        keyword_hits = sum(1 for keyword in keywords if keyword in text_lower)
+        score += keyword_hits * 160.0
+        score += page_position_score(
+            task_type,
+            safe_page_no(getattr(source, "page_no", None)),
+            max_page=max_page,
+        )
+        score += source_kind_score(task_type, kind, text_lower)
         if task_type == ReadingTaskType.ORIENTATION and (
             "abstract" in text_lower or "introduction" in text_lower
         ):
             score += 240.0
+        if task_type in {ReadingTaskType.EVALUATION_SETUP, ReadingTaskType.RESULT_EXTRACTION}:
+            if "abstract" in text_lower and safe_page_no(getattr(source, "page_no", None)) <= 2:
+                score -= 260.0
+            if kind == "span" and safe_page_no(getattr(source, "page_no", None)) <= 3:
+                score -= 140.0
+        if task_type in {ReadingTaskType.METHOD_MECHANISM, ReadingTaskType.IMPLEMENTATION_PATH}:
+            page_no = safe_page_no(getattr(source, "page_no", None))
+            if kind == "span" and page_no <= 2:
+                score -= 180.0
+            if max_page > 1 and page_no / max_page > 0.76:
+                score -= 260.0
+        if task_type == ReadingTaskType.RELATED_POSITIONING and safe_page_no(
+            getattr(source, "page_no", None)
+        ) >= max_page - 1:
+            score -= 280.0
         return (-score, index)
 
     return [source_id for _, source_id in sorted(indexed, key=sort_key)]
+
+
+def source_lookup(dom: PaperDOM) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for source in [*dom.sections, *dom.spans, *dom.figures, *dom.tables, *dom.equations]:
+        result[source.source_id] = source
+    return result
+
+
+def source_text(source: Any) -> str:
+    return str(
+        getattr(source, "text", None)
+        or getattr(source, "caption", None)
+        or getattr(source, "latex_or_text", None)
+        or getattr(source, "title", None)
+        or ""
+    ).strip()
+
+
+def source_dedupe_key(source: Any | None) -> str:
+    if source is None:
+        return ""
+    text = " ".join(source_text(source).lower().split())
+    if len(text) < 60:
+        return ""
+    return text[:220]
+
+
+def max_source_page(dom: PaperDOM) -> int:
+    pages = [
+        safe_page_no(getattr(source, "page_no", None))
+        for source in [*dom.spans, *dom.figures, *dom.tables, *dom.equations]
+    ]
+    return max([page for page in pages if page > 0], default=1)
+
+
+def safe_page_no(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def page_position_score(
+    task_type: ReadingTaskType,
+    page_no: int,
+    *,
+    max_page: int,
+) -> float:
+    if page_no <= 0 or max_page <= 1:
+        return 0.0
+    position = page_no / max_page
+    windows = {
+        ReadingTaskType.ORIENTATION: (0.0, 0.25, 190.0),
+        ReadingTaskType.CLAIM_INVENTORY: (0.0, 0.32, 160.0),
+        ReadingTaskType.CONCEPT_BRIDGE: (0.05, 0.55, 120.0),
+        ReadingTaskType.RELATED_POSITIONING: (0.08, 0.45, 150.0),
+        ReadingTaskType.METHOD_MECHANISM: (0.25, 0.72, 220.0),
+        ReadingTaskType.IMPLEMENTATION_PATH: (0.32, 0.72, 190.0),
+        ReadingTaskType.EVALUATION_SETUP: (0.62, 0.88, 260.0),
+        ReadingTaskType.RESULT_EXTRACTION: (0.68, 0.95, 300.0),
+        ReadingTaskType.LIMITATIONS: (0.72, 1.0, 160.0),
+        ReadingTaskType.REPRODUCIBILITY: (0.55, 0.95, 140.0),
+    }
+    start, end, bonus = windows[task_type]
+    if start <= position <= end:
+        return bonus
+    distance = start - position if position < start else position - end
+    return -min(distance * 420.0, bonus * 0.9)
+
+
+def source_kind_score(task_type: ReadingTaskType, kind: str, text_lower: str) -> float:
+    if kind == "table":
+        if task_type == ReadingTaskType.RESULT_EXTRACTION:
+            return 420.0
+        if task_type == ReadingTaskType.EVALUATION_SETUP:
+            return 320.0
+        return -80.0
+    if kind == "figure":
+        if task_type in {ReadingTaskType.METHOD_MECHANISM, ReadingTaskType.IMPLEMENTATION_PATH}:
+            return 220.0
+        if task_type in {ReadingTaskType.EVALUATION_SETUP, ReadingTaskType.RESULT_EXTRACTION}:
+            return 140.0
+        if task_type == ReadingTaskType.CONCEPT_BRIDGE:
+            return 120.0
+        return 0.0
+    if kind == "equation":
+        if task_type in EQUATION_READING_TASKS:
+            return 180.0
+        return -120.0
+    if task_type == ReadingTaskType.RESULT_EXTRACTION and any(
+        marker in text_lower
+        for marker in ("table", "performance", "ablation", "outperform", "best")
+    ):
+        return 160.0
+    if task_type == ReadingTaskType.EVALUATION_SETUP and any(
+        marker in text_lower
+        for marker in ("dataset", "database", "metric", "baseline", "plcc", "srocc", "rmse")
+    ):
+        return 160.0
+    return 0.0
 
 
 def _positional_fallback(

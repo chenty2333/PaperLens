@@ -149,11 +149,20 @@ def audit_claim_graph(graph: ClaimGraph, dom: PaperDOM) -> list[AuditFinding]:
                 for source_id in evidence_source_ids
                 if (text := source_text_for_id(dom, source_id))
             ]
-            if evidence_texts and not text_overlaps_any_reference(node.label, evidence_texts):
+            evidence_quotes = normalized_string_list(node.payload.get("evidence_quotes"))
+            quote_is_located = bool(evidence_quotes) and text_overlaps_any_reference(
+                " ".join(evidence_quotes),
+                evidence_texts,
+            )
+            if (
+                evidence_texts
+                and not text_overlaps_any_reference(node.label, evidence_texts)
+                and not quote_is_located
+            ):
                 findings.append(
                     AuditFinding(
                         finding_id=f"source_text_mismatch:{node.node_id}",
-                        severity=AuditSeverity.ERROR,
+                        severity=AuditSeverity.WARNING,
                         code="fact_node_text_not_grounded_in_evidence_source",
                         message=(
                             f"{node.kind} node text does not overlap its declared PaperDOM "
@@ -370,6 +379,34 @@ def audit_observation_log(
                     severity=AuditSeverity.ERROR,
                     code="observation_card_invalid_covered_outputs",
                     message="Observation card covered_outputs are not required by its ReadingTask",
+                )
+            )
+        source_texts = [
+            text
+            for source_id in card.source_ids
+            if source_id in dom_source_ids and (text := source_text_for_id(dom, source_id))
+        ]
+        if source_texts and not card.evidence_quotes:
+            findings.append(
+                AuditFinding(
+                    finding_id=f"observation_missing_evidence_quotes:{card.observation_id}",
+                    severity=AuditSeverity.WARNING,
+                    code="observation_card_missing_evidence_quotes",
+                    message="Observation card should keep short source quotes for deterministic grounding",
+                    source_ids=card.source_ids,
+                )
+            )
+        if card.evidence_quotes and source_texts and not text_overlaps_any_reference(
+            " ".join(card.evidence_quotes),
+            source_texts,
+        ):
+            findings.append(
+                AuditFinding(
+                    finding_id=f"observation_quote_not_located:{card.observation_id}",
+                    severity=AuditSeverity.WARNING,
+                    code="observation_card_evidence_quote_not_located",
+                    message="Observation evidence_quotes do not visibly overlap declared source text",
+                    source_ids=card.source_ids,
                 )
             )
     return findings
@@ -589,3 +626,14 @@ def number_text_is_located(number_text: str, source_text: str) -> bool:
 
 def normalized_number_text(text: str) -> str:
     return re.sub(r"[\s,]+", "", str(text or "").casefold())
+
+
+def normalized_string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result = []
+    for item in value:
+        text = " ".join(str(item or "").split()).strip()
+        if text and text not in result:
+            result.append(text)
+    return result

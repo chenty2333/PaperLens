@@ -129,6 +129,9 @@ def validate_paperlens_output(
         "observation_id",
         "span:",
         "obs_",
+        "Abstract—",
+        "Abstract-",
+        "证据：",
         "supplied excerpts",
         "the user provided",
         "你给到",
@@ -150,6 +153,10 @@ def validate_paperlens_output(
         for marker in render_markers:
             if marker in markdown:
                 issues.append(f"Escaped newline marker in PaperLens.md: {marker}")
+        for marker in reader_hostile_markers:
+            if marker in markdown:
+                issues.append(f"Reader-hostile implementation wording in PaperLens.md: {marker}")
+                break
         for target in main_report_link_targets:
             checked_links += 1
             target_path = resolve_markdown_target(output_dir, target)

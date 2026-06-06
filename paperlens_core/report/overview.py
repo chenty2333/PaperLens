@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from paperlens_core.library_graph import first_graph_label
+from paperlens_core.library_graph import graph_node_labels
 from paperlens_core.report.rows import (
     classification_counts,
     reading_priority_key,
@@ -66,7 +66,7 @@ def render_paperlens_report(
 
     for row in ranked:
         decision = row_decision(row)
-        reason = one_line_row_reason(row)
+        reason = one_line_row_reason(row, output_language=output_language)
         graph_link = core_graph_report_link(row, output_language=output_language)
         suffix = f"；{graph_link}" if graph_link and output_language != "en" else ""
         if graph_link and output_language == "en":
@@ -107,13 +107,44 @@ def core_graph_report_link(row: dict[str, Any], *, output_language: str) -> str:
     return f"[{label}](./papers/{name})"
 
 
-def one_line_row_reason(row: dict[str, Any]) -> str:
+def one_line_row_reason(row: dict[str, Any], *, output_language: str = "zh") -> str:
     graph_summary = row.get("core_v2_graph_summary")
     if isinstance(graph_summary, dict):
-        reason = first_graph_label(graph_summary, "problem_nodes", "claim_nodes")
-        if reason:
-            return compact_reason(reason, max_chars=110)
-    return "No reviewed ClaimGraph summary."
+        for reason in graph_node_labels(
+            graph_summary,
+            "problem_nodes",
+            "claim_nodes",
+            "result_nodes",
+            "mechanism_nodes",
+        ):
+            reason = clean_overview_reason(reason, output_language=output_language)
+            if reason:
+                return compact_reason(reason, max_chars=110)
+    if output_language == "en":
+        return "No reviewed summary yet."
+    return "尚未生成可复核摘要。"
+
+
+def clean_overview_reason(reason: str, *, output_language: str) -> str:
+    cleaned = re.sub(
+        r"^(问题定位|核心主张|方法机制|实现路径|评估设置|实验结果|限制边界|概念桥接|相关工作定位|可复现性)证据：\s*",
+        "",
+        str(reason or "").strip(),
+    )
+    if not cleaned:
+        return ""
+    if output_language != "en" and overview_reason_is_english_fallback(cleaned):
+        return ""
+    return cleaned
+
+
+def overview_reason_is_english_fallback(text: str) -> bool:
+    stripped = text.strip()
+    if stripped.lower().startswith(("abstract-", "abstract—", "the proposed ", "we propose ", "we present ")):
+        return True
+    cjk = len(re.findall(r"[\u4e00-\u9fff]", stripped))
+    latin = len(re.findall(r"[A-Za-z]", stripped))
+    return cjk < 8 and latin > 24
 
 
 def markdown_title(markdown: str) -> str | None:

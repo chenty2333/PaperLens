@@ -1189,6 +1189,17 @@ def normalize_observation_card_payload(card: dict[str, Any]) -> dict[str, Any]:
         "covered_outputs": (
             card.get("covered_outputs") if isinstance(card.get("covered_outputs"), list) else []
         ),
+        "evidence_quotes": string_list_value(
+            card,
+            (
+                "evidence_quotes",
+                "source_quotes",
+                "supporting_quotes",
+                "quotes",
+                "source_snippets",
+                "evidence_snippets",
+            ),
+        ),
         "extracted_numbers": (
             card.get("extracted_numbers") if isinstance(card.get("extracted_numbers"), list) else []
         ),

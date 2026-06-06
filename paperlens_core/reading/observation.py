@@ -33,6 +33,7 @@ class ObservationCard(BaseModel):
     provenance: Literal["explicit", "inferred"] = "explicit"
     uncertainty: str | None = None
     covered_outputs: list[str] = Field(default_factory=list)
+    evidence_quotes: list[str] = Field(default_factory=list)
     extracted_numbers: list[dict[str, Any]] = Field(default_factory=list)
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -65,6 +66,16 @@ class ObservationCard(BaseModel):
             if text and text not in result:
                 result.append(text)
         return result
+
+    @field_validator("evidence_quotes")
+    @classmethod
+    def clean_evidence_quotes(cls, value: list[str]) -> list[str]:
+        result = []
+        for item in value:
+            text = " ".join(str(item or "").split()).strip()
+            if text and text not in result:
+                result.append(text[:260])
+        return result[:3]
 
 
 class ObservationLog(BaseModel):

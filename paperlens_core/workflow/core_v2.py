@@ -313,6 +313,11 @@ OBSERVATION_CARDS_SCHEMA: dict[str, Any] = {
                                 "type": "array",
                                 "items": {"type": "string"},
                             },
+                            "evidence_quotes": {
+                                "type": "array",
+                                "maxItems": 3,
+                                "items": {"type": "string"},
+                            },
                             "extracted_numbers": {
                                 "type": "array",
                                 "items": {
@@ -1544,6 +1549,7 @@ def bootstrap_observation_for_task(
             else "确定性启动观察；在作为已复核知识使用前，需要由任务化模型阅读替换。"
         ),
         covered_outputs=bootstrap_covered_outputs(observation_type, task),
+        evidence_quotes=[first_sentence(span.text, limit=220)],
         extracted_numbers=extract_numbers(statement),
     )
 
@@ -1552,6 +1558,8 @@ def bootstrap_covered_outputs(
     observation_type: ObservationType,
     task: ReadingTask,
 ) -> list[str]:
+    if task.task_type == ReadingTaskType.ORIENTATION and observation_type == ObservationType.PROBLEM:
+        return list(task.required_outputs)
     return [observation_type.value] if observation_type.value in task.required_outputs else []
 
 
@@ -1579,33 +1587,7 @@ def observation_statement(
     sentence = first_sentence(text)
     if not sentence:
         return ""
-    if output_language == "en":
-        prefix = {
-            ReadingTaskType.ORIENTATION: "Problem framing evidence: ",
-            ReadingTaskType.CLAIM_INVENTORY: "Claim inventory evidence: ",
-            ReadingTaskType.METHOD_MECHANISM: "Mechanism evidence: ",
-            ReadingTaskType.IMPLEMENTATION_PATH: "Implementation evidence: ",
-            ReadingTaskType.EVALUATION_SETUP: "Evaluation setup evidence: ",
-            ReadingTaskType.RESULT_EXTRACTION: "Result evidence: ",
-            ReadingTaskType.LIMITATIONS: "Limitation evidence: ",
-            ReadingTaskType.CONCEPT_BRIDGE: "Concept bridge evidence: ",
-            ReadingTaskType.RELATED_POSITIONING: "Related-positioning evidence: ",
-            ReadingTaskType.REPRODUCIBILITY: "Reproducibility evidence: ",
-        }[task_type]
-    else:
-        prefix = {
-            ReadingTaskType.ORIENTATION: "问题定位证据：",
-            ReadingTaskType.CLAIM_INVENTORY: "核心主张证据：",
-            ReadingTaskType.METHOD_MECHANISM: "方法机制证据：",
-            ReadingTaskType.IMPLEMENTATION_PATH: "实现路径证据：",
-            ReadingTaskType.EVALUATION_SETUP: "评估设置证据：",
-            ReadingTaskType.RESULT_EXTRACTION: "实验结果证据：",
-            ReadingTaskType.LIMITATIONS: "限制边界证据：",
-            ReadingTaskType.CONCEPT_BRIDGE: "概念桥接证据：",
-            ReadingTaskType.RELATED_POSITIONING: "相关工作定位证据：",
-            ReadingTaskType.REPRODUCIBILITY: "可复现性证据：",
-        }[task_type]
-    return prefix + sentence
+    return sentence
 
 
 def first_sentence(text: str, *, limit: int = 320) -> str:
@@ -1736,6 +1718,10 @@ def build_observation_task_prompt(
             "task_type": task.task_type.value,
             "required_outputs": task.required_outputs,
             "allowed_observation_types": task_allowed_observation_types(task),
+            "task_instruction": observation_task_instruction(
+                task.task_type,
+                output_language=output_language,
+            ),
             "evidence_policy": task.evidence_policy,
             "max_model_calls": task.max_model_calls,
             "max_tokens": task.max_tokens,
@@ -1750,11 +1736,82 @@ def build_observation_task_prompt(
                 "output_contract.allowed_source_ids by exact string copy and declare "
                 "covered_outputs from task_spec.required_outputs. Across cards, cover every "
                 "required_output supported by the evidence. Do not cite page numbers as evidence. "
-                "Do not write memory, audit verdicts, or report prose."
+                "Do not write memory, audit verdicts, or report prose. Statements must be "
+                "reader-grade paper facts, not phrases like 'evidence shows', 'I saw', or "
+                "task labels. For each card, evidence_quotes must contain 1-3 short exact "
+                "substrings copied from the cited sources, preserving original technical terms, "
+                "dataset names, metric names, and numeric values when present."
             ),
         },
     }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def observation_task_instruction(
+    task_type: ReadingTaskType,
+    *,
+    output_language: str,
+) -> str:
+    zh = output_language != "en"
+    if task_type == ReadingTaskType.ORIENTATION:
+        return (
+            "用中文回答论文要解决什么问题、为什么难、适用的任务/场景范围；可以用一张卡同时覆盖 problem、motivation、scope。"
+            if zh
+            else "State the problem, why it is difficult, and the task/scope; one card may cover problem, motivation, and scope."
+        )
+    if task_type == ReadingTaskType.CLAIM_INVENTORY:
+        return (
+            "抽取论文自己的核心主张/贡献，避免把实现细节或结果反复当成主张。"
+            if zh
+            else "Extract the paper's own main claims or contributions; do not repeat implementation details as claims."
+        )
+    if task_type == ReadingTaskType.METHOD_MECHANISM:
+        return (
+            "解释方法机制链路：关键模块是什么、为什么需要它、它如何缓解论文提出的问题。"
+            if zh
+            else "Explain the mechanism chain: key modules, why they exist, and how they address the problem."
+        )
+    if task_type == ReadingTaskType.IMPLEMENTATION_PATH:
+        return (
+            "抽取可执行实现路径：输入预处理、网络/模块、训练目标、推理流程、重要超参数或尺寸。"
+            if zh
+            else "Extract implementation facts: preprocessing, networks/modules, objectives, inference flow, and important sizes or hyperparameters."
+        )
+    if task_type == ReadingTaskType.EVALUATION_SETUP:
+        return (
+            "只写实验设置事实：数据集、源域/目标域、指标、基线、训练/测试协议；不要写泛泛方法摘要。"
+            if zh
+            else "Only write evaluation setup facts: datasets, source/target domains, metrics, baselines, and protocol; do not summarize the method."
+        )
+    if task_type == ReadingTaskType.RESULT_EXTRACTION:
+        return (
+            "只写实验结果、表格结论、消融结论或关键数值；不要把方法动机、模块列表、摘要内容当成结果。"
+            if zh
+            else "Only write experimental results, table conclusions, ablations, or key numbers; do not restate method motivation or module lists."
+        )
+    if task_type == ReadingTaskType.LIMITATIONS:
+        return (
+            "优先抽取论文显式承认的限制；如果是基于公式/设置推断的边界，provenance 必须为 inferred，并在 statement 中标明是推断。"
+            if zh
+            else "Prefer explicit limitations; if a boundary is inferred from equations or setup, set provenance to inferred and say it is inferred."
+        )
+    if task_type == ReadingTaskType.CONCEPT_BRIDGE:
+        return (
+            "解释读懂论文必须掌握的概念关系，只保留能帮助理解方法或评估的概念。"
+            if zh
+            else "Explain only concepts needed to understand the method or evaluation."
+        )
+    if task_type == ReadingTaskType.RELATED_POSITIONING:
+        return (
+            "说明论文相对已有工作的定位；如果证据中没有限制项，不要编造 limitation。"
+            if zh
+            else "State positioning against prior work; do not fabricate limitations if evidence does not support them."
+        )
+    return (
+        "抽取复现相关事实；如果证据不足，明确哪些实现细节缺失。"
+        if zh
+        else "Extract reproducibility facts; state missing implementation details when evidence is insufficient."
+    )
 
 
 def source_pack(dom: PaperDOM, source_ids: list[str]) -> list[dict[str, Any]]:
@@ -1828,7 +1885,7 @@ def observation_cards_from_model_envelope(
             source_fallback = True
         if not source_ids:
             raise ValueError(f"Observation card for {task.task_id} did not cite valid source_ids")
-        statement = str(item.get("statement") or "").strip()
+        statement = clean_model_statement(item.get("statement"))
         observation_type = str(item.get("observation_type") or "").strip()
         if observation_type not in {kind.value for kind in ObservationType}:
             observation_type = infer_observation_type_for_task(item, task)
@@ -1836,10 +1893,13 @@ def observation_cards_from_model_envelope(
             continue
         allowed_types = task_allowed_observation_types(task)
         if observation_type not in allowed_types:
-            raise ValueError(
-                f"Observation card for {task.task_id} returned disallowed observation_type="
-                f"{observation_type}; allowed={allowed_types}"
-            )
+            if len(allowed_types) == 1:
+                observation_type = allowed_types[0]
+            else:
+                raise ValueError(
+                    f"Observation card for {task.task_id} returned disallowed observation_type="
+                    f"{observation_type}; allowed={allowed_types}"
+                )
         covered_outputs = clean_model_covered_outputs(item.get("covered_outputs"), task)
         inferred_outputs = infer_covered_outputs_from_type(observation_type, task)
         if not any(output in task.required_outputs for output in covered_outputs):
@@ -1863,6 +1923,7 @@ def observation_cards_from_model_envelope(
                 "Runtime inferred covered_outputs from observation_type and ReadingTask spec."
             )
             uncertainty = f"{uncertainty} {output_note}".strip() if uncertainty else output_note
+        evidence_quotes = clean_model_evidence_quotes(item.get("evidence_quotes"))
         observation_id = make_observation_id(
             task_id=task.task_id,
             observation_type=observation_type,
@@ -1881,6 +1942,7 @@ def observation_cards_from_model_envelope(
                 provenance=provenance,
                 uncertainty=uncertainty,
                 covered_outputs=covered_outputs,
+                evidence_quotes=evidence_quotes,
                 extracted_numbers=[
                     number
                     for number in list_payload(item.get("extracted_numbers"))
@@ -1897,18 +1959,41 @@ def observation_cards_from_model_envelope(
 def clean_model_covered_outputs(value: Any, task: ReadingTask) -> list[str]:
     if not isinstance(value, list):
         return []
+    allowed = set(task.required_outputs)
     result = []
     for item in value:
         output = str(item or "").strip()
         if not output:
             continue
-        if output not in result:
+        if output in allowed and output not in result:
             result.append(output)
     return result
 
 
 def infer_covered_outputs_from_type(observation_type: str, task: ReadingTask) -> list[str]:
+    if task.task_type == ReadingTaskType.ORIENTATION and observation_type == "problem":
+        return list(task.required_outputs)
     return [observation_type] if observation_type in task.required_outputs else []
+
+
+def clean_model_evidence_quotes(value: Any) -> list[str]:
+    result = []
+    for item in list_payload(value):
+        text = " ".join(str(item or "").split()).strip()
+        if text and text not in result:
+            result.append(text[:260])
+        if len(result) >= 3:
+            break
+    return result
+
+
+def clean_model_statement(value: Any) -> str:
+    text = str(value or "").strip()
+    return re.sub(
+        r"^(问题定位|核心主张|方法机制|实现路径|评估设置|实验结果|限制边界|概念桥接|相关工作定位|可复现性)证据：\s*",
+        "",
+        text,
+    ).strip()
 
 
 def missing_required_outputs(task: ReadingTask, cards: list[ObservationCard]) -> list[str]:
