@@ -64,22 +64,54 @@ METRIC_TERMS = {
 
 def read_core_v2_graph_summary(output_dir: Path, paper_id: str) -> dict[str, Any]:
     root = output_dir / ".paperlens" / "data" / "core" / "v2" / paper_id
-    dom_path = root / "paper_dom.v1.json"
-    graph_path = root / "claim_graph.v1.json"
-    if not dom_path.exists() or not graph_path.exists():
+    if not root.exists():
         return {}
-    dom_payload = read_envelope_data(dom_path, expected_type="paper_dom")
-    graph_payload = read_envelope_data(graph_path, expected_type="claim_graph")
-    if not isinstance(dom_payload, dict) or not isinstance(graph_payload, dict):
-        return {}
-    dom = PaperDOM.model_validate(dom_payload)
-    graph = ClaimGraph.model_validate(graph_payload)
-    reading_plan = read_optional_reading_plan(root / "reading_plan.v1.json")
+    artifact_manifest = inspect_core_v2_artifact_root(root, paper_id)
     quality = read_optional_envelope_data(root / "quality_metrics.v1.json", "core_quality_metrics")
     memory_view = read_optional_envelope_data(
         root / "paper_memory_view.v1.json", "paper_memory_view"
     )
-    artifact_manifest = inspect_core_v2_artifact_root(root, paper_id)
+    dom_path = root / "paper_dom.v1.json"
+    graph_path = root / "claim_graph.v1.json"
+    if not dom_path.exists() or not graph_path.exists():
+        return unavailable_claim_graph_summary(
+            root=root,
+            paper_id=paper_id,
+            artifact_manifest=artifact_manifest,
+            quality=quality if isinstance(quality, dict) else {},
+            memory_view=memory_view if isinstance(memory_view, dict) else {},
+        )
+    try:
+        dom_payload = read_envelope_data(dom_path, expected_type="paper_dom")
+        graph_payload = read_envelope_data(graph_path, expected_type="claim_graph")
+    except Exception:
+        return unavailable_claim_graph_summary(
+            root=root,
+            paper_id=paper_id,
+            artifact_manifest=artifact_manifest,
+            quality=quality if isinstance(quality, dict) else {},
+            memory_view=memory_view if isinstance(memory_view, dict) else {},
+        )
+    if not isinstance(dom_payload, dict) or not isinstance(graph_payload, dict):
+        return unavailable_claim_graph_summary(
+            root=root,
+            paper_id=paper_id,
+            artifact_manifest=artifact_manifest,
+            quality=quality if isinstance(quality, dict) else {},
+            memory_view=memory_view if isinstance(memory_view, dict) else {},
+        )
+    try:
+        dom = PaperDOM.model_validate(dom_payload)
+        graph = ClaimGraph.model_validate(graph_payload)
+    except Exception:
+        return unavailable_claim_graph_summary(
+            root=root,
+            paper_id=paper_id,
+            artifact_manifest=artifact_manifest,
+            quality=quality if isinstance(quality, dict) else {},
+            memory_view=memory_view if isinstance(memory_view, dict) else {},
+        )
+    reading_plan = read_optional_reading_plan(root / "reading_plan.v1.json")
     return summarize_claim_graph_for_library(
         dom=dom,
         graph=graph,
@@ -89,6 +121,53 @@ def read_core_v2_graph_summary(output_dir: Path, paper_id: str) -> dict[str, Any
         artifact_manifest=artifact_manifest,
         root=root,
     )
+
+
+def unavailable_claim_graph_summary(
+    *,
+    root: Path,
+    paper_id: str,
+    artifact_manifest: dict[str, Any],
+    quality: dict[str, Any],
+    memory_view: dict[str, Any],
+) -> dict[str, Any]:
+    metadata = dict_value(memory_view.get("metadata"))
+    return {
+        "schema_version": GRAPH_LIBRARY_SUMMARY_SCHEMA_VERSION,
+        "paper_id": paper_id,
+        "metadata": {
+            "title": metadata.get("title") or paper_id,
+            "year": metadata.get("year"),
+            "grade": metadata.get("grade"),
+        },
+        "source": {
+            "paper_dom": relative_core_path(root / "paper_dom.v1.json"),
+            "claim_graph": relative_core_path(root / "claim_graph.v1.json"),
+            "quality_metrics": relative_core_path(root / "quality_metrics.v1.json"),
+            "paper_memory_view": relative_core_path(root / "paper_memory_view.v1.json"),
+        },
+        "quality": unavailable_graph_quality_summary(
+            quality=quality,
+            artifact_manifest=artifact_manifest,
+            memory_view=memory_view,
+        ),
+        "node_counts": {kind: 0 for kind in [*GRAPH_LIBRARY_NODE_KINDS, "evidence"]},
+        "graph_access": graph_non_consumable_policy(artifact_manifest),
+        "problem_nodes": [],
+        "claim_nodes": [],
+        "method_family": [],
+        "mechanism_nodes": [],
+        "implementation_nodes": [],
+        "evaluation_nodes": [],
+        "result_nodes": [],
+        "limitation_nodes": [],
+        "concept_nodes": [],
+        "evaluation_datasets": [],
+        "evaluation_metrics": [],
+        "evaluation_dataset_mentions": [],
+        "evaluation_metric_mentions": [],
+        "relations": [],
+    }
 
 
 def summarize_claim_graph_for_library(
@@ -278,6 +357,37 @@ def graph_quality_summary(
     }
 
 
+def unavailable_graph_quality_summary(
+    *,
+    quality: dict[str, Any],
+    artifact_manifest: dict[str, Any],
+    memory_view: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "artifact_set_status": artifact_manifest.get("status"),
+        "artifact_set_consumable": artifact_manifest.get("consumable"),
+        "artifact_set_issues": artifact_manifest.get("issues", []),
+        "publish_status": artifact_manifest.get("publish_status"),
+        "artifact_publish_status": artifact_manifest.get("artifact_publish_status")
+        or quality.get("publish_status"),
+        "current_audit_publish_status": artifact_manifest.get("current_audit_publish_status"),
+        "current_audit_error_count": artifact_manifest.get("current_audit_error_count"),
+        "current_audit_warning_count": artifact_manifest.get("current_audit_warning_count"),
+        "current_audit_issue_codes": artifact_manifest.get("current_audit_issue_codes", []),
+        "memory_report_readiness": memory_view.get("report_readiness"),
+        "evidence_coverage": quality.get("evidence_coverage"),
+        "reading_required_output_coverage": quality.get("reading_required_output_coverage"),
+        "reading_required_output_count": quality.get("reading_required_output_count"),
+        "reading_required_output_covered_count": quality.get(
+            "reading_required_output_covered_count"
+        ),
+        "fact_node_count": quality.get("fact_node_count"),
+        "supported_fact_node_count": quality.get("supported_fact_node_count"),
+        "audit_error_count": quality.get("audit_error_count"),
+        "audit_warning_count": quality.get("audit_warning_count"),
+    }
+
+
 def graph_summary_is_consumable(artifact_manifest: dict[str, Any]) -> bool:
     return artifact_manifest.get("consumable") is True
 
@@ -286,6 +396,10 @@ def graph_non_consumable_policy(artifact_manifest: dict[str, Any]) -> str:
     issues = set(str(issue) for issue in artifact_manifest.get("issues", []))
     if "missing:core_manifest.v1.json" in issues:
         return "missing_core_v2_manifest"
+    if "missing:paper_dom.v1.json" in issues:
+        return "missing_core_v2_paper_dom"
+    if "missing:claim_graph.v1.json" in issues:
+        return "missing_core_v2_claim_graph"
     if "missing:quality_metrics.v1.json" in issues:
         return "missing_core_v2_quality_metrics"
     artifact_publish_status = str(artifact_manifest.get("artifact_publish_status") or "")

@@ -3554,6 +3554,69 @@ def test_library_record_does_not_fallback_to_legacy_facts_when_core_graph_is_blo
     assert "Legacy blocked-core mechanism should not be indexed." not in search_text
 
 
+def test_library_rebuild_reports_missing_core_graph_without_legacy_fact_fallback(tmp_path):
+    output_dir = tmp_path / "out"
+    data_dir = output_dir / ".paperlens" / "data"
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    write_core_v2_artifacts(
+        data_dir=data_dir,
+        paper=paper,
+        layout={
+            "pages": [
+                {
+                    "page_no": 1,
+                    "text": "Abstract\n\nWe propose a block table method for serving.",
+                    "section_candidates": [{"title": "Abstract", "level": 1}],
+                }
+            ]
+        },
+    )
+    (data_dir / "core" / "v2" / "p_test" / "claim_graph.v1.json").unlink()
+    memory_dir = data_dir / "memory" / "v3"
+    memory_dir.mkdir(parents=True)
+    (memory_dir / "p_test.paper_memory.v3.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "paper_memory.v3",
+                "paper_id": "p_test",
+                "metadata": {"title": "Test Paper"},
+                "reading_context": {"grade": "KEEP"},
+                "claims": [{"id": "legacy", "text": "Legacy missing-graph claim."}],
+                "mechanism": {"overview": "Legacy missing-graph mechanism."},
+                "evaluation": {"summary": "Legacy missing-graph evaluation."},
+                "evidence": [
+                    {
+                        "id": "E001",
+                        "source_type": "paragraph",
+                        "interpretation": "Legacy missing-graph evidence.",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    rebuild_library_from_output(output_dir)
+    records = read_library_records(output_dir)
+    result = search_library(output_dir=output_dir, query="Legacy missing-graph claim", limit=3)
+
+    graph_summary = records[0]["graph_summary"]
+    assert graph_summary["graph_access"] == "missing_core_v2_claim_graph"
+    assert graph_summary["quality"]["publish_status"] is None
+    assert "missing:claim_graph.v1.json" in graph_summary["quality"]["artifact_set_issues"]
+    assert records[0]["memory"]["claims"] == []
+    assert records[0]["memory"]["mechanism_steps"] == []
+    assert "Legacy missing-graph claim." not in records[0]["search_text"]
+    assert result["matches"] == []
+
+
 def test_library_rebuild_indexes_core_v2_claim_graph_without_memory_v3(tmp_path):
     output_dir = tmp_path / "out"
     paper = PaperRecord(
