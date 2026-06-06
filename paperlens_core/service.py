@@ -671,7 +671,7 @@ class PaperLensServiceState:
             job.status = "completed" if result.status == "ok" else "failed"
             if result.status != "ok":
                 job.error = str(result.data.get("reason") or "Job failed")
-        except Exception as exc:  # pragma: no cover - defensive service boundary
+        except Exception as exc:
             job.status = "failed"
             job.error = str(exc)
             job.events.append(
@@ -823,7 +823,7 @@ class PaperLensServiceState:
                 )
             answer.answer = result
             answer.status = "completed"
-        except Exception as exc:  # pragma: no cover - defensive service boundary
+        except Exception as exc:
             answer.status = "failed"
             answer.error = str(exc)
             answer.events.append(
@@ -913,7 +913,7 @@ class PaperLensRequestHandler(BaseHTTPRequestHandler):
             write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
         except ValueError as exc:
             write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
-        except Exception as exc:  # pragma: no cover - service boundary
+        except Exception as exc:
             write_json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
 
     def _authorized(self, parts: list[str], query: dict[str, list[str]]) -> bool:

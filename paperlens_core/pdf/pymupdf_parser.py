@@ -11,7 +11,7 @@ from paperlens_core.schemas import PageArtifact, PaperRecord
 
 try:
     import pymupdf
-except ImportError:  # pragma: no cover
+except ImportError:
     pymupdf = None  # type: ignore[assignment]
 
 

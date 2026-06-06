@@ -58,8 +58,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--visual-verification-mode", choices=["parse_issues", "all_marked_pages", "off"]
     )
     run.add_argument("--visual-verification-max-pages", type=int)
-    run.add_argument("--enable-llm-stages", action="store_true", help=argparse.SUPPRESS)
-
     ask = subparsers.add_parser("ask", help="Ask a question about a generated paper report")
     ask.add_argument("--output-dir", required=True)
     ask.add_argument("--paper-id")
