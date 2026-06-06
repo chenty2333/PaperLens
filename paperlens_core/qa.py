@@ -19,9 +19,8 @@ from paperlens_core.core_manifest import inspect_core_v2_artifact_set
 from paperlens_core.dom import PaperDOM
 from paperlens_core.grounding import text_overlaps_any_reference
 from paperlens_core.graph import ClaimGraph
-from paperlens_core.library import read_library_records
+from paperlens_core.library import compact_library_record_for_agent, read_library_records
 from paperlens_core.runtime import PaperLensRuntime
-from paperlens_core.runtime import context_pack_prompt
 from paperlens_core.runtime import page_source_ids
 from paperlens_core.workflow.core_v2 import (
     load_core_v2_dom_and_graph,
@@ -35,7 +34,7 @@ Respect the runtime contract. Return JSON only.
 """.strip()
 
 
-ASK_PROMPT_VERSION = "qa-agent-v2-envelope"
+ASK_CACHE_VERSION = "qa-agent-v3-source-only"
 CORE_V2_QA_CONTEXT_VERSION = "paperlens_core_v2_qa_context.v1"
 CORE_V2_CONSUMABLE_STATUSES = {"REVIEWED", "REVIEWED_WITH_LIMITS"}
 
@@ -69,14 +68,12 @@ ASK_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": [
         "answer_markdown",
-        "cited_pages",
         "cited_source_ids",
         "confidence",
         "source_attribution",
     ],
     "properties": {
         "answer_markdown": {"type": "string"},
-        "cited_pages": {"type": "array", "items": {"type": "integer", "minimum": 1}},
         "cited_source_ids": {"type": "array", "items": {"type": "string"}},
         "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
         "source_attribution": {
@@ -116,6 +113,9 @@ def answer_question(
         raise FileNotFoundError(f"No paper reports found under {output_dir / 'papers'}")
     layout = load_layout(output_dir, resolved_paper_id)
     library_record = load_library_record(output_dir, resolved_paper_id)
+    agent_library_record = (
+        compact_library_record_for_agent(library_record) if library_record else {}
+    )
     question_type = classify_question(question)
     core_v2_context = load_core_v2_qa_context(
         output_dir=output_dir,
@@ -163,9 +163,7 @@ def answer_question(
     if config.offline_debug or config.provider.kind == "none":
         answer = offline_qa_answer(
             paper_id=resolved_paper_id,
-            report_path=report_path,
             question_type=question_type,
-            pages=pages,
             core_v2_context=core_v2_context,
         )
         answer = ground_qa_answer_in_core_v2_context(answer, core_v2_context)
@@ -185,34 +183,20 @@ def answer_question(
         ledger_path=output_dir / ".paperlens" / "data" / "model_calls.jsonl",
         run_id=f"qa_{hash_text(resolved_paper_id + ':' + question)[:12]}",
     )
-    user_prompt = build_ask_prompt(
-        report_path=report_path,
-        paper_id=resolved_paper_id,
-        question=question,
-        chat_history=chat_history or [],
-        qa_context=qa_context,
-        library_record=library_record,
-        pages=pages,
-        question_type=question_type,
-        agent_context=agent_context,
-        core_v2_context=core_v2_context,
-    )
-    image_paths = visual_question_page_images(pages, question)
     cache_path = ask_cache_path(
         output_dir,
         resolved_paper_id,
         {
-            "version": ASK_PROMPT_VERSION,
+            "version": ASK_CACHE_VERSION,
             "model": config.provider.model,
-            "visual_detail": config.visual_detail,
             "paper_id": resolved_paper_id,
             "question": question,
             "chat_history_hash": hash_json_payload(normalize_chat_history(chat_history or [])),
-            "prompt_hash": hash_text(ASK_SYSTEM_PROMPT + "\n" + user_prompt),
             "schema_hash": hash_json_payload(ASK_SCHEMA),
-            "images": [image_cache_fingerprint(path) for path in image_paths],
             "agent_context_hash": hash_json_payload(agent_context),
             "core_v2_context_hash": hash_json_payload(core_v2_context),
+            "qa_context_hash": hash_json_payload(qa_context),
+            "library_record_hash": hash_json_payload(agent_library_record),
         },
     )
     cached = read_ask_cache(cache_path)
@@ -242,9 +226,8 @@ def answer_question(
         question_type=question_type,
         chat_history=chat_history or [],
         qa_context=qa_context,
-        library_record=library_record,
+        library_context_record=agent_library_record,
         layout_pages=layout_pages,
-        selected_pages=pages,
         core_v2_context=core_v2_context,
         agent_context=agent_context,
     )
@@ -793,9 +776,7 @@ def merge_core_v2_pages(
 def offline_qa_answer(
     *,
     paper_id: str,
-    report_path: Path | None,
     question_type: str,
-    pages: list[dict[str, Any]],
     core_v2_context: dict[str, Any],
 ) -> dict[str, Any]:
     matches = list_of_dicts(core_v2_context.get("matches"))
@@ -846,7 +827,6 @@ def offline_qa_answer(
                 "evidence_limits": ["离线模式只返回 ClaimGraph 检索结果，未调用模型综合推理。"],
             },
         }
-    report_hint = f"`{report_path.as_posix()}`" if report_path else "当前论文的 core v2 数据"
     if core_v2_context_is_consumable(core_v2_context):
         return {
             "paper_id": paper_id,
@@ -869,10 +849,8 @@ def offline_qa_answer(
         }
     return {
         "paper_id": paper_id,
-        "answer_markdown": f"当前是离线模式，不能调用模型回答。可先查看：{report_hint}。",
-        "cited_pages": [
-            page["page_no"] for page in pages[:3] if isinstance(page.get("page_no"), int)
-        ],
+        "answer_markdown": "当前是离线模式，且没有可消费的 reviewed ClaimGraph/PaperDOM 证据。",
+        "cited_pages": [],
         "cited_source_ids": [],
         "confidence": "low",
         "question_type": question_type,
@@ -922,9 +900,8 @@ def run_paper_qa_agent(
     question_type: str,
     chat_history: list[dict[str, Any]],
     qa_context: dict[str, Any],
-    library_record: dict[str, Any],
+    library_context_record: dict[str, Any],
     layout_pages: list[dict[str, Any]],
-    selected_pages: list[dict[str, Any]],
     core_v2_context: dict[str, Any],
     agent_context: dict[str, Any],
 ) -> Any:
@@ -936,15 +913,6 @@ def run_paper_qa_agent(
         context=qa_context,
         layout_pages=layout_pages,
     )
-    page_hints = [
-        {
-            "page_no": page.get("page_no"),
-            "text": normalize_text(str(page.get("text") or ""), limit=900),
-            "captions": (page.get("captions") or [])[:4],
-            "visual_notes": (page.get("visual_notes") or [])[:3],
-        }
-        for page in selected_pages[:6]
-    ]
     loop = AgentLoop(
         client=client,
         tools=tools,
@@ -993,8 +961,7 @@ def run_paper_qa_agent(
             "core_v2_context_priority": core_v2_context_priority(core_v2_context),
             "qa_context": qa_context,
             "core_v2_claim_graph_context": core_v2_context,
-            "paperlens_library_record": library_record,
-            "initial_page_hints": page_hints,
+            "paperlens_library_record": library_context_record,
             "context_pack": agent_context,
         }
     )
@@ -1063,17 +1030,6 @@ def write_qa_trace(
     }
     with trace_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
-
-
-def image_cache_fingerprint(path: Path) -> dict[str, str]:
-    return {"path": str(path), "sha256": hash_file(path)}
-
-
-def hash_file(path: Path) -> str:
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
-    except OSError:
-        return "missing"
 
 
 def hash_text(text: str) -> str:
@@ -1257,54 +1213,6 @@ def normalize_chat_history(history: list[dict[str, Any]]) -> list[dict[str, str]
     return normalized[-8:]
 
 
-def build_ask_prompt(
-    *,
-    report_path: Path | None,
-    paper_id: str,
-    question: str,
-    chat_history: list[dict[str, Any]] | None = None,
-    qa_context: dict[str, Any] | None = None,
-    pages: list[dict[str, Any]],
-    question_type: str = "orientation",
-    library_record: dict[str, Any] | None = None,
-    agent_context: dict[str, Any] | None = None,
-    core_v2_context: dict[str, Any] | None = None,
-) -> str:
-    page_blocks = []
-    for page in pages:
-        page_blocks.append(
-            {
-                "page_no": page.get("page_no"),
-                "text": normalize_text(str(page.get("text") or ""), limit=1800),
-                "captions": (page.get("captions") or [])[:6],
-                "visual_notes": (page.get("visual_notes") or [])[:4],
-            }
-        )
-    return "\n\n".join(
-        [
-            f"paper_id: {paper_id}",
-            f"report_path: {report_path.as_posix() if report_path else ''}",
-            f"question_type: {question_type}",
-            f"core_v2_context_priority: {core_v2_context_priority(core_v2_context or {})}",
-            "recent_chat_history:",
-            json.dumps(normalize_chat_history(chat_history or []), ensure_ascii=False),
-            "question:",
-            question,
-            "core_v2_claim_graph_context:",
-            json.dumps(core_v2_context or {}, ensure_ascii=False),
-            "qa_context:",
-            json.dumps(qa_context or {}, ensure_ascii=False),
-            "agent_context_pack:",
-            context_pack_prompt(agent_context),
-            "paperlens_library_record:",
-            json.dumps(library_record or {}, ensure_ascii=False),
-            "If page images are attached, they follow the same order as the first relevant_page_excerpts that have images.",
-            "relevant_page_excerpts:",
-            json.dumps(page_blocks, ensure_ascii=False),
-        ]
-    )
-
-
 def core_v2_context_priority(core_v2_context: dict[str, Any]) -> str:
     if core_v2_context_is_consumable(core_v2_context):
         return "primary_reviewed_claim_graph"
@@ -1314,19 +1222,6 @@ def core_v2_context_priority(core_v2_context: dict[str, Any]) -> str:
 
 
 def normalize_answer(data: dict[str, Any]) -> dict[str, Any]:
-    pages = first_present(data, ["cited_pages", "pages", "citations", "page_numbers"])
-    if not isinstance(pages, list):
-        pages = []
-    cited_pages = []
-    for page in pages:
-        if isinstance(page, dict):
-            page = page.get("page") or page.get("page_no") or page.get("page_number")
-        try:
-            value = int(page)
-        except (TypeError, ValueError):
-            continue
-        if value > 0 and value not in cited_pages:
-            cited_pages.append(value)
     confidence = str(data.get("confidence") or "low")
     if confidence not in {"high", "medium", "low"}:
         confidence = "low"
@@ -1336,16 +1231,13 @@ def normalize_answer(data: dict[str, Any]) -> dict[str, Any]:
         )
     ) or recover_text_answer(data)
     answer = sanitize_qa_text(answer)
-    for page in extract_page_citations(answer):
-        if page not in cited_pages:
-            cited_pages.append(page)
     cited_source_ids = normalized_source_id_list(
         first_present(data, ["cited_source_ids", "source_ids", "paper_dom_source_ids"])
     )
     source_attribution = normalize_source_attribution(data, answer=answer, confidence=confidence)
     return {
         "answer_markdown": answer.strip(),
-        "cited_pages": cited_pages,
+        "cited_pages": [],
         "cited_source_ids": cited_source_ids,
         "confidence": confidence,
         "source_attribution": source_attribution,
@@ -1394,8 +1286,7 @@ def ground_qa_answer_in_core_v2_context(
     attribution["paper_claims"] = supported_claims
     grounded["source_attribution"] = attribution
     grounded["cited_source_ids"] = cited_source_ids[:16]
-    grounded["cited_pages"] = merge_core_v2_cited_pages(
-        normalized_positive_int_list(grounded.get("cited_pages")),
+    grounded["cited_pages"] = core_v2_pages_for_source_ids(
         core_v2_context=core_v2_context,
         cited_source_ids=grounded["cited_source_ids"],
     )
@@ -1445,13 +1336,11 @@ def core_v2_context_source_ids(core_v2_context: dict[str, Any]) -> set[str]:
     return {str(source_id).strip() for source_id in source_ids if str(source_id).strip()}
 
 
-def merge_core_v2_cited_pages(
-    pages: list[int],
+def core_v2_pages_for_source_ids(
     *,
     core_v2_context: dict[str, Any],
     cited_source_ids: list[str],
 ) -> list[int]:
-    _ = pages
     result: list[int] = []
     cited = set(cited_source_ids)
     for match in list_of_dicts(core_v2_context.get("matches")):
@@ -1462,20 +1351,6 @@ def merge_core_v2_cited_pages(
             if isinstance(page_no, int) and page_no > 0 and page_no not in result:
                 result.append(page_no)
     return result[:8]
-
-
-def normalized_positive_int_list(value: Any) -> list[int]:
-    if not isinstance(value, list):
-        return []
-    result = []
-    for item in value:
-        try:
-            number = int(item)
-        except (TypeError, ValueError):
-            continue
-        if number > 0 and number not in result:
-            result.append(number)
-    return result
 
 
 def lower_qa_confidence(confidence: str) -> str:
@@ -1665,52 +1540,6 @@ def recover_text_answer(data: dict[str, Any]) -> str:
     return "\n\n".join(dict.fromkeys(parts))[:1800]
 
 
-def visual_question_page_images(pages: list[dict[str, Any]], question: str) -> list[Path]:
-    if not question_needs_visual_context(question):
-        return []
-    paths = []
-    for page in pages:
-        raw_path = page.get("render_path")
-        if isinstance(raw_path, str) and raw_path:
-            path = Path(raw_path)
-            if path.exists():
-                paths.append(path)
-        if len(paths) >= 3:
-            break
-    return paths
-
-
-def question_needs_visual_context(question: str) -> bool:
-    lowered = question.lower()
-    visual_terms = [
-        "图",
-        "表",
-        "figure",
-        "fig.",
-        "table",
-        "chart",
-        "plot",
-        "diagram",
-        "图片",
-        "曲线",
-        "实验图",
-    ]
-    return any(term in lowered for term in visual_terms)
-
-
-def extract_page_citations(text: str) -> list[int]:
-    pages = []
-    for raw_group in re.findall(r"\bpp?\.\s*([0-9][0-9,\s-]*)", text, flags=re.IGNORECASE):
-        for raw_page in re.findall(r"\d+", raw_group):
-            value = int(raw_page)
-            if value > 0 and value not in pages:
-                pages.append(value)
-    for pattern in [r"\bpage\s*(\d+)\b", r"第\s*(\d+)\s*页"]:
-        for raw_page in re.findall(pattern, text, flags=re.IGNORECASE):
-            value = int(raw_page)
-            if value > 0 and value not in pages:
-                pages.append(value)
-    return pages[:8]
 
 
 def normalize_text(text: str, *, limit: int) -> str:

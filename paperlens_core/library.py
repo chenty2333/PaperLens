@@ -30,7 +30,7 @@ INTERNAL_DIRNAME = ".paperlens"
 LIBRARY_RECORD_SCHEMA_VERSION = "paperlens.library_record.v1"
 LIBRARY_RECORD_FILENAME = "library_records.jsonl"
 SEARCH_INDEX_SCHEMA_VERSION = "paperlens_search_index.v1"
-LIBRARY_ASK_PROMPT_VERSION = "library-ask-v4-envelope"
+LIBRARY_ASK_CACHE_VERSION = "library-ask-v5-source-only"
 
 
 SEARCH_QUERY_EXPANSIONS: dict[str, tuple[str, ...]] = {
@@ -389,7 +389,6 @@ def build_library_record(row: dict[str, Any]) -> dict[str, Any]:
             title=title,
             brief=brief,
             tags=tags,
-            memory=memory,
             graph_summary=graph_summary,
         ),
     }
@@ -524,7 +523,7 @@ class LibraryToolRegistry:
         limit = max(1, min(limit, 20))
         matches = search_library_records(self.records, query=query, limit=limit, public=False)
         results = [
-            compact_library_record_for_agent(hit["paper"], score=hit["score"], include_memory=False)
+            compact_library_record_for_agent(hit["paper"], score=hit["score"])
             for hit in matches
         ]
         return {
@@ -537,11 +536,7 @@ class LibraryToolRegistry:
     def _get_record(self, arguments: dict[str, Any]) -> dict[str, Any]:
         paper_id = string_or_empty(arguments.get("paper_id"))
         record = find_library_record(self.records, paper_id)
-        results = (
-            [compact_library_record_for_agent(record, include_memory=True)]
-            if record is not None
-            else []
-        )
+        results = [compact_library_record_for_agent(record)] if record is not None else []
         return {
             "tool": "library.get_record",
             "query": paper_id,
@@ -567,7 +562,6 @@ def answer_library_question(
                 compact_library_record_for_agent(
                     hit["paper"],
                     score=hit["score"],
-                    include_memory=False,
                 )
                 for hit in matches[:8]
             ]
@@ -585,18 +579,14 @@ def answer_library_question(
         ledger_path=output_dir / ".paperlens" / "data" / "model_calls.jsonl",
         run_id=f"library_qa_{hash_text(question)[:12]}",
     )
-    user_prompt = build_library_ask_prompt(
-        question=question, matches=matches, chat_history=chat_history or []
-    )
     cache_path = library_answer_cache_path(
         output_dir,
         {
-            "version": LIBRARY_ASK_PROMPT_VERSION,
+            "version": LIBRARY_ASK_CACHE_VERSION,
             "agent_loop": True,
             "model": config.provider.model,
             "question": question,
             "chat_history_hash": hash_json_payload(normalize_chat_history(chat_history or [])),
-            "prompt_hash": hash_text(LIBRARY_ASK_SYSTEM_PROMPT + "\n" + user_prompt),
             "schema_hash": hash_json_payload(LIBRARY_ASK_SCHEMA),
             "record_hashes": [hit["paper"].get("record_hash") for hit in matches],
         },
@@ -642,7 +632,7 @@ def run_library_qa_agent(
 ) -> Any:
     tools = LibraryToolRegistry(records)
     initial_matches = [
-        compact_library_record_for_agent(hit["paper"], score=hit["score"], include_memory=False)
+        compact_library_record_for_agent(hit["paper"], score=hit["score"])
         for hit in matches[:8]
     ]
     loop = AgentLoop(
@@ -686,40 +676,6 @@ def run_library_qa_agent(
             "initial_library_matches": initial_matches,
             "library_record_count": len(records),
         }
-    )
-
-
-def build_library_ask_prompt(
-    *,
-    question: str,
-    matches: list[dict[str, Any]],
-    chat_history: list[dict[str, Any]] | None = None,
-) -> str:
-    compact_records = []
-    for hit in matches:
-        record = hit["paper"]
-        compact_records.append(
-            {
-                "score": hit["score"],
-                "paper_id": record.get("paper_id"),
-                "title": record.get("title"),
-                "grade": record.get("grade"),
-                "tags": record.get("tags"),
-                "report_path": record.get("outputs", {}).get("briefing_md"),
-                "memory": record.get("memory"),
-                "graph_summary": compact_graph_summary_for_agent(record.get("graph_summary")),
-                "provenance": record.get("provenance"),
-            }
-        )
-    return "\n\n".join(
-        [
-            "question:",
-            question,
-            "recent_chat_history:",
-            json.dumps(normalize_chat_history(chat_history or []), ensure_ascii=False),
-            "retrieved_library_records:",
-            json.dumps(compact_records, ensure_ascii=False),
-        ]
     )
 
 
@@ -862,9 +818,7 @@ def compact_library_record_for_agent(
     record: dict[str, Any],
     *,
     score: float | None = None,
-    include_memory: bool,
 ) -> dict[str, Any]:
-    memory = dict_value(record.get("memory"))
     outputs = dict_value(record.get("outputs"))
     source = dict_value(record.get("source"))
     quality = dict_value(record.get("quality"))
@@ -883,8 +837,10 @@ def compact_library_record_for_agent(
         "grade": record.get("grade"),
         "source_ids": record_source_ids[:24],
         "tags": record.get("tags", [])[:10] if isinstance(record.get("tags"), list) else [],
-        "brief": compact_text(memory.get("brief") or memory.get("core_idea"), max_chars=380),
-        "core_idea": compact_text(memory.get("core_idea"), max_chars=420),
+        "brief": compact_text(
+            first_graph_label(graph_summary, "problem_nodes", "claim_nodes", "mechanism_nodes"),
+            max_chars=380,
+        ),
         "graph_summary": compact_graph_summary_for_agent(graph_summary),
         "report_path": outputs.get("briefing_md"),
         "source": {
@@ -906,40 +862,10 @@ def compact_library_record_for_agent(
     }
     if score is not None:
         payload["score"] = score
-    if include_memory:
-        payload["memory"] = {
-            "problem": compact_text(memory.get("problem"), max_chars=500),
-            "mechanism": compact_text(memory.get("mechanism"), max_chars=900),
-            "mechanism_steps": [
-                compact_text(item, max_chars=280)
-                for item in normalized_string_list(memory.get("mechanism_steps"))[:8]
-            ],
-            "evidence_summary": compact_text(memory.get("evidence_summary"), max_chars=900),
-            "limits": [
-                compact_text(item, max_chars=260)
-                for item in normalized_string_list(memory.get("limits"))[:8]
-            ],
-            "concepts": memory.get("concepts", [])[:12]
-            if isinstance(memory.get("concepts"), list)
-            else [],
-            "conceptual_bridge": memory.get("conceptual_bridge")
-            if isinstance(memory.get("conceptual_bridge"), dict)
-            else {},
-            "claims": memory.get("claims", [])[:12]
-            if isinstance(memory.get("claims"), list)
-            else [],
-            "evidence_items": memory.get("evidence_items", [])[:12]
-            if isinstance(memory.get("evidence_items"), list)
-            else [],
-            "uncertainties": [
-                compact_text(item, max_chars=260)
-                for item in normalized_string_list(memory.get("uncertainties"))[:8]
-            ],
-        }
-        payload["provenance"] = {
-            "source_ids": record_source_ids[:24],
-            "core_v2": core_v2_provenance,
-        }
+    payload["provenance"] = {
+        "source_ids": record_source_ids[:24],
+        "core_v2": core_v2_provenance,
+    }
     return payload
 
 
@@ -1143,17 +1069,9 @@ def build_record_search_text(
     title: str,
     brief: str,
     tags: list[str],
-    memory: dict[str, Any],
     graph_summary: dict[str, Any] | None = None,
 ) -> str:
     parts = [title, brief, " ".join(tags)]
-    for value in memory.values():
-        if isinstance(value, str):
-            parts.append(value)
-        elif isinstance(value, list):
-            parts.append(json.dumps(value, ensure_ascii=False))
-        elif isinstance(value, dict):
-            parts.append(json.dumps(value, ensure_ascii=False))
     if graph_summary:
         parts.append(build_graph_summary_search_text(graph_summary))
     return "\n".join(parts)

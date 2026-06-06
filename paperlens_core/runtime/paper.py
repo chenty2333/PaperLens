@@ -339,13 +339,6 @@ def context_uncertainty(context: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def context_pack_prompt(pack: ContextPack | dict[str, Any] | None) -> str:
-    if pack is None:
-        return "{}"
-    payload = pack.as_dict() if isinstance(pack, ContextPack) else pack
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
-
-
 def dedupe_queries(values: Iterable[Any]) -> list[str]:
     seen = set()
     queries = []
