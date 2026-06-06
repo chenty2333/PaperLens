@@ -161,12 +161,10 @@ def safe_workflow_stage(value: str | None) -> str | None:
         return None
 
 
-def output_dir_from_query(query: dict[str, list[str]], current: Path | None) -> Path:
+def output_dir_from_query(query: dict[str, list[str]]) -> Path:
     value = query.get("output_dir", [""])[0]
     if value:
         return Path(value).expanduser().resolve()
-    if current:
-        return current
     raise ValueError("Missing output_dir")
 
 
@@ -597,16 +595,11 @@ class PaperLensServiceState:
         self.engine = PaperLensEngine()
         self.jobs: dict[str, ManagedJob] = {}
         self.answers: dict[str, ManagedAnswer] = {}
-        self.current_output_dir: Path | None = None
         self._lock = threading.Lock()
-
-    def set_current_output_dir(self, output_dir: Path) -> None:
-        self.current_output_dir = output_dir.expanduser().resolve()
 
     def start_read_job(self, payload: dict[str, Any]) -> dict[str, Any]:
         input_dir = path_from_payload(payload, "input_dir")
         output_dir = path_from_payload(payload, "output_dir")
-        self.set_current_output_dir(output_dir)
         job_id = f"job_{uuid.uuid4().hex[:12]}"
         job = ManagedJob(
             job_id=job_id,
@@ -760,7 +753,6 @@ class PaperLensServiceState:
 
     def start_answer(self, payload: dict[str, Any]) -> dict[str, Any]:
         output_dir = path_from_payload(payload, "output_dir")
-        self.set_current_output_dir(output_dir)
         scope = string_or_none(payload.get("scope")) or "paper"
         question = string_or_none(payload.get("question"))
         if not question:
@@ -941,16 +933,16 @@ class PaperLensRequestHandler(BaseHTTPRequestHandler):
         if parts == ["version"]:
             return {"version": display_version(), "service": SERVER_VERSION}
         if parts == ["workspaces", "current"]:
-            output_dir = output_dir_from_query(query, self.state.current_output_dir)
+            output_dir = output_dir_from_query(query)
             return load_public_workspace(output_dir)
         if parts == ["library"]:
-            output_dir = output_dir_from_query(query, self.state.current_output_dir)
+            output_dir = output_dir_from_query(query)
             return {"workspace": load_public_workspace(output_dir)}
         if parts == ["papers"]:
-            output_dir = output_dir_from_query(query, self.state.current_output_dir)
+            output_dir = output_dir_from_query(query)
             return {"papers": load_public_workspace(output_dir)["papers"]}
         if len(parts) == 2 and parts[0] == "papers":
-            output_dir = output_dir_from_query(query, self.state.current_output_dir)
+            output_dir = output_dir_from_query(query)
             paper_id = parts[1]
             workspace = load_public_workspace(output_dir)
             paper = next((item for item in workspace["papers"] if item.get("paper_id") == paper_id), None)
@@ -958,13 +950,13 @@ class PaperLensRequestHandler(BaseHTTPRequestHandler):
                 raise FileNotFoundError(f"Unknown paper_id: {paper_id}")
             return {"paper": paper}
         if len(parts) == 3 and parts[0] == "papers" and parts[2] == "report":
-            output_dir = output_dir_from_query(query, self.state.current_output_dir)
+            output_dir = output_dir_from_query(query)
             return load_report(output_dir, parts[1])
         if len(parts) == 3 and parts[0] == "papers" and parts[2] == "evidence":
-            output_dir = output_dir_from_query(query, self.state.current_output_dir)
+            output_dir = output_dir_from_query(query)
             return load_evidence(output_dir, parts[1])
         if parts == ["assets"]:
-            output_dir = output_dir_from_query(query, self.state.current_output_dir)
+            output_dir = output_dir_from_query(query)
             asset_path = query.get("path", [""])[0]
             return FileResult(resolve_output_asset(output_dir, asset_path))
         if parts == ["jobs"]:
@@ -997,7 +989,6 @@ class PaperLensRequestHandler(BaseHTTPRequestHandler):
         payload = read_request_json(self)
         if parts == ["workspaces", "open"]:
             output_dir = path_from_payload(payload, "output_dir")
-            self.state.set_current_output_dir(output_dir)
             return load_public_workspace(output_dir)
         if parts == ["jobs", "read"]:
             return self.state.start_read_job(payload)

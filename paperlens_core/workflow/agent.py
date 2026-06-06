@@ -18,7 +18,7 @@ from paperlens_core.events import EventWriter, write_json
 from paperlens_core.pdf.ingest import scan_pdfs
 from paperlens_core.pdf.layout_index import build_layout_index
 from paperlens_core.pdf.pymupdf_parser import parse_pdf
-from paperlens_core.pdf.qa import parse_quality
+from paperlens_core.pdf.quality import parse_quality
 from paperlens_core.quality_snapshot import write_core_quality_snapshot
 from paperlens_core.report import (
     classification_counts,
