@@ -773,7 +773,7 @@ def normalize_agent_turn(raw: LlmJsonResult) -> dict[str, Any]:
 
 def parse_final_envelope(value: Any, *, artifact_type: str) -> ArtifactEnvelope:
     if not isinstance(value, dict) or not value:
-        raise ValueError(f"Agent returned final action without an ArtifactEnvelope")
+        raise ValueError("Agent returned final action without an ArtifactEnvelope")
     envelope = ArtifactEnvelope.model_validate(value).require_type(artifact_type)
     if not isinstance(envelope.data, dict):
         raise ValueError(f"{artifact_type} envelope data must be an object")

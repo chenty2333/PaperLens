@@ -146,15 +146,45 @@ EQUATION_READING_TASKS = {
 }
 
 
+SECTION_TASK_MAPPING: dict[str, tuple[ReadingTaskType, ...]] = {
+    "abstract": (ReadingTaskType.ORIENTATION, ReadingTaskType.CLAIM_INVENTORY),
+    "introduction": (ReadingTaskType.ORIENTATION, ReadingTaskType.CLAIM_INVENTORY, ReadingTaskType.RELATED_POSITIONING),
+    "background": (ReadingTaskType.CONCEPT_BRIDGE, ReadingTaskType.ORIENTATION),
+    "related": (ReadingTaskType.RELATED_POSITIONING,),
+    "method": (ReadingTaskType.METHOD_MECHANISM, ReadingTaskType.IMPLEMENTATION_PATH),
+    "approach": (ReadingTaskType.METHOD_MECHANISM,),
+    "design": (ReadingTaskType.METHOD_MECHANISM, ReadingTaskType.IMPLEMENTATION_PATH),
+    "architecture": (ReadingTaskType.METHOD_MECHANISM, ReadingTaskType.IMPLEMENTATION_PATH),
+    "implementation": (ReadingTaskType.IMPLEMENTATION_PATH, ReadingTaskType.REPRODUCIBILITY),
+    "experiment": (ReadingTaskType.EVALUATION_SETUP,),
+    "evaluation": (ReadingTaskType.EVALUATION_SETUP, ReadingTaskType.RESULT_EXTRACTION),
+    "result": (ReadingTaskType.RESULT_EXTRACTION,),
+    "discussion": (ReadingTaskType.LIMITATIONS,),
+    "limitation": (ReadingTaskType.LIMITATIONS,),
+    "conclusion": (ReadingTaskType.LIMITATIONS, ReadingTaskType.CLAIM_INVENTORY),
+    "reproducibility": (ReadingTaskType.REPRODUCIBILITY,),
+}
+
+
 def build_initial_reading_plan(
     dom: PaperDOM, *, max_sources_per_task: int = 8, max_tokens_per_task: int = 16000
 ) -> ReadingPlan:
-    tasks = []
-    for index, task_type in enumerate(ReadingTaskType, start=1):
-        targets = select_sources_for_task(dom, task_type, limit=max_sources_per_task)
+    section_task_map = _map_sections_to_tasks(dom)
+    covered_source_ids: set[str] = set()
+    tasks: list[ReadingTask] = []
+    task_index = 0
+
+    for task_type in ReadingTaskType:
+        targets = _select_sources_for_task_type(
+            dom, task_type, section_task_map, max_sources_per_task
+        )
+        if not targets:
+            continue
+        task_index += 1
+        covered_source_ids.update(targets)
         tasks.append(
             ReadingTask(
-                task_id=f"read_{index:02d}_{task_type.value}",
+                task_id=f"read_{task_index:02d}_{task_type.value}",
                 task_type=task_type,
                 target_source_ids=targets,
                 required_outputs=required_outputs_for_task(task_type),
@@ -163,52 +193,82 @@ def build_initial_reading_plan(
                 max_tokens=max_tokens_per_task,
             )
         )
+
+    uncovered = _detect_coverage_gaps(dom, covered_source_ids)
+    if uncovered and tasks:
+        _distribute_uncovered_sources(tasks, uncovered, max_sources_per_task)
+
+    if not tasks:
+        tasks = _fallback_tasks(dom, max_sources_per_task, max_tokens_per_task)
+
     return ReadingPlan(paper_id=dom.paper_id, tasks=tasks)
 
 
-def select_sources_for_task(dom: PaperDOM, task_type: ReadingTaskType, *, limit: int) -> list[str]:
+def _map_sections_to_tasks(dom: PaperDOM) -> dict[str, list[ReadingTaskType]]:
+    result: dict[str, list[ReadingTaskType]] = {}
+    for section in dom.sections:
+        title_lower = normalize_heading_text(section.title)
+        matched: list[ReadingTaskType] = []
+        for keyword, task_types in SECTION_TASK_MAPPING.items():
+            if keyword in title_lower:
+                for task_type in task_types:
+                    if task_type not in matched:
+                        matched.append(task_type)
+        result[section.source_id] = matched if matched else list(ReadingTaskType)
+    return result
+
+
+def _select_sources_for_task_type(
+    dom: PaperDOM,
+    task_type: ReadingTaskType,
+    section_task_map: dict[str, list[ReadingTaskType]],
+    limit: int,
+) -> list[str]:
     keywords = TASK_KEYWORDS[task_type]
-    matches = []
     spans_by_id = {span.source_id: span for span in dom.spans}
     section_titles = {
         section.source_id: normalize_heading_text(section.title) for section in dom.sections
     }
+    matches: list[str] = []
+
     for section in dom.sections:
-        section_text = section.title.lower()
-        if any(keyword in section_text for keyword in keywords):
-            matches.extend(
-                non_heading_section_span_ids(section.span_ids, spans_by_id, section.title)
-            )
+        if task_type not in section_task_map.get(section.source_id, []):
+            continue
+        matches.extend(
+            non_heading_section_span_ids(section.span_ids, spans_by_id, section.title)
+        )
+
     for span in dom.spans:
         if is_heading_span(span, section_titles):
             continue
-        haystack = span.text.lower()
-        if any(keyword in haystack for keyword in keywords):
-            matches.append(span.source_id)
+        if span.source_id in matches:
+            continue
+        section_id = getattr(span, "section_id", None)
+        if section_id and task_type in section_task_map.get(section_id, []):
+            haystack = span.text.lower()
+            if any(keyword in haystack for keyword in keywords):
+                matches.append(span.source_id)
+
     if task_type in EQUATION_READING_TASKS:
         matches.extend(item.source_id for item in dom.equations)
     if task_type == ReadingTaskType.RESULT_EXTRACTION:
         matches.extend(item.source_id for item in [*dom.figures, *dom.tables])
-    deduped = []
+
+    deduped: list[str] = []
     for source_id in matches:
         if source_id and source_id not in deduped:
             deduped.append(source_id)
         if len(deduped) >= limit:
             return deduped
+
     if not deduped:
-        return default_sources_for_task(
-            dom,
-            task_type,
-            limit=limit,
-            section_titles=section_titles,
-        )
+        return _positional_fallback(dom, task_type, limit, section_titles)
     return deduped
 
 
-def default_sources_for_task(
+def _positional_fallback(
     dom: PaperDOM,
     task_type: ReadingTaskType,
-    *,
     limit: int,
     section_titles: dict[str, str],
 ) -> list[str]:
@@ -232,13 +292,66 @@ def default_sources_for_task(
         candidates.extend(item.source_id for item in dom.equations)
     if task_type == ReadingTaskType.RESULT_EXTRACTION:
         candidates.extend(item.source_id for item in [*dom.figures, *dom.tables])
-    result = []
+    result: list[str] = []
     for source_id in candidates:
         if source_id and source_id not in result:
             result.append(source_id)
         if len(result) >= limit:
             return result
     return result
+
+
+def _detect_coverage_gaps(dom: PaperDOM, covered: set[str]) -> list[str]:
+    gaps: list[str] = []
+    for span in dom.spans:
+        if span.source_id not in covered:
+            gaps.append(span.source_id)
+    return gaps
+
+
+def _distribute_uncovered_sources(
+    tasks: list[ReadingTask], uncovered: list[str], max_per_task: int
+) -> None:
+    task_slots = {
+        task.task_id: max(0, max_per_task - len(task.target_source_ids))
+        for task in tasks
+    }
+    task_order = sorted(task_slots, key=lambda tid: task_slots[tid], reverse=True)
+    for source_id in uncovered:
+        for task_id in task_order:
+            if task_slots[task_id] <= 0:
+                continue
+            for task in tasks:
+                if task.task_id == task_id:
+                    task.target_source_ids.append(source_id)
+                    task_slots[task_id] -= 1
+                    break
+            break
+
+
+def _fallback_tasks(
+    dom: PaperDOM, max_sources_per_task: int, max_tokens_per_task: int
+) -> list[ReadingTask]:
+    section_titles = {
+        section.source_id: normalize_heading_text(section.title) for section in dom.sections
+    }
+    tasks: list[ReadingTask] = []
+    for index, task_type in enumerate(ReadingTaskType, start=1):
+        targets = _positional_fallback(dom, task_type, max_sources_per_task, section_titles)
+        if not targets:
+            continue
+        tasks.append(
+            ReadingTask(
+                task_id=f"read_{index:02d}_{task_type.value}",
+                task_type=task_type,
+                target_source_ids=targets,
+                required_outputs=required_outputs_for_task(task_type),
+                allowed_observation_types=allowed_observation_types_for_task(task_type),
+                max_model_calls=1,
+                max_tokens=max_tokens_per_task,
+            )
+        )
+    return tasks
 
 
 def positional_span_window(spans: list[Any], *, start: float, end: float) -> list[Any]:

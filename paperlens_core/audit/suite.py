@@ -5,7 +5,8 @@ import re
 from paperlens_core.audit.findings import AuditFinding, AuditSeverity, PublishStatus
 from paperlens_core.dom.paper_dom import PaperDOM
 from paperlens_core.grounding import text_overlaps_any_reference
-from paperlens_core.graph.claim_graph import ClaimGraph, graph_from_observations
+from paperlens_core.graph.claim_graph import ClaimGraph
+from paperlens_core.graph import build_claim_graph
 from paperlens_core.reading.observation import ObservationLog
 from paperlens_core.reading.tasks import ReadingPlan
 
@@ -378,7 +379,7 @@ def audit_claim_graph_from_observation_log(
     log: ObservationLog,
 ) -> list[AuditFinding]:
     try:
-        expected = graph_from_observations(log.paper_id, list(log.cards))
+        expected = build_claim_graph(log.paper_id, list(log.cards))
     except ValueError as exc:
         return [
             AuditFinding(

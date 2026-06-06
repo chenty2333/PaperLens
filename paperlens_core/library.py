@@ -23,6 +23,7 @@ from paperlens_core.library_graph import (
     normalize_graph_evidence,
     read_core_v2_graph_summary,
 )
+from paperlens_core.library_relations import build_cross_paper_relations
 
 
 APP_NAME = "PaperLens"
@@ -202,7 +203,13 @@ def write_library_records(
         json.dumps(search_index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
 
-    return [records_path, index_path]
+    relations = build_cross_paper_relations(records)
+    relations_path = index_root / "cross_paper_relations.json"
+    relations_path.write_text(
+        json.dumps(relations, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+    return [records_path, index_path, relations_path]
 
 
 def rebuild_library_index(output_dir: Path) -> Path:

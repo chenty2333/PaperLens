@@ -18,7 +18,7 @@ from paperlens_core.control import ControlState
 from paperlens_core.core_manifest import write_core_v2_manifest
 from paperlens_core.dom import PaperDOM, PaperSpan, build_paper_dom_from_layout
 from paperlens_core.events import EventWriter
-from paperlens_core.graph import ClaimGraph, graph_from_observations
+from paperlens_core.graph import ClaimGraph, build_claim_graph
 from paperlens_core.memory import materialize_paper_memory
 from paperlens_core.reading import (
     ObservationCard,
@@ -327,7 +327,7 @@ def write_core_v2_artifacts(
     )
     reading_plan = build_initial_reading_plan(dom)
     observation_log = bootstrap_observation_log(dom, reading_plan)
-    claim_graph = graph_from_observations(paper.paper_id, list(observation_log.cards))
+    claim_graph = build_claim_graph(paper.paper_id, list(observation_log.cards))
     derived = build_core_v2_derived_views(
         dom=dom,
         observation_log=observation_log,
@@ -551,7 +551,7 @@ def write_core_v2_from_observation_log(
         reading_plan=reading_plan,
         observation_log=observation_log,
     )
-    claim_graph = graph_from_observations(paper.paper_id, list(observation_log.cards))
+    claim_graph = build_claim_graph(paper.paper_id, list(observation_log.cards))
     derived = build_core_v2_derived_views(
         dom=dom,
         observation_log=observation_log,
