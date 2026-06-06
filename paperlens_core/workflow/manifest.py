@@ -56,17 +56,20 @@ def validate_paperlens_output(
     ]
     if not main_report.exists():
         issues.append("PaperLens.md is missing")
+        main_report_link_targets: set[str] = set()
     elif not main_report.read_text(encoding="utf-8").strip():
         issues.append("PaperLens.md is empty")
+        main_report_link_targets = set()
     else:
         markdown = main_report.read_text(encoding="utf-8")
+        main_report_link_targets = set(local_markdown_link_targets(markdown))
         for marker in fallback_markers:
             if marker in markdown:
                 issues.append(f"Fallback report marker in PaperLens.md: {marker}")
         for marker in render_markers:
             if marker in markdown:
                 issues.append(f"Escaped newline marker in PaperLens.md: {marker}")
-        for target in local_markdown_link_targets(markdown):
+        for target in main_report_link_targets:
             checked_links += 1
             target_path = resolve_markdown_target(output_dir, target)
             if target_path is None:
@@ -197,6 +200,8 @@ def validate_paperlens_output(
             issues.append(f"Core graph report output target is missing for {paper_id}")
         elif core_graph_path.is_file() and not core_graph_path.read_text(encoding="utf-8").strip():
             issues.append(f"Core graph report output target is empty for {paper_id}")
+        if not markdown_target_is_linked(main_report_link_targets, core_graph_report):
+            issues.append(f"Core graph report is not linked from PaperLens.md for {paper_id}")
     result = {
         "status": "PASS" if not issues else "FAIL",
         "checked_links": checked_links,
@@ -242,6 +247,18 @@ def read_library_records_by_paper_id(path: Path) -> dict[str, dict[str, Any]]:
         if paper_id:
             records[paper_id] = row
     return records
+
+
+def markdown_target_is_linked(targets: set[str], expected: str) -> bool:
+    normalized_expected = normalize_markdown_target(expected)
+    return any(normalize_markdown_target(target) == normalized_expected for target in targets)
+
+
+def normalize_markdown_target(target: str) -> str:
+    target = re.split(r"[?#]", target, maxsplit=1)[0].strip()
+    while target.startswith("./"):
+        target = target[2:]
+    return target.replace("\\", "/")
 
 
 def summarize_model_calls(path: Path) -> dict[str, Any]:
