@@ -614,7 +614,6 @@ def answer_library_question(
         matches=matches,
         question=question,
         chat_history=chat_history or [],
-        user_prompt=user_prompt,
     )
     answer = normalize_library_answer(result.final)
     answer["cache_hit"] = False
@@ -640,7 +639,6 @@ def run_library_qa_agent(
     matches: list[dict[str, Any]],
     question: str,
     chat_history: list[dict[str, Any]],
-    user_prompt: str,
 ) -> Any:
     tools = LibraryToolRegistry(records)
     initial_matches = [

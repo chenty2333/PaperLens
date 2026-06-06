@@ -821,6 +821,7 @@ def source_pack(dom: PaperDOM, source_ids: list[str]) -> list[dict[str, Any]]:
             "kind": equation.kind,
             "page_no": equation.page_no,
             "section_id": equation.section_id,
+            "source_span_id": equation.source_span_id,
             "text": equation.latex_or_text,
         }
     result = []

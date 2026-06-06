@@ -55,6 +55,7 @@ class PaperEquation(PaperDOMNode):
     kind: Literal["equation"] = "equation"
     latex_or_text: str
     section_id: str | None = None
+    source_span_id: str | None = None
 
 
 class PaperDOM(BaseModel):
@@ -130,6 +131,18 @@ class PaperDOM(BaseModel):
             raise ValueError(
                 "PaperDOM nodes reference missing sections: "
                 + ", ".join(missing_section_refs[:8])
+            )
+        missing_equation_span_refs = sorted(
+            {
+                equation.source_span_id
+                for equation in self.equations
+                if equation.source_span_id and equation.source_span_id not in span_ids
+            }
+        )
+        if missing_equation_span_refs:
+            raise ValueError(
+                "PaperDOM equations reference missing spans: "
+                + ", ".join(missing_equation_span_refs[:8])
             )
         return self
 
@@ -232,6 +245,7 @@ def build_paper_dom_from_layout(
                     current_section_id,
                     paragraph_index=index,
                     paragraph=paragraph,
+                    span_source_id=source_id,
                 )
             )
         figures.extend(extract_visual_nodes(paper_id, page_key, page_no, page, key="figures"))
@@ -318,11 +332,10 @@ def extract_equations(
     *,
     paragraph_index: int,
     paragraph: str,
+    span_source_id: str,
 ) -> list[PaperEquation]:
     equations = []
-    for index, match in enumerate(
-        re.finditer(r"(\$[^$]{2,}\$|\\\[[^\]]{2,}\\\])", paragraph), start=1
-    ):
+    for index, equation_text in enumerate(equation_candidates(paragraph), start=1):
         equations.append(
             PaperEquation(
                 source_id=stable_source_id(
@@ -331,10 +344,80 @@ def extract_equations(
                 paper_id=paper_id,
                 page_no=page_no,
                 section_id=section_id,
-                latex_or_text=match.group(0),
+                source_span_id=span_source_id,
+                latex_or_text=equation_text,
             )
         )
     return equations
+
+
+def equation_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    for match in re.finditer(r"(\$\$?[^$]{2,}\$\$?|\\\[[^\]]{2,}\\\]|\\\([^\)]{2,}\\\))", text):
+        add_unique_text(candidates, match.group(0))
+    for line in split_equation_lines(text):
+        if looks_like_equation(line):
+            add_unique_text(candidates, line)
+    return candidates
+
+
+def split_equation_lines(text: str) -> list[str]:
+    return [
+        clean_text(line)
+        for line in re.split(r"(?:\n|;\s+)", text)
+        if clean_text(line)
+    ]
+
+
+def looks_like_equation(text: str) -> bool:
+    normalized = clean_text(text)
+    if len(normalized) < 5 or len(normalized) > 260:
+        return False
+    lower = normalized.lower()
+    if lower.startswith(("figure ", "fig. ", "table ", "algorithm ")):
+        return False
+    math_markers = [
+        "=",
+        "\u2264",
+        "\u2265",
+        "\\sum",
+        "\\prod",
+        "\\frac",
+        "\\arg",
+        "\\min",
+        "\\max",
+        "\u2211",
+        "\u220f",
+        "\u221a",
+        "\u2202",
+        "\u2207",
+        "\u2248",
+        "\u2243",
+        "\u2208",
+        "\u2200",
+    ]
+    if not any(marker in normalized for marker in math_markers):
+        return False
+    symbol_count = len(
+        re.findall(
+            "[=+\\-*/^_{}()[\\]<>"
+            "\\u2264\\u2265\\u2248\\u2211\\u220f\\u221a\\u2202\\u2207\\u2208\\u2200]",
+            normalized,
+        )
+    )
+    digit_or_latin = len(re.findall(r"[A-Za-z0-9]", normalized))
+    word_count = len(re.findall(r"[A-Za-z]{3,}", normalized))
+    if symbol_count < 2:
+        return False
+    if digit_or_latin == 0:
+        return False
+    return word_count <= 18 or symbol_count >= 4
+
+
+def add_unique_text(values: list[str], text: str) -> None:
+    cleaned = clean_text(text)
+    if cleaned and cleaned not in values:
+        values.append(cleaned)
 
 
 def split_paragraphs(text: str) -> list[str]:

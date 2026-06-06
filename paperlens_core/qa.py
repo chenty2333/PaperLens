@@ -247,7 +247,6 @@ def answer_question(
         selected_pages=pages,
         core_v2_context=core_v2_context,
         agent_context=agent_context,
-        user_prompt=user_prompt,
     )
     answer = normalize_answer(result.final)
     answer = ground_qa_answer_in_core_v2_context(answer, core_v2_context)
@@ -928,7 +927,6 @@ def run_paper_qa_agent(
     selected_pages: list[dict[str, Any]],
     core_v2_context: dict[str, Any],
     agent_context: dict[str, Any],
-    user_prompt: str,
 ) -> Any:
     runtime = PaperLensRuntime(artifacts=layout_pages)
     tools = PaperToolRegistry(
