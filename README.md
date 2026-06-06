@@ -10,12 +10,12 @@ PaperLens is a desktop paper-reading agent. It is not a PDF reader, a traditiona
 ## What It Does
 
 - Reads PDFs with text, layout, page images, figure/table hints, and deterministic paper-local tools.
-- Builds the paper map once: sections, page numbers, figures/tables, and key text blocks.
+- Builds the paper map once as PaperDOM: sections, source IDs, figures/tables, equations, and key text blocks.
 - Builds a deterministic Reading Plan over PaperDOM source IDs and records append-only observations.
 - Builds ClaimGraph as the source of truth; PaperMemory is a derived product view, not a model-edited state file.
 - Runs deterministic audit checks over graph nodes, edges, source IDs, and numeric grounding.
 - Writes the paper report as a readable ClaimGraph view; reports cannot introduce new facts.
-- Answers questions from ClaimGraph, evidence, local pages, and library graph records rather than from the rendered report.
+- Answers questions from ClaimGraph nodes, PaperDOM source evidence, and library graph records rather than from the rendered report or page-number references.
 - Maintains a local graph library containing only papers PaperLens has processed.
 - Ships as a Windows Tauri desktop app with a Python `paperlens-core` sidecar.
 

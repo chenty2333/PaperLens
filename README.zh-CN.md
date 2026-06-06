@@ -10,12 +10,12 @@ PaperLens 是一个桌面端论文阅读 agent。它不是 PDF reader，不是�
 ## 它做什么
 
 - 读取 PDF 的文本、版面、页面图像、图表线索和论文内确定性工具结果。
-- 只建一次论文地图：章节、页码、图表和关键文本块。
+- 只建一次 PaperDOM：章节、source ID、图表、公式和关键文本块。
 - 基于 PaperDOM source ID 生成确定性的 Reading Plan，并只记录 append-only observation。
 - 以 ClaimGraph 作为事实源；PaperMemory 只是派生的产品视图，不是模型可随意改写的状态文件。
 - 用确定性审计检查图节点、边、source ID 和数值定位。
 - 报告是 ClaimGraph 的可读视图，不能新增事实。
-- QA 直接从 ClaimGraph、evidence、局部页面和 library graph record 回答，不从渲染后的报告里二次总结。
+- QA 直接从 ClaimGraph 节点、PaperDOM source evidence 和 library graph record 回答，不从渲染后的报告或页码引用里二次总结。
 - 维护一个只包含 PaperLens 已经处理过论文的本地图 library。
 - 作为 Windows Tauri 桌面 App 发布，核心引擎是 Python `paperlens-core` sidecar。
 

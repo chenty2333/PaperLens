@@ -20,8 +20,6 @@ from paperlens_core.dom import PaperDOM
 from paperlens_core.grounding import text_overlaps_any_reference
 from paperlens_core.graph import ClaimGraph
 from paperlens_core.library import compact_library_record_for_agent, read_library_records
-from paperlens_core.runtime import PaperLensRuntime
-from paperlens_core.runtime import page_source_ids
 from paperlens_core.workflow.core_v2 import (
     load_core_v2_dom_and_graph,
     load_core_v2_dom_and_plan,
@@ -128,13 +126,9 @@ def answer_question(
         core_v2_context=core_v2_context,
     )
     augmented_query = qa_context_augmented_query(question, qa_context)
-    pages = select_relevant_pages(layout, augmented_query, qa_context=qa_context)
-    pages = merge_core_v2_pages(pages, layout, core_v2_context)
+    focus_source_ids = qa_focus_source_ids(core_v2_context)
     layout_pages = [page for page in layout.get("pages", []) if isinstance(page, dict)]
-    runtime = PaperLensRuntime(artifacts=layout_pages)
-    agent_context = runtime.build_context_pack(
-        stage="qa",
-        objective=qa_context_objective(core_v2_context),
+    agent_context = build_qa_source_context_pack(
         paper_id=resolved_paper_id,
         title=string_or_empty(
             library_record.get("title") or dict_value(core_v2_context.get("metadata")).get("title")
@@ -143,23 +137,13 @@ def answer_question(
             library_record.get("grade")
             or dict_value(qa_context.get("reading_context")).get("grade")
         ),
-        context=qa_context,
-        focus_queries=[question, augmented_query],
-        focus_source_ids=unique_strings(
-            source_id for page in pages for source_id in page_source_ids(page)
-        ),
-        read_artifacts=pages,
-        output_contract={
-            "type": "QAAnswer",
-            "question_type": question_type,
-            "rule": (
-                "Answer from ClaimGraph/PaperDOM source_ids when available; keep paper claims, "
-                "PaperLens inference, background, and evidence limits separate."
-            ),
-        },
-        search_limit=5,
-        source_text_limit=1000,
-    ).as_dict()
+        question=question,
+        augmented_query=augmented_query,
+        question_type=question_type,
+        qa_context=qa_context,
+        core_v2_context=core_v2_context,
+        focus_source_ids=focus_source_ids,
+    )
     if config.offline_debug or config.provider.kind == "none":
         answer = offline_qa_answer(
             paper_id=resolved_paper_id,
@@ -171,7 +155,7 @@ def answer_question(
             output_dir,
             answer,
             question=question,
-            selected_pages=pages,
+            selected_source_ids=focus_source_ids,
             cache_hit=False,
             agent_context=agent_context,
             core_v2_context=core_v2_context,
@@ -211,7 +195,7 @@ def answer_question(
             output_dir,
             answer,
             question=question,
-            selected_pages=pages,
+            selected_source_ids=focus_source_ids,
             cache_hit=True,
             agent_context=agent_context,
             core_v2_context=core_v2_context,
@@ -251,7 +235,7 @@ def answer_question(
         output_dir,
         answer,
         question=question,
-        selected_pages=pages,
+        selected_source_ids=focus_source_ids,
         cache_hit=False,
         agent_context=agent_context,
         core_v2_context=core_v2_context,
@@ -447,13 +431,14 @@ def qa_context_objective(core_v2_context: dict[str, Any]) -> str:
         )
     if core_v2_context.get("retrieval_policy"):
         return (
-            "Answer the user's question by dynamically grounding it in local paper evidence. "
-            "Core v2 exists but is not reviewed, so paper-claim evidence must come from "
-            "selected page excerpts or remain uncertain."
+            "Core v2 exists but is not reviewed. Answer with background context where useful, "
+            "but paper-specific claims must stay uncertain instead of falling back to page "
+            "excerpts."
         )
     return (
-        "Answer the user's question by dynamically grounding it in selected local paper "
-        "evidence. Do not use rendered reports as proof."
+        "Answer only with background context or uncertainty until a reviewed core v2 "
+        "ClaimGraph/PaperDOM evidence set exists. Do not use rendered reports or page excerpts "
+        "as proof."
     )
 
 
@@ -491,7 +476,7 @@ def core_v2_qa_context_view(*, paper_id: str, core_v2_context: dict[str, Any]) -
     evidence_by_id: dict[str, dict[str, Any]] = {}
     for match in list_of_dicts(core_v2_context.get("matches"))[:12]:
         source_ids = unique_strings(
-            source_id for source_id in match.get("source_ids", []) if isinstance(source_id, str)
+            source_id for source_id in normalized_source_id_list(match.get("source_ids"))
         )
         claims.append(
             {
@@ -511,8 +496,9 @@ def core_v2_qa_context_view(*, paper_id: str, core_v2_context: dict[str, Any]) -
                 continue
             evidence_by_id[source_id] = {
                 "id": source_id,
+                "source_id": source_id,
+                "source_ids": [source_id],
                 "source_type": span.get("kind") or "paper_dom_source",
-                "page": span.get("page_no"),
                 "interpretation": span.get("text")
                 or span.get("caption")
                 or f"PaperDOM source {source_id}",
@@ -745,34 +731,6 @@ def core_v2_source_index(dom: PaperDOM) -> dict[str, dict[str, Any]]:
     return result
 
 
-def merge_core_v2_pages(
-    pages: list[dict[str, Any]],
-    layout: dict[str, Any],
-    core_v2_context: dict[str, Any],
-) -> list[dict[str, Any]]:
-    wanted_pages = []
-    for match in list_of_dicts(core_v2_context.get("matches")):
-        for span in list_of_dicts(match.get("evidence_spans")):
-            if isinstance(span, dict) and isinstance(span.get("page_no"), int):
-                wanted_pages.append(span["page_no"])
-    if not wanted_pages:
-        return pages
-    all_pages = layout.get("pages") if isinstance(layout.get("pages"), list) else []
-    by_no = {
-        page.get("page_no"): page
-        for page in all_pages
-        if isinstance(page, dict) and isinstance(page.get("page_no"), int)
-    }
-    merged = list(pages)
-    existing = {page.get("page_no") for page in merged if isinstance(page.get("page_no"), int)}
-    for number in wanted_pages:
-        page = by_no.get(number)
-        if page and number not in existing:
-            merged.append(page)
-            existing.add(number)
-    return merged[:8]
-
-
 def offline_qa_answer(
     *,
     paper_id: str,
@@ -785,26 +743,15 @@ def offline_qa_answer(
         source_ids = unique_strings(
             source_id
             for item in matches[:5]
-            for source_id in item.get("source_ids", [])
-            if isinstance(source_id, str)
-        )
-        pages_from_sources = unique_ints(
-            span.get("page_no")
-            for item in matches[:5]
-            for span in item.get("evidence_spans", [])
-            if isinstance(span, dict)
+            for source_id in normalized_source_id_list(item.get("source_ids"))
         )
         lines = ["离线模式下未调用模型；下面是从 ClaimGraph 命中的原文锚定事实："]
         for item in matches[:5]:
-            source_hint = ", ".join(item.get("source_ids", [])[:3])
+            source_hint = ", ".join(normalized_source_id_list(item.get("source_ids"))[:3])
             suffix = f"（source_ids: {source_hint}）" if source_hint else ""
             lines.append(f"- [{item.get('kind')}] {item.get('label')}{suffix}")
             for relation in list_of_dicts(item.get("relationships"))[:3]:
-                relation_sources = [
-                    source_id
-                    for source_id in relation.get("source_ids", [])
-                    if isinstance(source_id, str)
-                ][:3]
+                relation_sources = normalized_source_id_list(relation.get("source_ids"))[:3]
                 relation_suffix = (
                     f"（source_ids: {', '.join(relation_sources)}）" if relation_sources else ""
                 )
@@ -816,7 +763,6 @@ def offline_qa_answer(
         return {
             "paper_id": paper_id,
             "answer_markdown": "\n".join(lines),
-            "cited_pages": pages_from_sources,
             "cited_source_ids": source_ids,
             "confidence": "medium" if source_ids else "low",
             "question_type": question_type,
@@ -834,7 +780,6 @@ def offline_qa_answer(
                 "离线模式下未调用模型；reviewed ClaimGraph 没有为当前问题返回可引用的 "
                 "PaperDOM 证据命中，因此不能生成论文事实回答。"
             ),
-            "cited_pages": [],
             "cited_source_ids": [],
             "confidence": "low",
             "question_type": question_type,
@@ -850,7 +795,6 @@ def offline_qa_answer(
     return {
         "paper_id": paper_id,
         "answer_markdown": "当前是离线模式，且没有可消费的 reviewed ClaimGraph/PaperDOM 证据。",
-        "cited_pages": [],
         "cited_source_ids": [],
         "confidence": "low",
         "question_type": question_type,
@@ -880,16 +824,6 @@ def unique_strings(values: Any) -> list[str]:
     return result
 
 
-def unique_ints(values: Any) -> list[int]:
-    result = []
-    for value in values:
-        if not isinstance(value, int):
-            continue
-        if value > 0 and value not in result:
-            result.append(value)
-    return result
-
-
 def run_paper_qa_agent(
     *,
     client: JsonLlmClient,
@@ -905,9 +839,7 @@ def run_paper_qa_agent(
     core_v2_context: dict[str, Any],
     agent_context: dict[str, Any],
 ) -> Any:
-    runtime = PaperLensRuntime(artifacts=layout_pages)
     tools = PaperToolRegistry(
-        runtime=runtime,
         paper_id=paper_id,
         title=title,
         context=qa_context,
@@ -918,8 +850,8 @@ def run_paper_qa_agent(
         tools=tools,
         session_name="paper_qa",
         objective=(
-            "Answer the current paper question. Use background knowledge freely for teaching, "
-            "but use paper tools before making paper-specific claims."
+            "Answer the current paper question. Paper-specific claims must come from reviewed "
+            "ClaimGraph nodes and PaperDOM source IDs; otherwise mark them uncertain."
         ),
         final_artifact_type="paper_qa_answer",
         final_data_schema=ASK_SCHEMA,
@@ -933,9 +865,7 @@ def run_paper_qa_agent(
         max_tokens=12000,
         timeout_seconds=180.0,
         allowed_tools=(
-            "paper.search_text",
             "paper.read_sources",
-            "paper.find_figures",
             "qa_context.search",
             "qa_context.get_claim",
             "evidence.lookup",
@@ -944,7 +874,7 @@ def run_paper_qa_agent(
             "artifact_type": "paper_qa_answer",
             "paper_specific_claims": "must use ClaimGraph nodes or PaperDOM source_ids",
             "forbidden_dependency": "final markdown report is not evidence",
-            "page_numbers": "navigation metadata only; not proof identifiers",
+            "forbidden_tools": "no raw paper search or page-number evidence lookup in QA",
             "source_attribution": {
                 "paper_claims": "claims directly supported by graph/source evidence",
                 "paperlens_inferences": "PaperLens synthesis or cautious interpretation",
@@ -995,7 +925,7 @@ def write_qa_trace(
     answer: dict[str, Any],
     *,
     question: str,
-    selected_pages: list[dict[str, Any]],
+    selected_source_ids: list[str],
     cache_hit: bool,
     agent_context: dict[str, Any] | None = None,
     core_v2_context: dict[str, Any] | None = None,
@@ -1007,9 +937,8 @@ def write_qa_trace(
         "question": question,
         "question_type": answer.get("question_type"),
         "confidence": answer.get("confidence"),
-        "cited_pages": answer.get("cited_pages"),
         "cited_source_ids": answer.get("cited_source_ids") or [],
-        "selected_pages": [page.get("page_no") for page in selected_pages[:8]],
+        "selected_source_ids": selected_source_ids[:16],
         "selected_graph_nodes": [
             match.get("node_id")
             for match in list_of_dicts((core_v2_context or {}).get("matches"))[:8]
@@ -1091,37 +1020,76 @@ def paperlens_data_dir(output_dir: Path) -> Path:
     return data_dir
 
 
-def select_relevant_pages(
-    layout: dict[str, Any],
-    question: str,
+def build_qa_source_context_pack(
     *,
-    qa_context: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
-    pages = layout.get("pages") if isinstance(layout.get("pages"), list) else []
-    runtime = PaperLensRuntime(artifacts=[page for page in pages if isinstance(page, dict)])
-    search = runtime.search_text(qa_context_augmented_query(question, qa_context or {}), limit=8)
-    selected_numbers = [
-        item.get("page_no") for item in search.results if isinstance(item.get("page_no"), int)
-    ]
-    if not selected_numbers:
-        selected_numbers = [
-            page.get("page_no")
-            for page in pages[:3]
-            if isinstance(page, dict) and isinstance(page.get("page_no"), int)
-        ]
-    by_no = {
-        page.get("page_no"): page
-        for page in pages
-        if isinstance(page, dict) and isinstance(page.get("page_no"), int)
+    paper_id: str,
+    title: str,
+    classification: str,
+    question: str,
+    augmented_query: str,
+    question_type: str,
+    qa_context: dict[str, Any],
+    core_v2_context: dict[str, Any],
+    focus_source_ids: list[str],
+) -> dict[str, Any]:
+    consumable = core_v2_context_is_consumable(core_v2_context)
+    return {
+        "schema_version": "paperlens.qa_context_pack.v2.source_only",
+        "stage": "qa",
+        "objective": qa_context_objective(core_v2_context),
+        "always_context": {
+            "paper_id": paper_id,
+            "title": title or paper_id,
+            "classification": classification,
+            "source_of_truth": "Reviewed ClaimGraph nodes plus PaperDOM source IDs only.",
+            "qa_context": qa_context,
+        },
+        "working_context": {
+            "question": question,
+            "augmented_query": augmented_query,
+            "question_type": question_type,
+            "core_v2_consumable": consumable,
+            "retrieval_policy": core_v2_context.get("retrieval_policy"),
+            "focus_source_ids": focus_source_ids[:16] if consumable else [],
+            "evidence_policy": (
+                "Paper-specific claims require reviewed ClaimGraph nodes and PaperDOM source IDs. "
+                "When those are missing, answer with uncertainty or background context only."
+            ),
+        },
+        "tool_trace": [],
+        "output_contract": {
+            "type": "QAAnswer",
+            "question_type": question_type,
+            "rule": (
+                "Use cited_source_ids for paper claims. Do not cite pages, rendered reports, "
+                "or raw PDF search snippets as evidence."
+            ),
+        },
+        "budget": {
+            "upfront_pdf_search_queries": 0,
+            "candidate_source_ids": min(len(focus_source_ids), 16),
+            "whole_paper_in_context": False,
+        },
+        "contract": (
+            "QA is a ClaimGraph view over reviewed PaperDOM evidence. Tools may read known "
+            "source IDs but may not discover new proof by page search."
+        ),
     }
-    selected = [by_no[number] for number in selected_numbers if number in by_no]
-    for page in pages[:3]:
-        if not isinstance(page, dict):
-            continue
-        number = page.get("page_no")
-        if isinstance(number, int) and page not in selected:
-            selected.append(page)
-    return selected[:8]
+
+
+def qa_focus_source_ids(core_v2_context: dict[str, Any]) -> list[str]:
+    if not core_v2_context_is_consumable(core_v2_context):
+        return []
+    source_ids: list[str] = []
+    for match in list_of_dicts(core_v2_context.get("matches")):
+        source_ids.extend(normalized_source_id_list(match.get("source_ids")))
+        for span in list_of_dicts(match.get("evidence_spans")):
+            source_id = span.get("source_id")
+            if isinstance(source_id, str):
+                source_ids.append(source_id)
+        for relationship in list_of_dicts(match.get("relationships")):
+            source_ids.extend(normalized_source_id_list(relationship.get("source_ids")))
+    return unique_strings(source_ids)[:16]
 
 
 def tokenize(text: str) -> list[str]:
@@ -1237,7 +1205,6 @@ def normalize_answer(data: dict[str, Any]) -> dict[str, Any]:
     source_attribution = normalize_source_attribution(data, answer=answer, confidence=confidence)
     return {
         "answer_markdown": answer.strip(),
-        "cited_pages": [],
         "cited_source_ids": cited_source_ids,
         "confidence": confidence,
         "source_attribution": source_attribution,
@@ -1286,10 +1253,6 @@ def ground_qa_answer_in_core_v2_context(
     attribution["paper_claims"] = supported_claims
     grounded["source_attribution"] = attribution
     grounded["cited_source_ids"] = cited_source_ids[:16]
-    grounded["cited_pages"] = core_v2_pages_for_source_ids(
-        core_v2_context=core_v2_context,
-        cited_source_ids=grounded["cited_source_ids"],
-    )
     if removed_source_ids or unsupported_claims:
         grounded["confidence"] = lower_qa_confidence(str(grounded.get("confidence") or "low"))
         if unsupported_claims:
@@ -1314,8 +1277,8 @@ def source_ids_for_supported_claim(claim: str, core_v2_context: dict[str, Any]) 
         label = str(match.get("label") or "")
         if not text_overlaps_any_reference(claim, [label]):
             continue
-        for source_id in match.get("source_ids", []):
-            if isinstance(source_id, str) and source_id and source_id not in source_ids:
+        for source_id in normalized_source_id_list(match.get("source_ids")):
+            if source_id and source_id not in source_ids:
                 source_ids.append(source_id)
     return source_ids
 
@@ -1323,34 +1286,15 @@ def source_ids_for_supported_claim(claim: str, core_v2_context: dict[str, Any]) 
 def core_v2_context_source_ids(core_v2_context: dict[str, Any]) -> set[str]:
     source_ids = set()
     for match in list_of_dicts(core_v2_context.get("matches")):
-        source_ids.update(source_id for source_id in match.get("source_ids", []) if source_id)
+        source_ids.update(normalized_source_id_list(match.get("source_ids")))
         source_ids.update(
             span.get("source_id")
             for span in list_of_dicts(match.get("evidence_spans"))
             if span.get("source_id")
         )
         for relationship in list_of_dicts(match.get("relationships")):
-            source_ids.update(
-                source_id for source_id in relationship.get("source_ids", []) if source_id
-            )
+            source_ids.update(normalized_source_id_list(relationship.get("source_ids")))
     return {str(source_id).strip() for source_id in source_ids if str(source_id).strip()}
-
-
-def core_v2_pages_for_source_ids(
-    *,
-    core_v2_context: dict[str, Any],
-    cited_source_ids: list[str],
-) -> list[int]:
-    result: list[int] = []
-    cited = set(cited_source_ids)
-    for match in list_of_dicts(core_v2_context.get("matches")):
-        for span in list_of_dicts(match.get("evidence_spans")):
-            if span.get("source_id") not in cited:
-                continue
-            page_no = span.get("page_no")
-            if isinstance(page_no, int) and page_no > 0 and page_no not in result:
-                result.append(page_no)
-    return result[:8]
 
 
 def lower_qa_confidence(confidence: str) -> str:

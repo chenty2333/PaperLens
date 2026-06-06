@@ -149,7 +149,7 @@ type SourceAttribution = {
 
 type AnswerPayload = {
   answer_markdown?: string
-  cited_pages?: number[]
+  cited_source_ids?: string[]
   confidence?: 'high' | 'medium' | 'low'
   source_attribution?: SourceAttribution
   related_papers?: Array<{
@@ -1680,7 +1680,9 @@ function AnswerEvidence({ answer }: { answer: AnswerPayload }) {
       <summary>
         <ChevronRight size={14} />
         证据边界
-        {answer.cited_pages?.length ? <span>页码 {answer.cited_pages.join(', ')}</span> : null}
+        {answer.cited_source_ids?.length ? (
+          <span>source IDs {answer.cited_source_ids.slice(0, 3).join(', ')}</span>
+        ) : null}
         {answer.confidence ? <span>{answer.confidence}</span> : null}
       </summary>
       {rows.map(([label, items]) => (

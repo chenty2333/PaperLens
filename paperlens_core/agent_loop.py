@@ -11,7 +11,6 @@ from typing import Any, Callable, Iterable
 from paperlens_core.agents.llm import JsonLlmClient, LlmJsonResult, llm_call_context
 from paperlens_core.runtime import (
     ArtifactEnvelope,
-    PaperLensRuntime,
     RuntimeBudgetExceeded,
     compact_text,
     page_captions,
@@ -167,37 +166,25 @@ class PaperToolRegistry:
     def __init__(
         self,
         *,
-        runtime: PaperLensRuntime,
         paper_id: str,
         title: str | None = None,
         context: dict[str, Any] | None = None,
         layout_pages: Iterable[Any] | None = None,
     ) -> None:
-        self.runtime = runtime
         self.paper_id = paper_id
         self.title = title or paper_id
         self.context = context if isinstance(context, dict) else {}
-        self.layout_pages = list(layout_pages or runtime.pages)
+        self.layout_pages = list(layout_pages or [])
 
     def tool_descriptions(self) -> list[dict[str, Any]]:
         return [
             {
-                "name": "paper.search_text",
-                "description": "Search parsed paper text and captions. Good for locating claims, terms, sections, numbers, baselines, and evaluation evidence.",
-                "arguments": {"query": "string", "limit": "optional integer"},
-            },
-            {
                 "name": "paper.read_sources",
-                "description": "Read PaperDOM source IDs returned by paper.search_text, paper.find_figures, qa_context.search, or evidence.lookup.",
+                "description": "Read PaperDOM source IDs from reviewed ClaimGraph QA context or evidence.lookup.",
                 "arguments": {
                     "source_ids": "array of PaperDOM source IDs",
                     "text_limit": "optional integer",
                 },
-            },
-            {
-                "name": "paper.find_figures",
-                "description": "Find figures/tables/captions related to a query.",
-                "arguments": {"query": "string", "limit": "optional integer"},
             },
             {
                 "name": "qa_context.search",
@@ -211,25 +198,15 @@ class PaperToolRegistry:
             },
             {
                 "name": "evidence.lookup",
-                "description": "Read evidence objects by id or page number from the current QA context.",
-                "arguments": {"refs": "array of evidence ids or page numbers"},
+                "description": "Read evidence objects by evidence ID or PaperDOM source ID from the current QA context.",
+                "arguments": {"refs": "array of evidence IDs or PaperDOM source IDs"},
             },
         ]
 
     def execute(self, request: AgentToolRequest) -> AgentToolObservation:
         try:
-            if request.tool == "paper.search_text":
-                result = self.runtime.search_text(
-                    str(request.arguments.get("query") or ""),
-                    limit=positive_int(request.arguments.get("limit"), default=8),
-                ).as_dict()
-            elif request.tool == "paper.read_sources":
+            if request.tool == "paper.read_sources":
                 result = self._paper_read_sources(request.arguments)
-            elif request.tool == "paper.find_figures":
-                result = self.runtime.find_figures(
-                    str(request.arguments.get("query") or ""),
-                    limit=positive_int(request.arguments.get("limit"), default=6),
-                ).as_dict()
             elif request.tool == "qa_context.search":
                 result = self._qa_context_search(str(request.arguments.get("query") or ""))
             elif request.tool == "qa_context.get_claim":
@@ -331,16 +308,24 @@ class PaperToolRegistry:
         return {"tool": "qa_context.get_claim", "query": claim_id, "results": []}
 
     def _evidence_lookup(self, refs: Any) -> dict[str, Any]:
-        refs_list = [str(item) for item in list_payload(refs) if str(item).strip()]
+        refs_list = [str(item).strip() for item in list_payload(refs) if str(item).strip()]
+        refs_set = set(refs_list)
         evidence = []
         for item in list_payload(self.context.get("evidence")):
             if not isinstance(item, dict):
                 continue
             evidence_id = str(item.get("id") or "")
-            page = str(item.get("page") or item.get("page_no") or "")
-            if evidence_id in refs_list or page in refs_list:
+            source_ids = recursive_source_ids(item)
+            if evidence_id in refs_set or any(source_id in refs_set for source_id in source_ids):
                 evidence.append(item)
-        return {"tool": "evidence.lookup", "query": refs_list, "results": evidence}
+        return {
+            "tool": "evidence.lookup",
+            "query": refs_list,
+            "results": evidence,
+            "source_ids": dedupe_strings(
+                source_id for item in evidence for source_id in recursive_source_ids(item)
+            ),
+        }
 
 
 class AgentLoop:
