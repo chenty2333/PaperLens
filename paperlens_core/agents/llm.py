@@ -282,54 +282,13 @@ class JsonLlmClient:
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
-        if self._use_json_object_response_format():
-            payload["_paperlens_schema_name"] = schema_name
-            payload = chat_json_schema_fallback_payload(
-                payload=payload,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                schema=schema,
-            )
         payload = self._apply_compatible_chat_options(payload)
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-        try:
-            response, response_headers = self._post_json(endpoint, payload, headers)
-        except LlmError as exc:
-            if "400" not in str(exc) or not env_flag("PAPERLENS_ALLOW_SCHEMA_FALLBACK"):
-                raise
-            fallback_payload = chat_json_schema_fallback_payload(
-                payload=payload,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                schema=schema,
-            )
-            response, response_headers = self._post_json(endpoint, fallback_payload, headers)
-        try:
-            text, data = parse_chat_completion_json(response, schema_name, schema)
-        except LlmError:
-            if not env_flag("PAPERLENS_ALLOW_JSON_RETRY", default=True):
-                raise
-            fallback_payload = chat_json_schema_fallback_payload(
-                payload=payload,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                schema=schema,
-            )
-            retry_payload = (
-                fallback_payload
-                if max_tokens is None
-                else expand_completion_budget(
-                    fallback_payload,
-                    minimum=json_retry_completion_minimum(
-                        schema_name, max_tokens, has_images=False
-                    ),
-                )
-            )
-            response, response_headers = self._post_json(endpoint, retry_payload, headers)
-            text, data = parse_chat_completion_json(response, schema_name, schema)
+        response, response_headers = self._post_json(endpoint, payload, headers)
+        text, data = parse_chat_completion_json(response, schema_name, schema)
         return LlmJsonResult(
             data=data,
             text=text,
@@ -377,41 +336,13 @@ class JsonLlmClient:
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
-        if self._use_json_object_response_format():
-            payload["_paperlens_schema_name"] = schema_name
-            payload = chat_json_schema_fallback_payload_with_images(
-                payload=payload,
-                system_prompt=system_prompt,
-                user_content=user_content,
-                schema=schema,
-            )
         payload = self._apply_compatible_chat_options(payload)
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
         response, response_headers = self._post_json(endpoint, payload, headers)
-        try:
-            text, data = parse_chat_completion_json(response, schema_name, schema)
-        except LlmError:
-            if not env_flag("PAPERLENS_ALLOW_JSON_RETRY", default=True):
-                raise
-            fallback_payload = chat_json_schema_fallback_payload_with_images(
-                payload=payload,
-                system_prompt=system_prompt,
-                user_content=user_content,
-                schema=schema,
-            )
-            retry_payload = (
-                fallback_payload
-                if max_tokens is None
-                else expand_completion_budget(
-                    fallback_payload,
-                    minimum=json_retry_completion_minimum(schema_name, max_tokens, has_images=True),
-                )
-            )
-            response, response_headers = self._post_json(endpoint, retry_payload, headers)
-            text, data = parse_chat_completion_json(response, schema_name, schema)
+        text, data = parse_chat_completion_json(response, schema_name, schema)
         return LlmJsonResult(
             data=data,
             text=text,
@@ -490,14 +421,6 @@ class JsonLlmClient:
             return True
         model = self.config.model.lower()
         return model.startswith("mimo-")
-
-    def _use_json_object_response_format(self) -> bool:
-        if self.config.kind != "openai-compatible":
-            return False
-        explicit = os.getenv("PAPERLENS_OPENAI_COMPAT_JSON_OBJECT")
-        if explicit is not None:
-            return env_flag("PAPERLENS_OPENAI_COMPAT_JSON_OBJECT")
-        return self._is_mimo_provider()
 
     def _mimo_thinking_option(self, payload: dict[str, Any]) -> dict[str, str] | None:
         mode = os.getenv("PAPERLENS_MIMO_THINKING", "omit").strip().lower()
@@ -849,56 +772,6 @@ def write_llm_ledger(
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def chat_json_schema_fallback_payload(
-    *,
-    payload: dict[str, Any],
-    system_prompt: str,
-    user_prompt: str,
-    schema: dict[str, Any],
-) -> dict[str, Any]:
-    fallback_payload = dict(payload)
-    fallback_payload["response_format"] = {"type": "json_object"}
-    fallback_payload["messages"] = [
-        {
-            "role": "system",
-            "content": system_prompt + "\nReturn only valid JSON matching the schema.",
-        },
-        {
-            "role": "user",
-            "content": user_prompt
-            + "\n\nJSON schema to follow exactly:\n"
-            + json.dumps(schema, ensure_ascii=False),
-        },
-    ]
-    return fallback_payload
-
-
-def chat_json_schema_fallback_payload_with_images(
-    *,
-    payload: dict[str, Any],
-    system_prompt: str,
-    user_content: list[dict[str, Any]],
-    schema: dict[str, Any],
-) -> dict[str, Any]:
-    fallback_content = list(user_content)
-    fallback_content.append(
-        {
-            "type": "text",
-            "text": "\n\nJSON schema to follow exactly:\n" + json.dumps(schema, ensure_ascii=False),
-        }
-    )
-    fallback_payload = dict(payload)
-    fallback_payload["response_format"] = {"type": "json_object"}
-    fallback_payload["messages"] = [
-        {
-            "role": "system",
-            "content": system_prompt + "\nReturn only valid JSON matching the schema.",
-        },
-        {"role": "user", "content": fallback_content},
-    ]
-    return fallback_payload
-
-
 def extract_openai_response_text(response: dict[str, Any]) -> str:
     if isinstance(response.get("output_text"), str):
         return response["output_text"]
@@ -953,18 +826,6 @@ def chat_completion_finish_reason(response: dict[str, Any]) -> str | None:
     return str(reason) if reason is not None else None
 
 
-def expand_completion_budget(payload: dict[str, Any], *, minimum: int) -> dict[str, Any]:
-    expanded = dict(payload)
-    minimum = max(1, min(minimum, 12000))
-    for key in ("max_completion_tokens", "max_tokens"):
-        value = expanded.get(key)
-        if isinstance(value, int):
-            expanded[key] = max(value, minimum)
-            return expanded
-    expanded["max_tokens"] = minimum
-    return expanded
-
-
 def anthropic_completion_limit(max_tokens: int | None) -> int:
     if max_tokens is not None:
         return max(1, int(max_tokens))
@@ -974,23 +835,6 @@ def anthropic_completion_limit(max_tokens: int | None) -> int:
         minimum=1_000,
         maximum=200_000,
     )
-
-
-def json_retry_completion_minimum(
-    schema_name: str, max_tokens: int | None, *, has_images: bool
-) -> int:
-    floor = 1800 if has_images else 1600
-    if schema_name in {"paperlens_rolling_memory", "paperlens_memory_patch_set"}:
-        floor = 4000
-    if schema_name in {
-        "paperlens_report_plan",
-        "paperlens_report_section",
-        "paperlens_report_section_audit",
-        "paperlens_library_answer",
-    }:
-        floor = 3000
-    base = max_tokens if isinstance(max_tokens, int) else floor
-    return min(max(base * 2, floor), 100_000)
 
 
 def extract_anthropic_text(response: dict[str, Any]) -> str:

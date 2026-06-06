@@ -5,17 +5,18 @@
 [![Windows Installer][ci-badge]][ci-workflow]
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](LICENSE)
 
-PaperLens 是一个桌面端论文阅读 agent。它不是 PDF reader，不是传统文献管理器，也不是普通论文总结器。它的核心目标是把论文变成可审计的知识状态：结构化 PaperMemory、可读知识胶囊、有证据边界的 QA，以及一个只包含已读论文的本地 library。
+PaperLens 是一个桌面端论文阅读 agent。它不是 PDF reader，不是传统文献管理器，也不是普通论文总结器。它的核心目标是把论文变成可审计的知识状态：带稳定 source ID 的 PaperDOM、ClaimGraph、派生 PaperMemory 视图、有证据边界的 QA，以及一个只包含已读论文的本地图 library。
 
 ## 它做什么
 
 - 读取 PDF 的文本、版面、页面图像、图表线索和论文内确定性工具结果。
 - 只建一次论文地图：章节、页码、图表和关键文本块。
-- 分块阅读论文并增量更新 PaperMemory；阅读阶段不写报告。
-- 只做一次集中核对：检查高风险 claim 和局部原文证据，然后直接修正 memory。
-- 按段生成知识胶囊，报告从 memory 和 evidence 写出，不让一次模型调用承担整篇长报告。
-- QA 直接从 memory、evidence、局部页面和 library record 回答，不从渲染后的报告里二次总结。
-- 维护一个只包含 PaperLens 已经处理过论文的本地 library。
+- 基于 PaperDOM source ID 生成确定性的 Reading Plan，并只记录 append-only observation。
+- 以 ClaimGraph 作为事实源；PaperMemory 只是派生的产品视图，不是模型可随意改写的状态文件。
+- 用确定性审计检查图节点、边、source ID 和数值定位。
+- 报告是 ClaimGraph 的可读视图，不能新增事实。
+- QA 直接从 ClaimGraph、evidence、局部页面和 library graph record 回答，不从渲染后的报告里二次总结。
+- 维护一个只包含 PaperLens 已经处理过论文的本地图 library。
 - 作为 Windows Tauri 桌面 App 发布，核心引擎是 Python `paperlens-core` sidecar。
 
 ## 当前产品形态
@@ -46,10 +47,19 @@ output/
     data/
       run.json
       events.jsonl
-      memory/
-        v3/
-          <paper_id>.paper_memory.v3.json
-          <paper_id>.memory_patches.jsonl
+      core/
+        v2/
+          <paper_id>/
+            paper_dom.v1.json
+            reading_plan.v1.json
+            observation_log.v1.json
+            claim_graph.v1.json
+            audit_findings.v1.json
+            quality_metrics.v1.json
+            paper_memory_view.v1.json
+            report_draft.v1.json
+            report_audit_findings.v1.json
+            core_manifest.v1.json
 ```
 
 如果直接看输出文件，先打开 `PaperLens.md`。桌面 App 读取同一个输出目录，并展示 library、capsule、evidence 和 chat。
@@ -80,7 +90,6 @@ App 不会内置模型 key、模型名称或 provider URL。你需要在 UI 里�
 ```powershell
 npm ci
 uv run --extra dev ruff check .
-uv run --extra dev pytest
 npm run lint
 npm run build
 ```
@@ -119,7 +128,7 @@ Windows 安装包 workflow 在 [.github/workflows/windows-installer.yml](.github
 它会执行：
 
 - 已提交密钥扫描；
-- Python lint/tests；
+- Python lint；
 - 前端 lint/build；
 - Python sidecar 构建；
 - Tauri NSIS 安装包构建；
@@ -145,7 +154,6 @@ UI 不会把 API key 写入 `localStorage`。Git 会忽略生成的论文库、�
 
 ## 文档
 
-- [PaperLens Core v1 设计](docs/PaperLens_Core_v1.md)
 - [English README](README.md)
 
 ## License

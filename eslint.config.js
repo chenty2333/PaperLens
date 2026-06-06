@@ -11,7 +11,6 @@ export default defineConfig([
     'build',
     'node_modules',
     '.venv',
-    '.pytest_cache',
     '.ruff_cache',
     'src-tauri/target',
   ]),

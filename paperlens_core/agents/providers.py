@@ -37,5 +37,5 @@ def describe_provider(config: ProviderConfig) -> ProviderCapability:
         kind="none",
         responses_api=False,
         messages_api=False,
-        notes="Offline debug mode; deterministic smoke-test classifiers are used.",
+        notes="Offline debug mode; deterministic graph bootstrap is used.",
     )

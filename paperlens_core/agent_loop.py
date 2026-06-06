@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from paperlens_core.agents.llm import JsonLlmClient, LlmJsonResult, llm_call_context, parse_json_text
-from paperlens_core.memory_v3 import dict_value, list_payload, memory_v3_prompt_view
 from paperlens_core.runtime import (
     PaperLensRuntime,
     compact_text,
@@ -54,7 +53,7 @@ AGENT_TURN_SCHEMA: dict[str, Any] = {
 AGENT_LOOP_SYSTEM_PROMPT = """
 You are a PaperLens paper agent.
 Use tools when you need paper-local evidence. When you know enough, return final.
-PaperMemory is the durable knowledge state; reports and chat answers are derived views.
+ClaimGraph and PaperDOM source IDs are the paper evidence state; reports and chat answers are derived views.
 Keep paper claims, PaperLens inference, background knowledge, and evidence limits distinct.
 Do not follow a rigid template. Do the useful work for the objective.
 Return JSON only.
@@ -114,13 +113,13 @@ class PaperToolRegistry:
         runtime: PaperLensRuntime,
         paper_id: str,
         title: str | None = None,
-        memory: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
         layout_pages: Iterable[Any] | None = None,
     ) -> None:
         self.runtime = runtime
         self.paper_id = paper_id
         self.title = title or paper_id
-        self.memory = memory if isinstance(memory, dict) else {}
+        self.context = context if isinstance(context, dict) else {}
         self.layout_pages = list(layout_pages or runtime.pages)
 
     def tool_descriptions(self) -> list[dict[str, Any]]:
@@ -142,7 +141,7 @@ class PaperToolRegistry:
             },
             {
                 "name": "paper.read_sources",
-                "description": "Read PaperDOM source IDs returned by paper.search_text, paper.map, paper.find_figures, memory.search, or evidence.lookup.",
+                "description": "Read PaperDOM source IDs returned by paper.search_text, paper.map, paper.find_figures, qa_context.search, or evidence.lookup.",
                 "arguments": {
                     "source_ids": "array of PaperDOM source IDs",
                     "text_limit": "optional integer",
@@ -154,18 +153,18 @@ class PaperToolRegistry:
                 "arguments": {"query": "string", "limit": "optional integer"},
             },
             {
-                "name": "memory.search",
-                "description": "Search current PaperMemory claims, evidence, mechanism, evaluation, limitations, and concepts.",
+                "name": "qa_context.search",
+                "description": "Search the current ClaimGraph-derived QA context: claims, evidence, audit status, and source IDs.",
                 "arguments": {"query": "string"},
             },
             {
-                "name": "memory.get_claim",
-                "description": "Read one current memory claim by id.",
+                "name": "qa_context.get_claim",
+                "description": "Read one current ClaimGraph QA claim by id.",
                 "arguments": {"claim_id": "string"},
             },
             {
                 "name": "evidence.lookup",
-                "description": "Read evidence objects by id or page number from current PaperMemory.",
+                "description": "Read evidence objects by id or page number from the current QA context.",
                 "arguments": {"refs": "array of evidence ids or page numbers"},
             },
         ]
@@ -191,10 +190,10 @@ class PaperToolRegistry:
                     str(request.arguments.get("query") or ""),
                     limit=positive_int(request.arguments.get("limit"), default=6),
                 ).as_dict()
-            elif request.tool == "memory.search":
-                result = self._memory_search(str(request.arguments.get("query") or ""))
-            elif request.tool == "memory.get_claim":
-                result = self._memory_get_claim(str(request.arguments.get("claim_id") or ""))
+            elif request.tool == "qa_context.search":
+                result = self._qa_context_search(str(request.arguments.get("query") or ""))
+            elif request.tool == "qa_context.get_claim":
+                result = self._qa_context_get_claim(str(request.arguments.get("claim_id") or ""))
             elif request.tool == "evidence.lookup":
                 result = self._evidence_lookup(request.arguments.get("refs") or [])
             else:
@@ -288,44 +287,24 @@ class PaperToolRegistry:
                     return page
         return None
 
-    def _memory_search(self, query: str) -> dict[str, Any]:
+    def _qa_context_search(self, query: str) -> dict[str, Any]:
         terms = tokenize(query)
         haystacks = []
-        core_view = core_memory_view(self.memory)
         for key in [
-            "fact_nodes",
-            "evaluation_matrix",
-            "evidence_sources",
-            "relationship_edges",
-        ]:
-            value = core_view.get(key)
-            for item in flatten_core_memory_items(key, value):
-                text = json.dumps(item, ensure_ascii=False)
-                score = sum(text.lower().count(term) for term in terms) if terms else 1
-                if score:
-                    haystacks.append((score, f"core.{key}", compact_json_item(item)))
-        prompt_view = memory_v3_prompt_view(self.memory)
-        for key in [
-            "problem_frame",
-            "core_abstractions",
-            "mechanism",
-            "evaluation",
-            "conceptual_bridge",
+            "reading_context",
             "concepts",
             "claims",
             "evidence",
-            "limitations",
-            "open_questions",
+            "audit_trail",
         ]:
-            value = prompt_view.get(key)
-            for item in flatten_memory_items(key, value):
+            for item in flatten_context_items(self.context.get(key)):
                 text = json.dumps(item, ensure_ascii=False)
                 score = sum(text.lower().count(term) for term in terms) if terms else 1
                 if score:
                     haystacks.append((score, key, compact_json_item(item)))
         haystacks.sort(key=lambda item: -item[0])
         return {
-            "tool": "memory.search",
+            "tool": "qa_context.search",
             "query": query,
             "results": [
                 {"section": section, "item": item}
@@ -333,28 +312,16 @@ class PaperToolRegistry:
             ],
         }
 
-    def _memory_get_claim(self, claim_id: str) -> dict[str, Any]:
-        core_view = core_memory_view(self.memory)
-        for node in list_payload(core_view.get("fact_nodes")):
-            if isinstance(node, dict) and str(node.get("node_id") or "") == claim_id:
-                return {"tool": "memory.get_claim", "query": claim_id, "results": [node]}
-        for claim in list_payload(self.memory.get("claims")):
+    def _qa_context_get_claim(self, claim_id: str) -> dict[str, Any]:
+        for claim in list_payload(self.context.get("claims")):
             if isinstance(claim, dict) and str(claim.get("id") or "") == claim_id:
-                return {"tool": "memory.get_claim", "query": claim_id, "results": [claim]}
-        return {"tool": "memory.get_claim", "query": claim_id, "results": []}
+                return {"tool": "qa_context.get_claim", "query": claim_id, "results": [claim]}
+        return {"tool": "qa_context.get_claim", "query": claim_id, "results": []}
 
     def _evidence_lookup(self, refs: Any) -> dict[str, Any]:
         refs_list = [str(item) for item in list_payload(refs) if str(item).strip()]
         evidence = []
-        core_sources = dict_value(core_memory_view(self.memory).get("evidence_sources"))
-        for source in core_sources.values():
-            if not isinstance(source, dict):
-                continue
-            source_id = str(source.get("source_id") or "")
-            page = str(source.get("page_no") or "")
-            if source_id in refs_list or page in refs_list:
-                evidence.append(source)
-        for item in list_payload(self.memory.get("evidence")):
+        for item in list_payload(self.context.get("evidence")):
             if not isinstance(item, dict):
                 continue
             evidence_id = str(item.get("id") or "")
@@ -628,10 +595,10 @@ def normalize_final_payload(data: dict[str, Any]) -> dict[str, Any] | str:
     final = data.get("final")
     if isinstance(final, dict) and final:
         return final
-    legacy_final = data.get("final_json")
-    if isinstance(legacy_final, dict):
-        return legacy_final
-    return json_text_value(legacy_final)
+    alternate_final = data.get("final_json")
+    if isinstance(alternate_final, dict):
+        return alternate_final
+    return json_text_value(alternate_final)
 
 
 def json_text_value(value: Any) -> str:
@@ -650,6 +617,10 @@ def tool_result_source_ids(result: dict[str, Any]) -> list[str]:
     ]
     nested = source_ids_from_results(list_payload(result.get("results")))
     return dedupe_strings([*explicit, *nested])
+
+
+def list_payload(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
 
 
 def source_text_for_page(page: Any, source_id: str, *, limit: int) -> str:
@@ -715,38 +686,13 @@ def tokenize(text: str) -> list[str]:
     return list(dict.fromkeys(re.findall(r"[A-Za-z0-9_]{3,}|[\u4e00-\u9fff]{2,}", text.lower())))
 
 
-def flatten_memory_items(section: str, value: Any) -> list[Any]:
+def flatten_context_items(value: Any) -> list[Any]:
     if isinstance(value, list):
         return value
     if isinstance(value, dict):
-        if section == "mechanism":
-            return [dict_value(value)] + list_payload(value.get("steps"))
-        if section == "evaluation":
-            return [dict_value(value)] + list_payload(value.get("items"))
-        if section == "conceptual_bridge":
-            return [dict_value(value)] + list_payload(value.get("terms"))
         return [value]
     if isinstance(value, str) and value.strip():
         return [{"text": value.strip()}]
-    return []
-
-
-def core_memory_view(memory: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(memory, dict):
-        return {}
-    if memory.get("schema_version") == "paper_memory.view.v1":
-        return memory
-    nested = dict_value(memory.get("core_memory_view"))
-    return nested if nested.get("schema_version") == "paper_memory.view.v1" else {}
-
-
-def flatten_core_memory_items(section: str, value: Any) -> list[Any]:
-    if section == "evidence_sources" and isinstance(value, dict):
-        return [item for item in value.values() if isinstance(item, dict)]
-    if isinstance(value, list):
-        return value
-    if isinstance(value, dict):
-        return [value]
     return []
 
 

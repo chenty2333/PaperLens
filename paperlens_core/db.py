@@ -9,7 +9,6 @@ from paperlens_core.schemas import (
     ArtifactVersion,
     ClassificationDecision,
     PageArtifact,
-    PaperCard,
     PaperRecord,
     PaperState,
     ReviewItem,
@@ -55,11 +54,6 @@ CREATE TABLE IF NOT EXISTS skim_cards (
 CREATE TABLE IF NOT EXISTS classifications (
   paper_id TEXT PRIMARY KEY,
   decision_json TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS paper_cards (
-  paper_id TEXT PRIMARY KEY,
-  card_json TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS run_state (
@@ -203,17 +197,6 @@ class ArtifactDb:
         )
         self.conn.commit()
 
-    def upsert_paper_card(self, card: PaperCard) -> None:
-        self.conn.execute(
-            """
-            INSERT INTO paper_cards (paper_id, card_json)
-            VALUES (?, ?)
-            ON CONFLICT(paper_id) DO UPDATE SET card_json=excluded.card_json
-            """,
-            (card.paper_id, card.model_dump_json()),
-        )
-        self.conn.commit()
-
     def upsert_paper_state(self, state: PaperState) -> None:
         self.conn.execute(
             """
@@ -266,10 +249,6 @@ class ArtifactDb:
             "SELECT decision_json FROM classifications ORDER BY paper_id"
         ).fetchall()
         return [ClassificationDecision.model_validate_json(row["decision_json"]) for row in rows]
-
-    def list_paper_cards(self) -> list[PaperCard]:
-        rows = self.conn.execute("SELECT card_json FROM paper_cards ORDER BY paper_id").fetchall()
-        return [PaperCard.model_validate_json(row["card_json"]) for row in rows]
 
     def upsert_artifact_version(self, artifact: ArtifactVersion) -> None:
         self.conn.execute(

@@ -11,7 +11,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-from paperlens_core.agent_loop import AgentLoop, PaperToolRegistry
 from paperlens_core.agents.llm import JsonLlmClient, llm_call_context
 from paperlens_core.agents.providers import describe_provider
 from paperlens_core.budget import BudgetManager
@@ -20,64 +19,29 @@ from paperlens_core.control import ControlState
 from paperlens_core.db import ArtifactDb
 from paperlens_core.events import EventWriter, write_json
 from paperlens_core.library import write_paperlens_library
-from paperlens_core.memory import (
-    apply_memory_audit_patch,
-    ensure_memory_audit_operation,
-    ensure_read_pages_operation,
-    fallback_memory_audit,
-    memory_v3_pages_read,
-    memory_without_audit,
-    paper_memory_has_recoverable_content,
-    select_central_verification_pages,
-    select_high_risk_memory_claims,
-)
-from paperlens_core.memory_v3 import (
-    dict_value,
-    list_payload,
-    memory_v3_prompt_view,
-    safe_int,
-    write_paper_memory_v3_file,
-)
-from paperlens_core.memory_store import (
-    MEMORY_PATCH_SET_SCHEMA,
-    PaperMemoryStore,
-    normalize_memory_patch_set,
-)
 from paperlens_core.pdf.ingest import scan_pdfs
 from paperlens_core.pdf.layout_index import build_layout_index
 from paperlens_core.pdf.pymupdf_parser import parse_pdf
 from paperlens_core.pdf.qa import parse_quality
 from paperlens_core.quality_snapshot import write_core_quality_snapshot
-from paperlens_core.reading import select_rolling_read_pages
 from paperlens_core.report import (
     classification_counts,
-    combine_report_and_memory_audits,
-    compose_agentic_paper_report,
     compact_reason,
-    compact_string_list,
-    dedupe_evidence_refs,
-    fallback_model_paper_report,
-    final_report_audit_acceptable,
     markdown_title,
     paper_report_filename,
-    render_paper_report,
+    render_core_graph_report_view,
     render_paperlens_report,
-    write_core_graph_report_view,
 )
-from paperlens_core.report.memory_context import build_report_memory_context
 from paperlens_core.runtime import (
-    PaperLensRuntime,
-    context_pack_prompt,
-    hash_json_payload,
     llm_cache_path,
     read_llm_cache,
     write_llm_cache,
 )
+from paperlens_core.library_graph import read_core_v2_graph_summary
 from paperlens_core.schemas import (
     ArtifactVersion,
     ClassificationDecision,
     EvidenceRef,
-    PaperCard,
     PaperRecord,
     ReviewItem,
     SkimCard,
@@ -122,8 +86,6 @@ class PaperLensWorkflow:
         self.papers: list[PaperRecord] = []
         self.skim_cards: list[SkimCard] = []
         self.classifications: list[ClassificationDecision] = []
-        self.paper_cards: list[PaperCard] = []
-        self.memory_store = PaperMemoryStore(self.data_dir)
         self._llm_missing_key_warned = False
         self.budget = BudgetManager(config.budget)
 
@@ -219,8 +181,6 @@ class PaperLensWorkflow:
             self.classifications = self.filter_current_items(
                 self.db.list_classifications(), active_ids
             )
-        if index >= WORKFLOW_STAGE_ORDER.index("stage_07_normal_read"):
-            self.paper_cards = self.filter_current_items(self.db.list_paper_cards(), active_ids)
         self.validate_loaded_state_for_stage(stage)
         self.events.emit(
             "resume_state_loaded",
@@ -230,7 +190,6 @@ class PaperLensWorkflow:
                 "papers": len(self.papers),
                 "skim_cards": len(self.skim_cards),
                 "classifications": len(self.classifications),
-                "paper_cards": len(self.paper_cards),
             },
         )
 
@@ -279,7 +238,6 @@ class PaperLensWorkflow:
             ".paperlens/library",
             ".paperlens/library/index",
             ".paperlens/cache",
-            ".paperlens/cache/rolling_memory",
             "papers",
         ]:
             (self.output_dir / relative).mkdir(parents=True, exist_ok=True)
@@ -489,7 +447,7 @@ class PaperLensWorkflow:
     def stage_02_parse_verify(self) -> None:
         stage = "stage_02_parse_verify"
         self.checkpoint(stage)
-        self.events.stage_started(stage, "Verifying parse quality and optional VLM page fallback")
+        self.events.stage_started(stage, "Verifying parse quality and VLM page enrichment")
         if not self.papers:
             self.events.stage_completed(stage, "No PDFs to verify")
             return
@@ -501,29 +459,14 @@ class PaperLensWorkflow:
             if client and visual_pages:
                 visual_results = []
                 for batch in chunked(visual_pages, self.config.visual_pages_per_call):
-                    try:
-                        visual_results.append(
-                            self.run_vlm_page_mode(
-                                client=client,
-                                paper=paper,
-                                artifacts=batch,
-                                stage=stage,
-                            )
-                        )
-                    except Exception as exc:
-                        if self.require_llm_success():
-                            raise
-                        self.events.emit(
-                            "vlm_page_fallback_failed",
+                    visual_results.append(
+                        self.run_vlm_page_mode(
+                            client=client,
+                            paper=paper,
+                            artifacts=batch,
                             stage=stage,
-                            level="warning",
-                            message=f"VLM page fallback failed for {paper.paper_id}",
-                            data={
-                                "paper_id": paper.paper_id,
-                                "pages": [item.page_no for item in batch],
-                                "error": str(exc),
-                            },
                         )
+                    )
                 if visual_results:
                     visual_rows.extend(visual_results)
                     all_notes = [
@@ -676,7 +619,6 @@ class PaperLensWorkflow:
     def stage_03_skim(self) -> None:
         stage = "stage_03_skim"
         self.checkpoint(stage)
-        llm_enabled = False
         self.events.stage_started(stage, "Building deterministic paper maps")
         active_ids = {paper.paper_id for paper in self.papers}
         existing_skim_by_id = {
@@ -691,7 +633,7 @@ class PaperLensWorkflow:
         }
         self.skim_cards = list(existing_skim_by_id.values())
         self.classifications = list(existing_decision_by_id.values())
-        fallbacks: list[tuple[PaperRecord, list[Any], SkimCard, ClassificationDecision]] = []
+        pending: list[tuple[PaperRecord, SkimCard, ClassificationDecision]] = []
         for paper in self.papers:
             if paper.paper_id in existing_skim_by_id and paper.paper_id in existing_decision_by_id:
                 self.events.emit(
@@ -704,105 +646,10 @@ class PaperLensWorkflow:
                 continue
             artifacts = self.db.get_page_artifacts(paper.paper_id)
             card, decision = deterministic_skim_classify(paper, artifacts, self.config.keyword_pool)
-            fallbacks.append((paper, artifacts, card, decision))
+            pending.append((paper, card, decision))
 
-        if llm_enabled and fallbacks:
-            max_workers = min(max(1, self.config.concurrency), len(fallbacks))
-
-            def run_skim_task(
-                index: int,
-            ) -> tuple[int, SkimCard, ClassificationDecision, dict[str, Any]]:
-                paper, artifacts, _card, _decision = fallbacks[index]
-                card, decision, run_info = self.run_skim_classification(
-                    client=self.new_llm_client(),
-                    paper=paper,
-                    artifacts=artifacts,
-                    fallback_card=_card,
-                    fallback_decision=_decision,
-                )
-                return index, card, decision, run_info
-
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {}
-                for index, (paper, _artifacts, _card, _decision) in enumerate(fallbacks):
-                    self.events.emit(
-                        "agent_run_started",
-                        stage=stage,
-                        message=f"Model skim/classify {paper.paper_id}",
-                        data={"paper_id": paper.paper_id},
-                    )
-                    futures[executor.submit(run_skim_task, index)] = index
-                for future in as_completed(futures):
-                    index = futures[future]
-                    paper, _artifacts, fallback_card, fallback_decision = fallbacks[index]
-                    try:
-                        _index, card, decision, run_info = future.result()
-                        if run_info.get("cache_hit"):
-                            self.events.emit(
-                                "cache_hit",
-                                stage=stage,
-                                message=f"Skim/classification cache hit for {paper.paper_id}",
-                                data={
-                                    "paper_id": paper.paper_id,
-                                    "cache": run_info.get("cache"),
-                                },
-                            )
-                        else:
-                            self.write_agent_run(
-                                {
-                                    "agent_run_id": run_info.get("agent_run_id"),
-                                    "paper_id": paper.paper_id,
-                                    "stage": stage,
-                                    "provider_kind": self.config.provider.kind,
-                                    "model": self.config.provider.model,
-                                    "endpoint": run_info.get("endpoint"),
-                                    "request_id": run_info.get("request_id"),
-                                    "usage": run_info.get("usage", {}),
-                                    "status": "PASS",
-                                }
-                            )
-                            self.events.emit(
-                                "agent_run_completed",
-                                stage=stage,
-                                message=f"Model skim/classify completed for {paper.paper_id}",
-                                data={
-                                    "paper_id": paper.paper_id,
-                                    "agent_run_id": run_info.get("agent_run_id"),
-                                    "class_label": decision.class_label,
-                                },
-                            )
-                            self.record_llm_usage(stage, run_info.get("usage", {}))
-                        self.persist_skim_classification(stage, paper, card, decision)
-                    except Exception as exc:
-                        failed_run = {
-                            "agent_run_id": f"skim_{paper.paper_id}_failed",
-                            "paper_id": paper.paper_id,
-                            "stage": stage,
-                            "provider_kind": self.config.provider.kind,
-                            "model": self.config.provider.model,
-                            "status": "FAIL" if self.require_llm_success() else "FALLBACK",
-                            "error": str(exc),
-                        }
-                        self.write_agent_run(failed_run)
-                        if self.require_llm_success():
-                            raise
-                        self.events.emit(
-                            "agent_run_fallback",
-                            stage=stage,
-                            level="warning",
-                            message=f"Model skim/classify failed for {paper.paper_id}; using deterministic fallback",
-                            data={"paper_id": paper.paper_id, "error": str(exc)},
-                        )
-                        self.persist_skim_classification(
-                            stage,
-                            paper,
-                            fallback_card,
-                            fallback_decision,
-                        )
-
-        elif fallbacks:
-            for paper, _artifacts, fallback_card, fallback_decision in fallbacks:
-                self.persist_skim_classification(stage, paper, fallback_card, fallback_decision)
+        for paper, card, decision in pending:
+            self.persist_skim_classification(stage, paper, card, decision)
         self.order_skim_classification_state()
         core_v2_count = self.persist_core_v2_artifacts(stage)
         self.events.stage_completed(
@@ -850,99 +697,6 @@ class PaperLensWorkflow:
             )
         return written_count
 
-    def run_skim_classification(
-        self,
-        *,
-        client: JsonLlmClient,
-        paper: PaperRecord,
-        artifacts: list[Any],
-        fallback_card: SkimCard,
-        fallback_decision: ClassificationDecision,
-    ) -> tuple[SkimCard, ClassificationDecision, dict[str, Any]]:
-        user_prompt = build_skim_prompt(
-            paper=paper,
-            artifacts=artifacts,
-            keyword_pool=self.config.keyword_pool,
-            topic=self.config.topic,
-            idea=self.config.idea,
-        )
-        prompt_pages = [artifact.page_no for artifact in artifacts[:6]]
-        key_payload = {
-            "version": SKIM_CLASSIFIER_PROMPT_VERSION,
-            "model": self.config.provider.model,
-            "paper_hash": paper.file_hash,
-            "pages": prompt_pages,
-            "page_hashes": [hash_text(getattr(artifact, "text", "")) for artifact in artifacts[:6]],
-            "prompt_hash": hash_text(SKIM_CLASSIFIER_SYSTEM_PROMPT + "\n" + user_prompt),
-            "schema_hash": hash_json_payload(SKIM_CLASSIFICATION_SCHEMA),
-        }
-        cache_path = self.cache_path("skim_classify", paper.paper_id, key_payload)
-        cached = self.read_cache_payload(cache_path)
-        if cached and isinstance(cached.get("data"), dict):
-            agent_run_id = str(cached.get("agent_run_id") or f"skim_{paper.paper_id}_cache")
-            card, decision = llm_skim_classify_to_models(
-                paper=paper,
-                artifacts=artifacts,
-                raw=cached["data"],
-                agent_run_id=agent_run_id,
-                fallback_card=fallback_card,
-                fallback_decision=fallback_decision,
-            )
-            return (
-                card,
-                decision,
-                {
-                    "agent_run_id": agent_run_id,
-                    "cache_hit": True,
-                    "cache": str(cache_path),
-                },
-            )
-
-        agent_run_id = f"skim_{paper.paper_id}_{uuid.uuid4().hex[:8]}"
-        with llm_call_context(
-            stage="stage_03_skim",
-            paper_id=paper.paper_id,
-            operation="skim_classification",
-        ):
-            raw = client.invoke_json(
-                system_prompt=SKIM_CLASSIFIER_SYSTEM_PROMPT,
-                user_prompt=user_prompt,
-                schema_name="paperlens_skim_classification",
-                schema=SKIM_CLASSIFICATION_SCHEMA,
-                max_tokens=None,
-            )
-        self.write_cache_payload(
-            cache_path,
-            {
-                "key": key_payload,
-                "data": raw.data,
-                "usage": raw.usage,
-                "request_id": raw.request_id,
-                "endpoint": raw.endpoint,
-                "agent_run_id": agent_run_id,
-            },
-        )
-        card, decision = llm_skim_classify_to_models(
-            paper=paper,
-            artifacts=artifacts,
-            raw=raw.data,
-            agent_run_id=agent_run_id,
-            fallback_card=fallback_card,
-            fallback_decision=fallback_decision,
-        )
-        return (
-            card,
-            decision,
-            {
-                "agent_run_id": agent_run_id,
-                "cache_hit": False,
-                "usage": raw.usage,
-                "request_id": raw.request_id,
-                "endpoint": raw.endpoint,
-                "cache": str(cache_path),
-            },
-        )
-
     def persist_skim_classification(
         self,
         stage: str,
@@ -984,14 +738,6 @@ class PaperLensWorkflow:
             return False
         self.config.validate_agentic_run()
         return True
-
-    def require_llm_success(self) -> bool:
-        explicit = os.getenv("PAPERLENS_REQUIRE_LLM")
-        if explicit is not None:
-            return explicit == "1"
-        if os.getenv("PAPERLENS_ALLOW_LLM_FALLBACK", "0") == "1":
-            return False
-        return not self.config.offline_debug and self.config.provider.kind != "none"
 
     def write_agent_run(self, payload: dict[str, Any]) -> None:
         row = {
@@ -1036,98 +782,40 @@ class PaperLensWorkflow:
         llm_enabled = self.llm_enabled()
         self.events.stage_started(
             stage,
-            "Building audited paper memory and derived PaperCards"
+            "Building core v2 ObservationLog and ClaimGraph from PaperDOM evidence"
             if llm_enabled
-            else "Building deterministic PaperCards for papers that require reading",
+            else "Using deterministic core v2 bootstrap artifacts",
         )
-        active_ids = {paper.paper_id for paper in self.papers}
-        existing_cards = {
-            card.paper_id: card
-            for card in (self.paper_cards or self.db.list_paper_cards())
-            if card.paper_id in active_ids
-        }
-        self.paper_cards = list(existing_cards.values())
-        candidates: list[
-            tuple[PaperRecord, SkimCard, ClassificationDecision, list[Any], PaperCard]
-        ] = []
-        for paper, card, decision in zip(
-            self.papers, self.skim_cards, self.classifications, strict=False
-        ):
-            if not should_run_normal_read(decision):
-                continue
-            if paper.paper_id in existing_cards:
-                self.events.emit(
-                    "cache_hit",
-                    stage=stage,
-                    message=f"PaperCard already exists for {paper.paper_id}",
-                    data={"paper_id": paper.paper_id},
-                )
-                continue
-            paper_card = deterministic_paper_card(paper, card, decision)
-            artifacts = self.db.get_page_artifacts(paper.paper_id)
-            candidates.append((paper, card, decision, artifacts, paper_card))
-
-        if llm_enabled and candidates:
+        if llm_enabled and self.papers:
             client = self.new_llm_client()
-            for paper, card, decision, artifacts, fallback in candidates:
+            for paper in self.papers:
                 self.control.wait_if_paused()
                 self.control.require_not_cancelled()
                 self.events.emit(
                     "agent_run_started",
                     stage=stage,
-                    message=f"Rolling read {paper.paper_id}",
+                    message=f"Core v2 observation read {paper.paper_id}",
                     data={"paper_id": paper.paper_id, "read_mode": self.config.read_mode},
                 )
-                try:
-                    self.run_core_v2_observation_read(
-                        client=client,
-                        stage=stage,
-                        paper=paper,
-                    )
-                    paper_card = self.run_rolling_paper_read(
-                        client=client,
-                        stage=stage,
-                        paper=paper,
-                        skim=card,
-                        decision=decision,
-                        artifacts=artifacts,
-                        fallback=fallback,
-                    )
-                    self.persist_paper_card(stage, paper, paper_card)
-                    self.events.emit(
-                        "agent_run_completed",
-                        stage=stage,
-                        message=f"Rolling read completed for {paper.paper_id}",
-                        data={"paper_id": paper.paper_id},
-                    )
-                except Exception as exc:
-                    failed_run = {
-                        "agent_run_id": f"reader_{paper.paper_id}_failed",
-                        "paper_id": paper.paper_id,
-                        "stage": stage,
-                        "provider_kind": self.config.provider.kind,
-                        "model": self.config.provider.model,
-                        "status": "FAIL" if self.require_llm_success() else "FALLBACK",
-                        "error": str(exc),
-                    }
-                    self.write_agent_run(failed_run)
-                    if self.require_llm_success():
-                        raise
-                    self.events.emit(
-                        "agent_run_fallback",
-                        stage=stage,
-                        level="warning",
-                        message=f"Model normal-read failed for {paper.paper_id}; using deterministic PaperCard",
-                        data={"paper_id": paper.paper_id, "error": str(exc)},
-                    )
-                    self.persist_paper_card(stage, paper, fallback)
-        elif candidates:
-            for paper, _card, _decision, _artifacts, fallback in candidates:
-                self.control.wait_if_paused()
-                self.control.require_not_cancelled()
-                self.persist_paper_card(stage, paper, fallback)
+                self.run_core_v2_observation_read(
+                    client=client,
+                    stage=stage,
+                    paper=paper,
+                )
+                self.mark_paper_state(paper.paper_id, stage)
+                self.events.emit(
+                    "agent_run_completed",
+                    stage=stage,
+                    message=f"Core v2 observation read completed for {paper.paper_id}",
+                    data={"paper_id": paper.paper_id},
+                )
+        else:
+            for paper in self.papers:
+                self.mark_paper_state(paper.paper_id, stage)
         self.events.stage_completed(
-            stage, "PaperCard generation completed", {"paper_cards": len(self.paper_cards)}
+            stage,
+            "Core v2 observation stage completed",
+            {"papers": len(self.papers), "llm_enabled": llm_enabled},
         )
 
     def run_core_v2_observation_read(
@@ -1172,22 +860,11 @@ class PaperLensWorkflow:
                     "operation": "core_v2_observation_read",
                     "provider_kind": client.config.kind,
                     "model": client.config.model,
-                    "status": "FAIL" if self.require_llm_success() else "FALLBACK",
+                    "status": "FAIL",
                     "error": str(exc),
                 }
             )
-            if self.require_llm_success():
-                raise
-            self.events.emit(
-                "agent_run_fallback",
-                stage=stage,
-                level="warning",
-                message=(
-                    f"Core v2 observation read failed for {paper.paper_id}; "
-                    "keeping existing core v2 bootstrap artifacts"
-                ),
-                data={"paper_id": paper.paper_id, "error": str(exc)},
-            )
+            raise
 
     def refresh_core_v2_deterministic_audits(self, stage: str) -> list[dict[str, Any]]:
         skim_by_id = {card.paper_id: card for card in self.skim_cards}
@@ -1235,568 +912,28 @@ class PaperLensWorkflow:
             )
         return rows
 
-    def persist_paper_card(self, stage: str, paper: PaperRecord, paper_card: PaperCard) -> None:
-        if not any(card.paper_id == paper_card.paper_id for card in self.paper_cards):
-            self.paper_cards.append(paper_card)
-        else:
-            self.paper_cards = [
-                paper_card if card.paper_id == paper_card.paper_id else card
-                for card in self.paper_cards
-            ]
-        self.db.upsert_paper_card(paper_card)
-        self.mark_paper_state(paper.paper_id, stage)
-
-    def run_rolling_paper_read(
-        self,
-        *,
-        client: JsonLlmClient,
-        stage: str,
-        paper: PaperRecord,
-        skim: SkimCard,
-        decision: ClassificationDecision,
-        artifacts: list[Any],
-        fallback: PaperCard,
-    ) -> PaperCard:
-        selected_pages = select_rolling_read_pages(
-            artifacts, skim, decision, read_mode=self.config.read_mode
-        )
-        if not selected_pages:
-            return fallback
-        try:
-            chunk_size = int(os.getenv("PAPERLENS_ROLLING_CHUNK_PAGES", "3"))
-        except ValueError:
-            chunk_size = 3
-        chunk_size = max(1, min(chunk_size, 4))
-        memory = self.memory_store.initialize(
-            paper=paper,
-            skim=skim,
-            decision=decision,
-            card=fallback,
-            layout=load_layout_index(self.data_dir, paper.paper_id),
-            source=stage,
-            prefer_existing=False,
-        )
-        page_chunks = chunked(selected_pages, chunk_size)
-        failed_chunks: list[dict[str, Any]] = []
-        for chunk_index, page_chunk in enumerate(page_chunks):
-            self.control.wait_if_paused()
-            self.control.require_not_cancelled()
-            pages = [item.page_no for item in page_chunk]
-            try:
-                patch_set = self.read_rolling_memory_chunk(
-                    client=client,
-                    stage=stage,
-                    paper=paper,
-                    skim=skim,
-                    decision=decision,
-                    memory=memory,
-                    artifacts=page_chunk,
-                    chunk_index=chunk_index,
-                    total_chunks=len(page_chunks),
-                )
-                memory = self.memory_store.apply_patch_set(
-                    paper.paper_id,
-                    ensure_read_pages_operation(patch_set, paper_id=paper.paper_id, pages=pages),
-                    source=f"rolling_memory_chunk_{chunk_index + 1}",
-                )
-            except Exception as exc:
-                if self.require_llm_success():
-                    raise
-                failed_chunk = {"pages": pages, "error": str(exc)}
-                failed_chunks.append(failed_chunk)
-                memory = self.memory_store.apply_patch_set(
-                    paper.paper_id,
-                    {
-                        "paper_id": paper.paper_id,
-                        "operations": [
-                            {
-                                "op": "add_partial_read_failure",
-                                "payload": {
-                                    "pages": pages,
-                                    "error": compact_reason(str(exc), max_chars=280),
-                                },
-                            },
-                            {
-                                "op": "add_open_question",
-                                "payload": {
-                                    "text": "Some selected pages could not be read by the model in this run: "
-                                    + ", ".join("p." + str(page) for page in pages)
-                                    + "."
-                                },
-                            },
-                        ],
-                    },
-                    source=f"rolling_memory_chunk_{chunk_index + 1}_failed",
-                )
-                self.write_agent_run(
-                    {
-                        "agent_run_id": f"rolling_memory_{paper.paper_id}_chunk_{chunk_index + 1}_failed",
-                        "paper_id": paper.paper_id,
-                        "stage": stage,
-                        "provider_kind": self.config.provider.kind,
-                        "model": self.config.provider.model,
-                        "status": "FALLBACK",
-                        "error": str(exc),
-                        "pages": pages,
-                    }
-                )
-                self.events.emit(
-                    "agent_run_fallback",
-                    stage=stage,
-                    level="warning",
-                    message=f"Rolling read chunk failed for {paper.paper_id}; keeping prior memory",
-                    data={"paper_id": paper.paper_id, "pages": pages, "error": str(exc)},
-                )
-        _ = failed_chunks
-        return paper_card_from_memory_v3(
-            paper=paper,
-            skim=skim,
-            decision=decision,
-            memory=memory,
-            fallback=fallback,
-        )
-
-    def read_rolling_memory_chunk(
-        self,
-        *,
-        client: JsonLlmClient,
-        stage: str,
-        paper: PaperRecord,
-        skim: SkimCard,
-        decision: ClassificationDecision,
-        memory: dict[str, Any],
-        artifacts: list[Any],
-        chunk_index: int,
-        total_chunks: int,
-    ) -> dict[str, Any]:
-        pages = [item.page_no for item in artifacts]
-        runtime = PaperLensRuntime(artifacts=artifacts)
-        agent_context = runtime.build_context_pack(
-            stage="rolling_read",
-            objective=(
-                "Read this page chunk as one streaming step. Preserve continuity through "
-                "PaperMemoryV3 and emit only durable MemoryPatch operations."
-            ),
-            paper_id=paper.paper_id,
-            title=paper.canonical_title,
-            classification=decision.class_label,
-            memory=memory,
-            focus_queries=[
-                paper.canonical_title or paper.paper_id,
-                skim.problem,
-                skim.method_type,
-                skim.evaluation_type,
-            ],
-            focus_pages=pages,
-            read_artifacts=artifacts,
-            output_contract={
-                "type": "MemoryPatchSet",
-                "rule": (
-                    "Patch only facts worth keeping in long-term PaperMemory. If a claim needs "
-                    "future verification, add it with lower confidence or an open question."
-                ),
-            },
-            search_limit=3,
-            page_text_limit=700,
-        ).as_dict()
-        key_payload = {
-            "version": ROLLING_MEMORY_PROMPT_VERSION,
-            "model": self.config.provider.model,
-            "paper_hash": paper.file_hash,
-            "pages": pages,
-            "page_hashes": [hash_text(getattr(item, "text", "")) for item in artifacts],
-            "previous_memory_hash": hash_json_payload(memory_v3_prompt_view(memory)),
-            "agent_context_hash": hash_json_payload(agent_context),
-        }
-        cache_path = self.cache_path("rolling_memory", paper.paper_id, key_payload)
-        cached = self.read_cache_payload(cache_path)
-        if cached and isinstance(cached.get("data"), dict):
-            self.events.emit(
-                "cache_hit",
-                stage=stage,
-                message=f"Rolling memory cache hit for {paper.paper_id}",
-                data={"paper_id": paper.paper_id, "pages": pages, "cache": str(cache_path)},
-            )
-            return normalize_memory_patch_set(cached["data"], paper_id=paper.paper_id)
-        loop = AgentLoop(
-            client=client,
-            tools=PaperToolRegistry(
-                runtime=runtime,
-                paper_id=paper.paper_id,
-                title=paper.canonical_title,
-                memory=memory,
-                layout_pages=artifacts,
-            ),
-            session_name="rolling_memory",
-            objective=(
-                "Read the current paper pages and update PaperMemory with durable MemoryPatch "
-                "operations. Use tools if you need to inspect page text, figures, or current memory."
-            ),
-            final_schema_name="paperlens_memory_patch_set",
-            final_schema=MEMORY_PATCH_SET_SCHEMA,
-            stage=stage,
-            paper_id=paper.paper_id,
-            trace_path=self.data_dir / "agent_trace.jsonl",
-            system_prompt=ROLLING_MEMORY_SYSTEM_PROMPT,
-            control_check=self.control.require_not_cancelled,
-            pause_check=self.control.wait_if_paused,
-        )
-        result = loop.run(
-            initial_context={
-                "paper_id": paper.paper_id,
-                "title": paper.canonical_title or "unknown",
-                "classification": decision.class_label,
-                "pages": pages,
-                "agent_context_pack": agent_context,
-                "rolling_memory_prompt": build_rolling_memory_prompt(
-                    paper=paper,
-                    skim=skim,
-                    decision=decision,
-                    memory=memory,
-                    agent_context=agent_context,
-                    artifacts=artifacts,
-                    chunk_index=chunk_index,
-                    total_chunks=total_chunks,
-                ),
-            }
-        )
-        self.record_llm_usage(stage, result.usage)
-        self.write_agent_run(
-            {
-                "agent_run_id": f"rolling_memory_{paper.paper_id}_{uuid.uuid4().hex[:8]}",
-                "paper_id": paper.paper_id,
-                "stage": stage,
-                "provider_kind": self.config.provider.kind,
-                "model": self.config.provider.model,
-                "usage": result.usage,
-                "request_ids": result.request_ids,
-                "trace_events": len(result.trace),
-                "status": "PASS",
-            }
-        )
-        self.write_cache_payload(
-            cache_path,
-            {
-                "key": key_payload,
-                "data": result.final,
-                "usage": result.usage,
-                "request_ids": result.request_ids,
-                "endpoint": "agent_loop",
-            },
-        )
-        return normalize_memory_patch_set(result.final, paper_id=paper.paper_id)
-
-    def central_verify_paper_memory(
-        self,
-        *,
-        client: JsonLlmClient,
-        stage: str,
-        paper: PaperRecord,
-        skim: SkimCard,
-        decision: ClassificationDecision,
-        memory: dict[str, Any],
-        all_artifacts: list[Any],
-        read_artifacts: list[Any],
-    ) -> dict[str, Any]:
-        current_memory = dict(memory)
-        if current_memory.get("schema_version") == "paper_memory.v3" and not self.memory_store.read(
-            paper.paper_id
-        ):
-            self.memory_store.write(current_memory)
-        verification_artifacts = select_central_verification_pages(
-            memory=current_memory,
-            all_artifacts=all_artifacts,
-            read_artifacts=read_artifacts,
-        )
-        try:
-            patch_set = self.verify_paper_memory_once(
-                client=client,
-                stage=stage,
-                paper=paper,
-                skim=skim,
-                decision=decision,
-                memory=current_memory,
-                artifacts=verification_artifacts,
-            )
-            return self.memory_store.apply_patch_set(
-                paper.paper_id,
-                ensure_memory_audit_operation(
-                    patch_set,
-                    paper_id=paper.paper_id,
-                    phase="central_memory_verify",
-                ),
-                source="central_memory_verify",
-            )
-        except Exception as exc:
-            if self.require_llm_success() and not paper_memory_has_recoverable_content(
-                current_memory
-            ):
-                raise
-            audit = fallback_memory_audit(reason=str(exc), phase="central_memory_verify")
-            current_memory = apply_memory_audit_patch(
-                self.memory_store, paper.paper_id, audit, source="central_memory_verify_failed"
-            )
-            self.write_agent_run(
-                {
-                    "agent_run_id": f"central_memory_verify_{paper.paper_id}_failed",
-                    "paper_id": paper.paper_id,
-                    "stage": stage,
-                    "provider_kind": self.config.provider.kind,
-                    "model": self.config.provider.model,
-                    "status": "FALLBACK",
-                    "error": str(exc),
-                }
-            )
-            self.events.emit(
-                "agent_run_fallback",
-                stage=stage,
-                level="warning",
-                message=f"Memory verification failed for {paper.paper_id}; marking memory as weak but usable",
-                data={"paper_id": paper.paper_id, "error": str(exc)},
-            )
-            return current_memory
-
-    def verify_paper_memory_once(
-        self,
-        *,
-        client: JsonLlmClient,
-        stage: str,
-        paper: PaperRecord,
-        skim: SkimCard,
-        decision: ClassificationDecision,
-        memory: dict[str, Any],
-        artifacts: list[Any],
-    ) -> dict[str, Any]:
-        pages = [item.page_no for item in artifacts]
-        runtime = PaperLensRuntime(artifacts=artifacts)
-        high_risk_claims = select_high_risk_memory_claims(memory)
-        agent_context = runtime.build_context_pack(
-            stage="central_memory_verify",
-            objective=(
-                "Verify the current paper memory once against the paper map and relevant original "
-                "page evidence. Return one MemoryPatchSet that both fixes memory and records the "
-                "audit boundary."
-            ),
-            paper_id=paper.paper_id,
-            title=paper.canonical_title,
-            classification=decision.class_label,
-            memory=memory,
-            focus_queries=[claim.get("text") for claim in high_risk_claims if claim.get("text")],
-            focus_pages=pages,
-            read_artifacts=artifacts,
-            output_contract={
-                "type": "MemoryPatchSet",
-                "rule": (
-                    "Return a single patch set. Add or link evidence, weaken unsupported claims, "
-                    "add missing limitations/open questions, and include exactly one set_memory_audit operation."
-                ),
-            },
-            search_limit=5,
-            page_text_limit=1100,
-        ).as_dict()
-        key_payload = {
-            "version": CENTRAL_MEMORY_VERIFY_PROMPT_VERSION,
-            "model": self.config.provider.model,
-            "paper_hash": paper.file_hash,
-            "memory_hash": hash_json_payload(memory_without_audit(memory)),
-            "pages": pages,
-            "page_hashes": [hash_text(getattr(item, "text", "")) for item in artifacts],
-            "high_risk_claims_hash": hash_json_payload(high_risk_claims),
-            "agent_context_hash": hash_json_payload(agent_context),
-        }
-        cache_path = self.cache_path("central_memory_verify", paper.paper_id, key_payload)
-        cached = self.read_cache_payload(cache_path)
-        if cached and isinstance(cached.get("data"), dict):
-            self.events.emit(
-                "cache_hit",
-                stage=stage,
-                message=f"Memory verification cache hit for {paper.paper_id}",
-                data={"paper_id": paper.paper_id, "pages": pages, "cache": str(cache_path)},
-            )
-            return normalize_memory_patch_set(cached["data"], paper_id=paper.paper_id)
-        loop = AgentLoop(
-            client=client,
-            tools=PaperToolRegistry(
-                runtime=runtime,
-                paper_id=paper.paper_id,
-                title=paper.canonical_title,
-                memory=memory,
-                layout_pages=artifacts,
-            ),
-            session_name="central_memory_verify",
-            objective=(
-                "Verify the current PaperMemory against paper-local evidence. Use paper tools "
-                "until you can submit one MemoryPatchSet that repairs, weakens, links evidence, "
-                "or records open boundaries."
-            ),
-            final_schema_name="paperlens_memory_patch_set",
-            final_schema=MEMORY_PATCH_SET_SCHEMA,
-            stage=stage,
-            paper_id=paper.paper_id,
-            trace_path=self.data_dir / "agent_trace.jsonl",
-            system_prompt=CENTRAL_MEMORY_VERIFY_SYSTEM_PROMPT,
-            control_check=self.control.require_not_cancelled,
-            pause_check=self.control.wait_if_paused,
-        )
-        result = loop.run(
-            initial_context={
-                "paper_id": paper.paper_id,
-                "title": paper.canonical_title or "unknown",
-                "classification": decision.class_label,
-                "high_risk_claims": high_risk_claims,
-                "verification_pages": pages,
-                "agent_context_pack": agent_context,
-                "verify_prompt": build_central_memory_verify_prompt(
-                    paper=paper,
-                    skim=skim,
-                    decision=decision,
-                    memory=memory,
-                    high_risk_claims=high_risk_claims,
-                    agent_context=agent_context,
-                    artifacts=artifacts,
-                ),
-            }
-        )
-        self.record_llm_usage(stage, result.usage)
-        self.write_agent_run(
-            {
-                "agent_run_id": f"central_memory_verify_{paper.paper_id}_{uuid.uuid4().hex[:8]}",
-                "paper_id": paper.paper_id,
-                "stage": stage,
-                "provider_kind": self.config.provider.kind,
-                "model": self.config.provider.model,
-                "usage": result.usage,
-                "request_ids": result.request_ids,
-                "trace_events": len(result.trace),
-                "status": "PASS",
-            }
-        )
-        patch_set = normalize_memory_patch_set(result.final, paper_id=paper.paper_id)
-        self.write_cache_payload(
-            cache_path,
-            {
-                "key": key_payload,
-                "data": patch_set,
-                "usage": result.usage,
-                "request_ids": result.request_ids,
-                "endpoint": "agent_loop",
-            },
-        )
-        return patch_set
-
     def stage_08_evidence_verify(self) -> None:
         stage = "stage_08_evidence_verify"
         self.checkpoint(stage)
-        self.events.stage_started(stage, "Verifying paper memory once against local evidence")
+        self.events.stage_started(stage, "Running deterministic core v2 audit suite")
         core_v2_rows = self.refresh_core_v2_deterministic_audits(stage)
-        client = self.new_llm_client() if self.llm_enabled() else None
-        papers_by_id = {paper.paper_id: paper for paper in self.papers}
-        skims_by_id = {skim.paper_id: skim for skim in self.skim_cards}
-        decisions_by_id = {decision.paper_id: decision for decision in self.classifications}
-        rows = []
-        verified_cards: list[PaperCard] = []
-        for card in self.paper_cards:
-            paper = papers_by_id.get(card.paper_id)
-            skim = skims_by_id.get(card.paper_id)
-            decision = decisions_by_id.get(card.paper_id)
-            memory = self.memory_store.read(card.paper_id)
-            if client and paper and skim and decision and memory:
-                artifacts = self.db.get_page_artifacts(card.paper_id)
-                try:
-                    memory = self.central_verify_paper_memory(
-                        client=client,
-                        stage=stage,
-                        paper=paper,
-                        skim=skim,
-                        decision=decision,
-                        memory=memory,
-                        all_artifacts=artifacts,
-                        read_artifacts=[
-                            artifact
-                            for artifact in artifacts
-                            if getattr(artifact, "page_no", None) in memory_v3_pages_read(memory)
-                        ],
-                    )
-                    card = paper_card_from_memory_v3(
-                        paper=paper,
-                        skim=skim,
-                        decision=decision,
-                        memory=memory,
-                        fallback=card,
-                    )
-                except Exception as exc:
-                    if self.require_llm_success():
-                        raise
-                    audit = fallback_memory_audit(reason=str(exc), phase="central_memory_verify")
-                    apply_memory_audit_patch(
-                        self.memory_store,
-                        card.paper_id,
-                        audit,
-                        source="central_memory_verify_failed",
-                    )
-                    self.events.emit(
-                        "agent_run_fallback",
-                        stage=stage,
-                        level="warning",
-                        message=f"Memory verification failed for {card.paper_id}; keeping read memory",
-                        data={"paper_id": card.paper_id, "error": str(exc)},
-                    )
-            status, notes = audit_paper_card_evidence(card)
-            card.verification_status = status
-            self.db.upsert_paper_card(card)
-            verified_cards.append(card)
-            side = []
-            if status == "NEED_HUMAN_REVIEW":
-                side.append("NEED_HUMAN_REVIEW")
-                self.db.upsert_review_item(
-                    ReviewItem(
-                        item_id=f"evidence:{card.paper_id}",
-                        paper_id=card.paper_id,
-                        item_type="evidence",
-                        priority=1,
-                        reason=";".join(notes),
-                        payload=card.model_dump(),
-                    )
-                )
-            elif status == "PASS_WITH_WEAKNESSES":
-                side.append("WEAK_EVIDENCE_BOUNDARY")
-                self.db.upsert_review_item(
-                    ReviewItem(
-                        item_id=f"weak_evidence:{card.paper_id}",
-                        paper_id=card.paper_id,
-                        item_type="WEAK_EVIDENCE_BOUNDARY",
-                        priority=2,
-                        reason=";".join(notes),
-                        payload=card.model_dump(),
-                    )
-                )
-            self.mark_paper_state(card.paper_id, stage, side_statuses=side)
-            rows.append({"paper_id": card.paper_id, "status": status, "notes": notes})
-        self.paper_cards = verified_cards
         self.events.stage_completed(
             stage,
-            "Evidence audit completed",
-            {"paper_cards": len(rows), "core_v2_audits": len(core_v2_rows)},
+            "Core v2 deterministic audit completed",
+            {"core_v2_audits": len(core_v2_rows)},
         )
 
     def stage_15_export(self) -> list[Path]:
         stage = "stage_15_export"
         self.checkpoint(stage)
         self.events.stage_started(stage, "Writing final reading reports")
-        client = None if self.config.offline_debug else self.new_llm_client()
         active_ids = {paper.paper_id for paper in self.papers}
         report_paths = write_final_report_bundle(
             output_dir=self.output_dir,
             data_dir=self.data_dir,
-            evidence_dir=self.evidence_dir,
-            client=client,
-            record_usage=self.record_llm_usage,
-            record_agent_run=self.write_agent_run,
-            stage=stage,
             papers=self.papers,
             skim_cards=self.skim_cards,
             decisions=self.classifications,
-            paper_cards=self.paper_cards,
             review_items=[
                 item for item in self.db.list_review_items() if item.paper_id in active_ids
             ],
@@ -1805,7 +942,6 @@ class PaperLensWorkflow:
             config=self.config.public_dict(),
             topic=self.config.topic,
             idea=self.config.idea,
-            cache_dir=self.cache_dir,
         )
         self.events.stage_completed(
             stage,
@@ -1847,7 +983,6 @@ class PaperLensWorkflow:
                 "page_images": ".paperlens/pages/",
                 "figure_crops": ".paperlens/figures/",
                 "library_records": ".paperlens/library/library_records.jsonl",
-                "paper_memory_v3": ".paperlens/data/memory/v3/",
                 "core_v2": ".paperlens/data/core/v2/",
                 "core_quality_snapshot": ".paperlens/data/core_quality_snapshot.v1.json",
                 "library_index": ".paperlens/library/index/search_index.json",
@@ -1872,106 +1007,6 @@ class PaperLensWorkflow:
         )
         self.events.stage_completed(stage, "Manifest written", manifest)
         return manifest
-
-
-SKIM_CLASSIFIER_PROMPT_VERSION = "skim-classifier-v2"
-
-
-SKIM_CLASSIFIER_SYSTEM_PROMPT = """
-You are the PaperLens SkimClassifier.
-Grade a research paper's reading value using only the supplied parsed excerpts.
-
-Class labels:
-A = high value; keep it prominent and expect follow-up QA or opt-in close reading.
-B = useful or plausibly relevant; keep in the standard library.
-C = low value for the current goal; only choose when evidence is adequate.
-HOLD = insufficient evidence, weak parse, visual uncertainty, or meaningful doubt.
-
-Rules:
-- Optimize for false-negative prevention: prefer B/HOLD over C when unsure.
-- Judge value from novelty, relevance to user context, methodological quality, evidence strength, reusable ideas, and risk of missing an important paper.
-- Do not invent facts that are not in the excerpts.
-- Separate author claims from your inference.
-- Return evidence_queries that can be found in the supplied text snippets.
-- Return only JSON matching the requested schema.
-""".strip()
-
-
-SKIM_CLASSIFICATION_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["skim", "classification", "evidence_queries"],
-    "properties": {
-        "skim": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": [
-                "problem",
-                "method_type",
-                "system_scope",
-                "evaluation_type",
-                "danger_signals",
-                "confidence",
-            ],
-            "properties": {
-                "problem": {"type": ["string", "null"]},
-                "method_type": {"type": ["string", "null"]},
-                "system_scope": {"type": ["string", "null"]},
-                "evaluation_type": {"type": ["string", "null"]},
-                "danger_signals": {"type": "array", "items": {"type": "string"}},
-                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-            },
-        },
-        "classification": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["class_label", "confidence", "false_negative_risk", "reason_codes"],
-            "properties": {
-                "class_label": {"type": "string", "enum": ["A", "B", "C", "HOLD"]},
-                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-                "false_negative_risk": {"type": "number", "minimum": 0, "maximum": 1},
-                "reason_codes": {"type": "array", "items": {"type": "string"}},
-            },
-        },
-        "evidence_queries": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["page_no", "keyword", "quote"],
-                "properties": {
-                    "page_no": {"type": ["integer", "null"], "minimum": 1},
-                    "keyword": {"type": ["string", "null"]},
-                    "quote": {"type": ["string", "null"]},
-                },
-            },
-        },
-    },
-}
-
-
-ROLLING_MEMORY_PROMPT_VERSION = "memory-patch-rolling-v2-context"
-CENTRAL_MEMORY_VERIFY_PROMPT_VERSION = "central-memory-verify-v2-strict-audit"
-
-
-ROLLING_MEMORY_SYSTEM_PROMPT = """
-You are the PaperLens RollingReader.
-Read paper pages and improve PaperMemoryV3.
-Use tools whenever they help you check text, figures, evidence, or current memory.
-Return final as one MemoryPatchSet when the memory patch is good enough.
-Keep durable paper claims separate from background concepts and open uncertainty.
-""".strip()
-
-
-CENTRAL_MEMORY_VERIFY_SYSTEM_PROMPT = """
-You are the PaperLens MemoryVerifier.
-Verify PaperMemoryV3 against local paper evidence.
-Use tools until you can confidently repair memory, weaken unsupported claims, link evidence,
-or record explicit uncertainty.
-The memory audit status is authoritative: use NEED_HUMAN_REVIEW only when the capsule should
-not be presented as reviewed; never mark NEED_HUMAN_REVIEW as safe_to_generate_capsule=true.
-Return final as one MemoryPatchSet. Include a memory audit operation when done.
-""".strip()
 
 
 VLM_PAGE_READER_SYSTEM_PROMPT = """
@@ -2040,203 +1075,6 @@ def deterministic_skim_classify(
     return card, classify_paper(paper, card)
 
 
-def build_skim_prompt(
-    *,
-    paper: PaperRecord,
-    artifacts: list[Any],
-    keyword_pool: list[str],
-    topic: str | None,
-    idea: str | None,
-) -> str:
-    excerpts = []
-    used_chars = 0
-    max_chars = 12000
-    for page in artifacts[:6]:
-        text = normalize_excerpt(page.text, limit=2400)
-        if not text:
-            continue
-        captions = "; ".join(str(caption.get("text") or "") for caption in page.captions[:4])
-        visual_flags = ", ".join(page.low_confidence_flags)
-        block = (
-            f"[page {page.page_no}]\n"
-            f"flags: {visual_flags or 'none'}\n"
-            f"captions: {captions or 'none'}\n"
-            f"text:\n{text}"
-        )
-        if used_chars + len(block) > max_chars:
-            break
-        excerpts.append(block)
-        used_chars += len(block)
-    return "\n\n".join(
-        [
-            f"paper_id: {paper.paper_id}",
-            f"title: {paper.canonical_title or 'unknown'}",
-            f"parse_quality: {paper.parse_quality or 'unknown'}",
-            "user topic: " + (topic or "not provided"),
-            "user idea or claim draft: " + (idea or "not provided"),
-            "value-signal keywords: " + ", ".join(keyword_pool),
-            (
-                "Classify reading value for an automated paper-reading workflow. "
-                "A papers should be kept prominent for follow-up QA or opt-in close reading; B papers "
-                "belong in the standard library; C papers are lower-priority but still receive the "
-                "standard read loop; HOLD papers need review."
-            ),
-            "Parsed excerpts:",
-            "\n\n---\n\n".join(excerpts) if excerpts else "No usable text excerpts.",
-        ]
-    )
-
-
-def build_rolling_memory_prompt(
-    *,
-    paper: PaperRecord,
-    skim: SkimCard,
-    decision: ClassificationDecision,
-    memory: dict[str, Any],
-    agent_context: dict[str, Any] | None = None,
-    artifacts: list[Any],
-    chunk_index: int,
-    total_chunks: int,
-) -> str:
-    page_blocks = []
-    for page in artifacts:
-        text = normalize_excerpt(page.text, limit=1200)
-        if not text:
-            continue
-        captions = "; ".join(str(caption.get("text") or "") for caption in page.captions[:3])
-        visual_notes = getattr(page, "visual_notes", [])[:3]
-        page_blocks.append(
-            "\n".join(
-                [
-                    f"[page {page.page_no}]",
-                    f"captions: {captions or 'none'}",
-                    "visual_notes: " + json.dumps(visual_notes, ensure_ascii=False),
-                    f"text:\n{text}",
-                ]
-            )
-        )
-    return "\n\n".join(
-        [
-            f"paper_id: {paper.paper_id}",
-            f"title: {paper.canonical_title or 'unknown'}",
-            f"classification: {decision.class_label}",
-            f"chunk: {chunk_index + 1}/{total_chunks}",
-            "skim_card:",
-            json.dumps(skim.model_dump(), ensure_ascii=False),
-            "agent_context_pack:",
-            context_pack_prompt(agent_context),
-            "current_paper_memory_v3:",
-            json.dumps(memory_v3_prompt_view(memory), ensure_ascii=False),
-            "memory_patch_protocol:",
-            memory_patch_protocol_text(),
-            (
-                "Task: return a MemoryPatchSet after reading the current pages. Use add_read_pages "
-                "for these pages, then add/upsert only durable knowledge that improves the current "
-                "PaperMemoryV3. If these pages change an existing understanding, patch the relevant "
-                "field or claim instead of appending a duplicate."
-            ),
-            (
-                "Coverage checklist: preserve enough material for a later Theseus-grade capsule. "
-                "Capture the paper's problem frame, core abstraction, mechanism steps, concrete "
-                "implementation components/equations/runtime or training path, evaluation setup "
-                "and numbers, limitations, concepts a reader needs, and evidence links. Use "
-                "upsert_implementation_component for concrete modules, data structures, losses, "
-                "runtime components, or algorithm stages that should later become an implementation "
-                "detail section."
-            ),
-            "current_pages:",
-            "\n\n---\n\n".join(page_blocks) if page_blocks else "No usable text excerpts.",
-        ]
-    )
-
-
-def build_central_memory_verify_prompt(
-    *,
-    paper: PaperRecord,
-    skim: SkimCard,
-    decision: ClassificationDecision,
-    memory: dict[str, Any],
-    high_risk_claims: list[dict[str, Any]],
-    agent_context: dict[str, Any] | None = None,
-    artifacts: list[Any],
-) -> str:
-    return "\n\n".join(
-        [
-            f"paper_id: {paper.paper_id}",
-            f"title: {paper.canonical_title or 'unknown'}",
-            f"classification: {decision.class_label}",
-            "skim_card:",
-            json.dumps(skim.model_dump(), ensure_ascii=False),
-            "current_paper_memory_v3:",
-            json.dumps(memory_v3_prompt_view(memory_without_audit(memory)), ensure_ascii=False),
-            "high_risk_claims_to_verify:",
-            json.dumps(high_risk_claims, ensure_ascii=False),
-            "agent_context_pack:",
-            context_pack_prompt(agent_context),
-            "memory_patch_protocol:",
-            memory_patch_protocol_text(),
-            "verification_pages:",
-            json.dumps(
-                memory_page_excerpt_blocks(artifacts, limit_per_page=2400, max_chars=22000),
-                ensure_ascii=False,
-            ),
-            (
-                "Task: verify memory and return a MemoryPatchSet when ready. If a claim is "
-                "supported, add/link evidence and mark it checked. If it is too strong, rewrite it "
-                "with lower confidence or mark it disputed. If something important is missing, use "
-                "tools or record the boundary in set_memory_audit. A complete memory should support "
-                "separate capsule sections for orientation, mechanism, implementation path, evaluation, "
-                "value/tradeoffs, and limitations when the paper contains that material."
-            ),
-        ]
-    )
-
-
-def memory_patch_protocol_text() -> str:
-    return (
-        "Return JSON: {paper_id, rationale, operations:[{op,payload}]}. Useful ops: "
-        "add_read_pages {pages}; set_problem_frame {problem,why_it_matters,scope}; "
-        "set_core_abstraction {text,evidence_refs,misunderstanding_guard}; "
-        "set_mechanism_overview {overview}; upsert_mechanism_step {id?,text}; "
-        "upsert_implementation_component {name?,component?,role?,text?,evidence_refs?}; "
-        "set_evaluation_summary {summary}; upsert_evaluation_item {id?,text}; "
-        "upsert_concept {term,explanation}; set_conceptual_bridge {needed,reader_gap,bridge_text}; "
-        "upsert_conceptual_bridge_term {term,explanation,paper_role,provenance}; "
-        "upsert_evidence {id?,source_type,page,section?,excerpt_or_caption?,interpretation,reliability}; "
-        "upsert_claim {id?,text,type,provenance,confidence,evidence_refs,depends_on?,risk_tags?,critic_status}; "
-        "link_claim_evidence {claim_id,evidence_refs}; add_limitation {text}; "
-        "add_open_question {text}; set_memory_audit {status,unsupported_claims,missing_items,"
-        "repair_instructions,safe_to_generate_capsule,confidence}. "
-        "Prefer stable IDs when updating existing entries."
-    )
-
-
-def memory_page_excerpt_blocks(
-    artifacts: list[Any],
-    *,
-    limit_per_page: int,
-    max_chars: int,
-) -> list[dict[str, Any]]:
-    blocks = []
-    used_chars = 0
-    for page in artifacts:
-        block = {
-            "page_no": getattr(page, "page_no", None),
-            "text": normalize_excerpt(str(getattr(page, "text", "") or ""), limit=limit_per_page),
-            "captions": getattr(page, "captions", [])[:5],
-            "figures": getattr(page, "figures", [])[:4],
-            "tables": getattr(page, "tables", [])[:4],
-            "visual_notes": getattr(page, "visual_notes", [])[:4],
-            "low_confidence_flags": getattr(page, "low_confidence_flags", []),
-        }
-        block_text = json.dumps(block, ensure_ascii=False)
-        if used_chars + len(block_text) > max_chars:
-            break
-        blocks.append(block)
-        used_chars += len(block_text)
-    return blocks
-
-
 def build_vlm_page_prompt(*, paper: PaperRecord, artifacts: list[Any]) -> str:
     pages = []
     for artifact in artifacts:
@@ -2261,73 +1099,6 @@ def build_vlm_page_prompt(*, paper: PaperRecord, artifacts: list[Any]) -> str:
     )
 
 
-def llm_skim_classify_to_models(
-    *,
-    paper: PaperRecord,
-    artifacts: list[Any],
-    raw: dict[str, Any],
-    agent_run_id: str,
-    fallback_card: SkimCard,
-    fallback_decision: ClassificationDecision,
-) -> tuple[SkimCard, ClassificationDecision]:
-    skim = raw.get("skim") if isinstance(raw.get("skim"), dict) else {}
-    classification = (
-        raw.get("classification") if isinstance(raw.get("classification"), dict) else {}
-    )
-    signals = normalized_string_list(skim.get("danger_signals"))
-    refs = evidence_refs_from_llm(
-        paper_id=paper.paper_id,
-        artifacts=artifacts,
-        queries=raw.get("evidence_queries"),
-        fallback_signals=signals,
-        agent_run_id=agent_run_id,
-    )
-    if not refs:
-        refs = fallback_card.evidence_refs
-    class_label = classification.get("class_label")
-    if class_label not in {"A", "B", "C", "HOLD"}:
-        class_label = fallback_decision.class_label
-    card = SkimCard(
-        paper_id=paper.paper_id,
-        problem=string_or_none(skim.get("problem")) or fallback_card.problem,
-        method_type=string_or_none(skim.get("method_type")) or fallback_card.method_type,
-        system_scope=string_or_none(skim.get("system_scope")) or fallback_card.system_scope,
-        evaluation_type=string_or_none(skim.get("evaluation_type"))
-        or fallback_card.evaluation_type,
-        danger_signals=signals or fallback_card.danger_signals,
-        evidence_refs=refs,
-        confidence=clamp_float(skim.get("confidence"), fallback_card.confidence),
-    )
-    decision = ClassificationDecision(
-        paper_id=paper.paper_id,
-        class_label=class_label,
-        confidence=clamp_float(classification.get("confidence"), fallback_decision.confidence),
-        false_negative_risk=clamp_float(
-            classification.get("false_negative_risk"),
-            fallback_decision.false_negative_risk,
-        ),
-        reason_codes=normalized_string_list(classification.get("reason_codes"))
-        or fallback_decision.reason_codes,
-        audit_status="LLM_PENDING_AUDIT",
-    )
-    if paper.parse_quality in {"OCR_REQUIRED", "VLM_PAGE_MODE"} and decision.class_label == "C":
-        decision.class_label = "HOLD"
-        decision.false_negative_risk = max(decision.false_negative_risk, 0.8)
-        decision.reason_codes.append(f"{paper.parse_quality.lower()}_guardrail")
-    if paper.parse_quality == "PASS_WITH_WEAKNESSES" and decision.class_label == "C":
-        decision.class_label = "HOLD"
-        decision.false_negative_risk = max(decision.false_negative_risk, 0.7)
-        decision.reason_codes.append("weak_parse_c_guardrail")
-    if decision.class_label == "C" and not card.evidence_refs:
-        decision.false_negative_risk = max(decision.false_negative_risk, 0.55)
-        decision.reason_codes.append("c_without_positive_evidence")
-    if decision.class_label == "C" and card.danger_signals:
-        decision.class_label = "B"
-        decision.false_negative_risk = max(decision.false_negative_risk, 0.65)
-        decision.reason_codes.append("keyword_anti_leak_guardrail")
-    return card, decision
-
-
 def dedupe_artifacts_by_page(artifacts: list[Any]) -> list[Any]:
     seen = set()
     result = []
@@ -2340,312 +1111,11 @@ def dedupe_artifacts_by_page(artifacts: list[Any]) -> list[Any]:
     return result
 
 
-def tokenize_memory_query(text: str) -> list[str]:
-    return [
-        token
-        for token in re.findall(r"[a-zA-Z0-9_]{4,}|[\u4e00-\u9fff]{2,}", normalize_for_search(text))
-        if token not in {"paper", "memory", "claim", "claims", "missing", "needs", "need"}
-    ][:12]
-
-
 def hash_file_bytes(path: Path) -> str:
     try:
         return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
     except OSError:
         return "missing"
-
-
-def deterministic_paper_card(
-    paper: PaperRecord,
-    skim: SkimCard,
-    decision: ClassificationDecision,
-) -> PaperCard:
-    contribution_claims = []
-    if skim.problem:
-        contribution_claims.append(skim.problem)
-    mechanisms = [
-        value for value in [skim.method_type, skim.system_scope] if value and value != "unknown"
-    ]
-    evaluation = (
-        [skim.evaluation_type] if skim.evaluation_type and skim.evaluation_type != "unknown" else []
-    )
-    limitations = [
-        "Generated from skim-level verified excerpts; full PaperMemory read not yet performed.",
-    ]
-    if decision.class_label == "B":
-        limitations.append(
-            "B-class paper may need follow-up QA verification before strong value or citation claims."
-        )
-    return PaperCard(
-        paper_id=paper.paper_id,
-        contribution_claims=contribution_claims or [paper.canonical_title or paper.paper_id],
-        mechanisms=mechanisms,
-        assumptions=[],
-        evaluation=evaluation,
-        limitations=limitations,
-        relation_to_user_work=(
-            f"{decision.class_label}-class paper-value candidate with "
-            f"{', '.join(skim.danger_signals) if skim.danger_signals else 'no explicit danger signal'}."
-        ),
-        evidence_refs=skim.evidence_refs,
-        verification_status="PENDING_EVIDENCE_AUDIT",
-    )
-
-
-def should_run_normal_read(decision: ClassificationDecision) -> bool:
-    _ = decision
-    return True
-
-
-def paper_card_from_memory_v3(
-    *,
-    paper: PaperRecord,
-    skim: SkimCard,
-    decision: ClassificationDecision,
-    memory: dict[str, Any],
-    fallback: PaperCard,
-) -> PaperCard:
-    claims = [
-        item.get("text", "")
-        for item in list_payload(memory.get("claims"))
-        if isinstance(item, dict) and string_or_none(item.get("text"))
-    ]
-    core_abstractions = [
-        item.get("text", "")
-        for item in list_payload(memory.get("core_abstractions"))
-        if isinstance(item, dict) and string_or_none(item.get("text"))
-    ]
-    contribution_claims = core_abstractions[:1] + claims[:5]
-    if not contribution_claims:
-        contribution_claims = compact_string_list(
-            [
-                dict_value(memory.get("problem_frame")).get("problem"),
-                fallback.contribution_claims[0] if fallback.contribution_claims else None,
-            ],
-            limit=6,
-            max_chars=220,
-        )
-
-    mechanism = dict_value(memory.get("mechanism"))
-    mechanisms = normalized_string_list(
-        [mechanism.get("overview")]
-        + [
-            item.get("text")
-            for item in list_payload(mechanism.get("steps"))
-            if isinstance(item, dict)
-        ]
-    )
-    if not mechanisms:
-        mechanisms = fallback.mechanisms
-
-    evaluation_block = dict_value(memory.get("evaluation"))
-    evaluation = normalized_string_list(
-        [evaluation_block.get("summary")]
-        + [
-            item.get("text")
-            for item in list_payload(evaluation_block.get("items"))
-            if isinstance(item, dict)
-        ]
-    )
-    if not evaluation:
-        evaluation = fallback.evaluation
-
-    limitations = normalized_string_list(memory.get("limitations")) or fallback.limitations
-    audit = dict_value(dict_value(memory.get("audit_trail")).get("memory_audit"))
-    for item in normalized_string_list(audit.get("missing_items") if audit else [])[:3]:
-        limitations.append(f"Memory audit still wants caution on: {item}")
-    limitations = list(dict.fromkeys(limitations))[:6]
-
-    evidence_refs = evidence_refs_from_memory_v3(
-        paper_id=paper.paper_id,
-        skim=skim,
-        memory=memory,
-        fallback=fallback.evidence_refs,
-    )
-    verification_status = memory_backed_card_status(audit, evidence_refs)
-    return PaperCard(
-        paper_id=paper.paper_id,
-        contribution_claims=contribution_claims[:6],
-        mechanisms=mechanisms[:6],
-        assumptions=fallback.assumptions[:4],
-        evaluation=evaluation[:6],
-        limitations=limitations,
-        relation_to_user_work=(
-            f"{decision.class_label}-class paper; PaperCard is derived from PaperMemoryV3."
-        ),
-        evidence_refs=evidence_refs,
-        verification_status=verification_status,
-    )
-
-
-def evidence_refs_from_memory_v3(
-    *,
-    paper_id: str,
-    skim: SkimCard,
-    memory: dict[str, Any],
-    fallback: list[EvidenceRef],
-) -> list[EvidenceRef]:
-    refs = list(skim.evidence_refs or fallback)
-    seen_pages = {ref.page_no for ref in refs}
-    page_numbers: list[int] = []
-    evidence_id_to_page = {}
-    for item in list_payload(memory.get("evidence")):
-        if isinstance(item, dict):
-            page_no = safe_int(item.get("page"))
-            if page_no and page_no > 0:
-                page_numbers.append(page_no)
-                if item.get("id"):
-                    evidence_id_to_page[str(item.get("id"))] = page_no
-    for claim in list_payload(memory.get("claims")):
-        if not isinstance(claim, dict):
-            continue
-        for ref in normalized_string_list(claim.get("evidence_refs")):
-            page_no = safe_int(ref) or evidence_id_to_page.get(str(ref))
-            if page_no and page_no > 0:
-                page_numbers.append(page_no)
-    for page_no in page_numbers:
-        if page_no in seen_pages:
-            continue
-        refs.append(
-            EvidenceRef(
-                paper_id=paper_id,
-                page_no=page_no,
-                verification_status="KEYWORD_VERIFIED",
-            )
-        )
-        seen_pages.add(page_no)
-        if len(refs) >= 8:
-            break
-    return dedupe_evidence_refs(refs)[:8]
-
-
-def memory_backed_card_status(audit: dict[str, Any], evidence_refs: list[EvidenceRef]) -> str:
-    if not evidence_refs:
-        return "NEED_HUMAN_REVIEW"
-    status = str(audit.get("status") or "PASS_WITH_WEAKNESSES")
-    if status == "PASS":
-        return "PASS"
-    if status == "PASS_WITH_WEAKNESSES":
-        return "PASS_WITH_WEAKNESSES"
-    return "NEED_HUMAN_REVIEW"
-
-
-def audit_paper_card_evidence(card: PaperCard) -> tuple[str, list[str]]:
-    hard_notes = []
-    weak_notes = []
-    if not card.evidence_refs:
-        return "NEED_HUMAN_REVIEW", ["missing_evidence_refs"]
-    weak = False
-    for ref in card.evidence_refs:
-        if ref.page_no <= 0:
-            hard_notes.append("invalid_page_no")
-        if not ref.verification_status or ref.verification_status == "UNVERIFIED":
-            hard_notes.append("unverified_ref")
-        if ref.verification_status in {"WEAK_VERIFIED", "KEYWORD_VERIFIED"}:
-            weak = True
-        if ref.bbox is None:
-            weak = True
-            weak_notes.append("missing_bbox")
-    if hard_notes:
-        return "NEED_HUMAN_REVIEW", sorted(set(hard_notes + weak_notes))
-    if weak:
-        return "PASS_WITH_WEAKNESSES", sorted(set(weak_notes or ["skim_level_or_keyword_evidence"]))
-    return "PASS", ["text_match_verified"]
-
-
-def combine_verification_status(left: str, right: str) -> str:
-    rank = {"PASS": 0, "PASS_WITH_WEAKNESSES": 1, "NEED_HUMAN_REVIEW": 2}
-    return left if rank.get(left, 2) >= rank.get(right, 2) else right
-
-
-def clean_audit_notes(notes: list[str]) -> list[str]:
-    hidden = {"skim_level_or_keyword_evidence", "visual_required_pages"}
-    cleaned = []
-    for note in notes:
-        parts = [part.strip() for part in str(note).split(";") if part.strip()]
-        visible = [part for part in parts if part not in hidden]
-        if visible:
-            cleaned.append("; ".join(visible))
-    return cleaned
-
-
-def evidence_refs_from_llm(
-    *,
-    paper_id: str,
-    artifacts: list[Any],
-    queries: Any,
-    fallback_signals: list[str],
-    agent_run_id: str,
-) -> list[EvidenceRef]:
-    refs: list[EvidenceRef] = []
-    if isinstance(queries, list):
-        for index, query in enumerate(queries[:8], start=1):
-            if not isinstance(query, dict):
-                continue
-            quote = string_or_none(query.get("quote"))
-            keyword = string_or_none(query.get("keyword"))
-            page_no = query.get("page_no") if isinstance(query.get("page_no"), int) else None
-            ref = find_evidence_ref(
-                paper_id=paper_id,
-                artifacts=artifacts,
-                quote=quote,
-                keyword=keyword,
-                page_no=page_no,
-                text_span_id=f"llm_query_{index}",
-                agent_run_id=agent_run_id,
-            )
-            if ref:
-                refs.append(ref)
-    for signal in fallback_signals:
-        if len(refs) >= 3:
-            break
-        ref = find_evidence_ref(
-            paper_id=paper_id,
-            artifacts=artifacts,
-            quote=None,
-            keyword=signal,
-            page_no=None,
-            text_span_id=f"keyword_{slug(signal)}",
-            agent_run_id=agent_run_id,
-        )
-        if ref and not any(
-            (ref.page_no, ref.text_span_id) == (old.page_no, old.text_span_id) for old in refs
-        ):
-            refs.append(ref)
-    return refs
-
-
-def find_evidence_ref(
-    *,
-    paper_id: str,
-    artifacts: list[Any],
-    quote: str | None,
-    keyword: str | None,
-    page_no: int | None,
-    text_span_id: str,
-    agent_run_id: str,
-) -> EvidenceRef | None:
-    search_pages = artifacts
-    if page_no is not None:
-        preferred = [page for page in artifacts if page.page_no == page_no]
-        search_pages = preferred + [page for page in artifacts if page.page_no != page_no]
-    for page in search_pages:
-        text = page.text or ""
-        if quote and normalize_for_search(quote) not in normalize_for_search(text):
-            continue
-        if not quote and keyword and keyword.lower() not in text.lower():
-            continue
-        bbox = first_matching_bbox(page.words, quote or keyword)
-        return EvidenceRef(
-            paper_id=paper_id,
-            page_no=page.page_no,
-            text_span_id=text_span_id,
-            bbox=bbox,
-            quote_hash=hash_text(quote) if quote else None,
-            agent_run_id=agent_run_id,
-            verification_status="TEXT_MATCH_VERIFIED" if quote else "KEYWORD_VERIFIED",
-        )
-    return None
 
 
 def normalize_excerpt(text: str, *, limit: int) -> str:
@@ -2659,57 +1129,8 @@ def normalize_for_search(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().lower()
 
 
-def normalized_string_list(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    result = []
-    for item in value:
-        if isinstance(item, str):
-            cleaned = re.sub(r"\s+", " ", item).strip()
-            if cleaned:
-                result.append(cleaned)
-    return result[:20]
-
-
-def string_or_none(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    cleaned = re.sub(r"\s+", " ", value).strip()
-    return cleaned or None
-
-
-def clamp_float(value: Any, fallback: float) -> float:
-    if isinstance(value, bool):
-        return fallback
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return fallback
-    return max(0.0, min(1.0, numeric))
-
-
 def hash_text(value: str) -> str:
     return hashlib.sha256(normalize_for_search(value).encode("utf-8")).hexdigest()[:16]
-
-
-def slug(value: str) -> str:
-    cleaned = re.sub(r"[^a-zA-Z0-9]+", "_", value.strip()).strip("_").lower()
-    return cleaned[:48] or "evidence"
-
-
-def first_matching_bbox(words: list[dict[str, Any]], query: str | None) -> list[float] | None:
-    if not words:
-        return None
-    if not query:
-        return words[0].get("bbox")
-    tokens = re.findall(r"[A-Za-z0-9_+-]+", query.lower())
-    candidates = tokens[:4] or [query.lower()]
-    for word in words:
-        text = str(word.get("text") or "").strip().lower()
-        if any(candidate and candidate in text for candidate in candidates):
-            bbox = word.get("bbox")
-            return bbox if isinstance(bbox, list) else None
-    return words[0].get("bbox")
 
 
 def keyword_hits(text: str, keywords: list[str]) -> list[str]:
@@ -2842,179 +1263,56 @@ def write_final_report_bundle(
     *,
     output_dir: Path,
     data_dir: Path,
-    evidence_dir: Path,
-    client: JsonLlmClient | None,
-    record_usage: Any,
-    record_agent_run: Any,
-    stage: str,
     papers: list[PaperRecord],
     skim_cards: list[SkimCard],
     decisions: list[ClassificationDecision],
-    paper_cards: list[PaperCard],
     review_items: list[ReviewItem],
     budget: dict[str, Any],
     budget_provider: Any | None = None,
     config: dict[str, Any],
     topic: str | None,
     idea: str | None,
-    cache_dir: Path | None = None,
 ) -> list[Path]:
     formal_run = not bool(config.get("offline_debug"))
-    require_report_success = formal_run and report_generation_must_succeed()
     output_language = str(config.get("output_language") or "zh")
     if output_language not in {"zh", "en"}:
         output_language = "zh"
     read_mode = str(config.get("read_mode") or "standard")
     if read_mode != "standard":
         raise ValueError("PaperLens Core currently supports only read_mode='standard'")
-    card_by_id = {card.paper_id: card for card in paper_cards}
     skim_by_id = {card.paper_id: card for card in skim_cards}
     decision_by_id = {decision.paper_id: decision for decision in decisions}
     paper_report_rows: list[dict[str, Any]] = []
     written: list[Path] = []
-    memory_store = PaperMemoryStore(data_dir)
 
     for paper in papers:
         skim = skim_by_id.get(paper.paper_id)
         decision = decision_by_id.get(paper.paper_id)
-        card = card_by_id.get(paper.paper_id)
         report_name = paper_report_filename(paper)
         report_path = output_dir / "papers" / report_name
-        layout = load_layout_index(data_dir, paper.paper_id)
-        paper_memory_v3 = memory_store.initialize(
-            paper=paper,
-            skim=skim,
-            decision=decision,
-            card=card,
-            layout=layout,
-            source="export_prepare",
-            prefer_existing=True,
-        )
-        paper_memory_for_prompt = build_report_memory_context(
-            data_dir=data_dir,
-            paper_id=paper.paper_id,
-            paper_memory_v3=paper_memory_v3,
-        )
-        model_report = None
-        report_audit = None
-        if formal_run:
-            if client is None:
-                raise RuntimeError("Formal report generation requires a model client")
-            try:
-                model_report, report_audit = compose_agentic_paper_report(
-                    client=client,
-                    data_dir=data_dir,
-                    stage=stage,
-                    paper=paper,
-                    skim=skim,
-                    decision=decision,
-                    card=card,
-                    paper_memory=paper_memory_for_prompt,
-                    layout=layout,
-                    topic=topic,
-                    idea=idea,
-                    output_language=output_language,
-                    record_usage=record_usage,
-                    record_agent_run=record_agent_run,
-                    read_mode=read_mode,
-                    cache_dir=cache_dir,
-                )
-            except Exception as exc:
-                record_agent_run(
-                    {
-                        "agent_run_id": f"final_report_{paper.paper_id}_failed",
-                        "paper_id": paper.paper_id,
-                        "stage": stage,
-                        "provider_kind": client.config.kind,
-                        "model": client.config.model,
-                        "status": "FALLBACK",
-                        "error": str(exc),
-                    }
-                )
-                if require_report_success:
-                    raise RuntimeError(
-                        f"Final report generation failed for {paper.paper_id}: {exc}"
-                    ) from exc
-                model_report = fallback_model_paper_report(
-                    paper=paper,
-                    skim=skim,
-                    decision=decision,
-                    card=card,
-                    paper_memory=paper_memory_for_prompt,
-                    layout=layout,
-                    topic=topic,
-                    idea=idea,
-                    reason=str(exc),
-                    output_language=output_language,
-                )
-                report_audit = {
-                    "verdict": "NEED_HUMAN_REVIEW",
-                    "unsupported_items": [],
-                    "missing_items": ["model-generated final explanation was not available"],
-                    "correction_notes": [f"report_generation_failed: {exc}"],
-                    "safe_usage_note": "This report used a deterministic fallback and needs human review before citation.",
-                }
-            report_audit = combine_report_and_memory_audits(report_audit, paper_memory_v3)
-            if require_report_success and not final_report_audit_acceptable(report_audit):
-                safe_usage_note = compact_reason(
-                    str((report_audit or {}).get("safe_usage_note") or ""), max_chars=220
-                )
-                suffix = f" ({safe_usage_note})" if safe_usage_note else ""
-                raise RuntimeError(
-                    f"Final report audit did not produce a usable report for {paper.paper_id}: "
-                    f"{(report_audit or {}).get('verdict')}{suffix}"
-                )
-        if report_audit is not None:
-            paper_memory_v3 = memory_store.apply_patch_set(
-                paper.paper_id,
-                {
-                    "paper_id": paper.paper_id,
-                    "operations": [{"op": "set_report_audit", "payload": report_audit}],
-                },
-                source="export_report_audit",
-            )
-        written.append(write_paper_memory_v3_file(data_dir, paper_memory_v3))
-        report_markdown = render_paper_report(
-            paper=paper,
-            skim=skim,
-            decision=decision,
-            card=card,
-            layout=layout,
-            topic=topic,
-            idea=idea,
-            formal_run=formal_run,
-            model_report=model_report,
-            report_audit=report_audit,
-            output_dir=output_dir,
-            output_language=output_language,
-        )
-        report_path.write_text(report_markdown, encoding="utf-8")
-        written.append(report_path)
-        core_graph_report_path = write_core_graph_report_view(
-            output_dir=output_dir,
+        report_markdown = render_core_graph_report_view(
             data_dir=data_dir,
             paper_id=paper.paper_id,
             title=paper.canonical_title or paper.paper_id,
-            report_name=report_name,
         )
-        if core_graph_report_path is not None:
-            written.append(core_graph_report_path)
+        if report_markdown is None:
+            raise RuntimeError(
+                f"Core v2 report is required for {paper.paper_id}; export only publishes "
+                "reviewed ClaimGraph reports"
+            )
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(report_markdown, encoding="utf-8")
+        written.append(report_path)
+        graph_summary = read_core_v2_graph_summary(output_dir, paper.paper_id)
         paper_report_rows.append(
             {
                 "paper": paper,
                 "skim": skim,
                 "decision": decision,
-                "card": card,
                 "report_name": report_name,
-                "core_graph_report_name": (
-                    core_graph_report_path.relative_to(output_dir / "papers").as_posix()
-                    if core_graph_report_path is not None
-                    else None
-                ),
+                "core_graph_report_name": report_name,
                 "report_title": markdown_title(report_markdown) or paper.canonical_title,
-                "paper_memory_v3": paper_memory_v3,
-                "model_report": model_report,
-                "report_audit": report_audit,
+                "core_v2_graph_summary": graph_summary,
             }
         )
 
@@ -3042,15 +1340,12 @@ def write_final_report_bundle(
     return written
 
 
-def report_generation_must_succeed() -> bool:
-    explicit = os.getenv("PAPERLENS_REQUIRE_LLM")
-    if explicit is not None:
-        return explicit == "1"
-    return os.getenv("PAPERLENS_ALLOW_LLM_FALLBACK", "0") != "1"
-
-
 def utc_timestamp() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def dict_value(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
 
 
 def load_layout_index(data_dir: Path, paper_id: str) -> dict[str, Any]:

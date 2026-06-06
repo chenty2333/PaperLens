@@ -15,9 +15,9 @@ WORKFLOW_STAGES: tuple[WorkflowStage, ...] = (
     WorkflowStage("stage_01_parse", "PARSED", "解析论文"),
     WorkflowStage("stage_02_parse_verify", "PARSE_VERIFIED", "检查解析质量"),
     WorkflowStage("stage_03_skim", "MAPPED", "建立论文地图"),
-    WorkflowStage("stage_07_normal_read", "MEMORY_BUILT", "阅读论文"),
-    WorkflowStage("stage_08_evidence_verify", "MEMORY_VERIFIED", "核对证据"),
-    WorkflowStage("stage_15_export", "REPORT_EXPORTED", "生成知识胶囊"),
+    WorkflowStage("stage_07_normal_read", "CORE_GRAPH_BUILT", "构建事实图"),
+    WorkflowStage("stage_08_evidence_verify", "CORE_GRAPH_REVIEWED", "审计事实图"),
+    WorkflowStage("stage_15_export", "REPORT_EXPORTED", "导出事实图报告"),
     WorkflowStage("stage_17_manifest", "RUN_MANIFEST_READY", "保存运行结果"),
 )
 

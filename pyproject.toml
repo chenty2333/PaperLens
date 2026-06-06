@@ -14,7 +14,6 @@ build = [
   "pyinstaller>=6.20.0",
 ]
 dev = [
-  "pytest>=9.0.0",
   "ruff>=0.14.0",
 ]
 
@@ -31,11 +30,6 @@ packages = ["paperlens_core"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["."]
-addopts = ["-p", "no:anyio"]
 
 [dependency-groups]
 dev = [

@@ -7,7 +7,6 @@ from typing import Any, Iterable
 
 from paperlens_core.dom import stable_source_id
 from paperlens_core.dom.paper_dom import split_paragraphs
-from paperlens_core.memory_v3 import dict_value, list_payload, memory_v3_prompt_view
 
 
 CONTEXT_PACK_SCHEMA_VERSION = "paperlens.context_pack.v1"
@@ -35,9 +34,9 @@ class ContextPack:
     """Small, explicit working context for one agent step.
 
     The model still receives a fresh API context on every call. PaperLens keeps
-    continuity by rebuilding this pack from durable memory plus local tool
+    continuity by rebuilding this pack from typed QA context plus local tool
     observations, then requiring the model to emit a bounded artifact such as a
-    MemoryPatchSet or QA answer.
+    QA answer.
     """
 
     stage: str
@@ -59,9 +58,10 @@ class ContextPack:
             "output_contract": self.output_contract,
             "budget": self.budget,
             "contract": (
-                "Treat PaperMemory as durable state, page/search results as local tool observations, "
-                "and this step's output as a patch or bounded answer. Do not pretend the whole paper "
-                "is in context; request or use focused evidence when a claim is uncertain."
+                "Treat ClaimGraph/PaperDOM source IDs as paper evidence, page/search results as "
+                "local tool observations, and this step's output as a bounded answer. Do not "
+                "pretend the whole paper is in context; request or use focused evidence when a "
+                "claim is uncertain."
             ),
         }
 
@@ -185,7 +185,7 @@ class PaperLensRuntime:
         paper_id: str,
         title: str | None = None,
         classification: str | None = None,
-        memory: dict[str, Any] | None = None,
+        context: dict[str, Any] | None = None,
         focus_queries: Iterable[str] = (),
         focus_pages: Iterable[int] = (),
         read_artifacts: Iterable[Any] = (),
@@ -193,7 +193,7 @@ class PaperLensRuntime:
         search_limit: int = 4,
         page_text_limit: int = 900,
     ) -> ContextPack:
-        memory = memory if isinstance(memory, dict) else {}
+        context = context if isinstance(context, dict) else {}
         queries = dedupe_queries(focus_queries)
         explicit_pages = unique_pages(focus_pages)
         tool_trace: list[dict[str, Any]] = []
@@ -222,7 +222,7 @@ class PaperLensRuntime:
             paper_id=paper_id,
             title=title,
             classification=classification,
-            memory=memory,
+            context=context,
         )
         working = {
             "focus_queries": queries[:5],
@@ -231,7 +231,7 @@ class PaperLensRuntime:
             "unread_candidate_pages": [
                 page for page in candidate_pages[:8] if page not in set(already_read)
             ],
-            "memory_uncertainty": memory_uncertainty(memory),
+            "context_uncertainty": context_uncertainty(context),
         }
         return ContextPack(
             stage=stage,
@@ -242,7 +242,7 @@ class PaperLensRuntime:
             output_contract=output_contract
             or {
                 "type": "bounded_agent_step",
-                "rule": "Return only the requested artifact; write durable facts as MemoryPatch operations.",
+                "rule": "Return only the requested typed artifact.",
             },
             budget={
                 "search_queries": min(len(queries), 5),
@@ -252,79 +252,16 @@ class PaperLensRuntime:
             },
         )
 
-    def audit_context(
-        self,
-        *,
-        memory: dict[str, Any],
-        read_artifacts: Iterable[Any],
-        audit: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        queries = audit_queries(memory, audit)
-        observations: list[dict[str, Any]] = []
-        evidence_pages = []
-        for query in queries[:5]:
-            search = self.search_text(query, limit=4)
-            observations.append(search.as_dict())
-            for result in search.results[:2]:
-                number = result.get("page_no")
-                if isinstance(number, int) and number not in evidence_pages:
-                    evidence_pages.append(number)
-        explicit_pages = pages_from_memory(memory)
-        for page in explicit_pages:
-            if page not in evidence_pages:
-                evidence_pages.append(page)
-        read_pages = [page_no(page) for page in read_artifacts if page_no(page) is not None]
-        missing_pages = [page for page in evidence_pages if page not in read_pages][:8]
-        page_pack = self.read_pages(evidence_pages[:8], text_limit=900)
-        figure_query = " ".join(queries[:2]) or str(memory.get("core_abstraction") or "")
-        figures = self.find_figures(figure_query, limit=3)
-        context_pack = self.build_context_pack(
-            stage="central_memory_verify",
-            objective=(
-                "Verify PaperMemoryV3 like a lightweight paper-reading agent: decide which claims "
-                "are grounded, which should be weakened, and which evidence boundaries must remain visible."
-            ),
-            paper_id=str(memory.get("paper_id") or "unknown"),
-            title=str(dict_value(memory.get("metadata")).get("title") or ""),
-            classification=str(dict_value(memory.get("reading_context")).get("grade") or ""),
-            memory=memory,
-            focus_queries=queries[:5],
-            focus_pages=evidence_pages[:8],
-            read_artifacts=read_artifacts,
-            output_contract={
-                "type": "MemoryPatchSet",
-                "rule": (
-                    "Use the local tool trace to fix or bound memory in one verification pass."
-                ),
-            },
-            search_limit=4,
-            page_text_limit=900,
-        )
-        return {
-            "runtime_contract": (
-                "Deterministic local retrieval over parsed paper text/captions. Use it to verify "
-                "where claims might be grounded before finalizing the memory boundary."
-            ),
-            "agent_context_pack": context_pack.as_dict(),
-            "queries": queries[:5],
-            "already_read_pages": sorted({page for page in read_pages if isinstance(page, int)}),
-            "candidate_unread_pages": missing_pages,
-            "observations": observations,
-            "evidence_page_pack": page_pack.as_dict(),
-            "visual_candidates": figures.as_dict(),
-        }
-
 
 def build_always_context(
     *,
     paper_id: str,
     title: str | None,
     classification: str | None,
-    memory: dict[str, Any],
+    context: dict[str, Any],
 ) -> dict[str, Any]:
-    prompt_view = memory_v3_prompt_view(memory) if memory else {}
     claims = []
-    for claim in list_payload(prompt_view.get("claims"))[:10]:
+    for claim in list_payload(context.get("claims"))[:10]:
         if not isinstance(claim, dict):
             continue
         claims.append(
@@ -341,7 +278,7 @@ def build_always_context(
             }
         )
     evidence = []
-    for item in list_payload(prompt_view.get("evidence"))[:12]:
+    for item in list_payload(context.get("evidence"))[:12]:
         if not isinstance(item, dict):
             continue
         evidence.append(
@@ -358,28 +295,22 @@ def build_always_context(
         )
     return {
         "paper_id": paper_id,
-        "title": title or dict_value(memory.get("metadata")).get("title") or paper_id,
-        "classification": classification or dict_value(memory.get("reading_context")).get("grade"),
-        "source_of_truth": "PaperMemoryV3 plus evidence refs; reports are derived views.",
-        "current_memory": {
-            "schema_version": prompt_view.get("schema_version"),
-            "reading_context": prompt_view.get("reading_context"),
-            "problem_frame": prompt_view.get("problem_frame"),
-            "core_abstractions": prompt_view.get("core_abstractions"),
-            "mechanism": prompt_view.get("mechanism"),
-            "evaluation": prompt_view.get("evaluation"),
-            "conceptual_bridge": prompt_view.get("conceptual_bridge"),
-            "limitations": prompt_view.get("limitations"),
-            "open_questions": prompt_view.get("open_questions"),
+        "title": title or paper_id,
+        "classification": classification,
+        "source_of_truth": "ClaimGraph nodes plus PaperDOM source IDs; reports are derived views.",
+        "qa_context": {
+            "schema_version": context.get("schema_version"),
+            "reading_context": context.get("reading_context"),
+            "audit_trail": context.get("audit_trail"),
         },
         "known_claims": claims,
         "known_evidence": evidence,
     }
 
 
-def memory_uncertainty(memory: dict[str, Any]) -> dict[str, Any]:
-    audit = dict_value(dict_value(memory.get("audit_trail")).get("memory_audit"))
-    claims = list_payload(memory.get("claims"))
+def context_uncertainty(context: dict[str, Any]) -> dict[str, Any]:
+    audit = dict_value(context.get("audit_trail"))
+    claims = list_payload(context.get("claims"))
     weak_claims = [
         {
             "id": claim.get("id"),
@@ -396,9 +327,7 @@ def memory_uncertainty(memory: dict[str, Any]) -> dict[str, Any]:
     ][:8]
     return {
         "audit_status": audit.get("status"),
-        "missing_items": list_payload(audit.get("missing_items"))[:8],
-        "unsupported_claims": list_payload(audit.get("unsupported_claims"))[:6],
-        "open_questions": list_payload(memory.get("open_questions"))[:8],
+        "evidence_limits": list_payload(audit.get("evidence_limits"))[:8],
         "weak_claims": weak_claims,
     }
 
@@ -414,99 +343,6 @@ def unique_pages(values: Iterable[Any]) -> list[int]:
     pages: list[int] = []
     for value in values:
         add_page(pages, value)
-    return pages
-
-
-def audit_queries(memory: dict[str, Any], audit: dict[str, Any] | None) -> list[str]:
-    queries: list[str] = []
-    problem_frame = (
-        memory.get("problem_frame") if isinstance(memory.get("problem_frame"), dict) else {}
-    )
-    for key in ["problem", "why_it_matters", "scope"]:
-        value = problem_frame.get(key)
-        if isinstance(value, str) and value.strip():
-            queries.append(value)
-    for item in (
-        memory.get("core_abstractions") if isinstance(memory.get("core_abstractions"), list) else []
-    ):
-        if isinstance(item, dict) and isinstance(item.get("text"), str):
-            queries.append(item["text"])
-    mechanism = memory.get("mechanism") if isinstance(memory.get("mechanism"), dict) else {}
-    if isinstance(mechanism.get("overview"), str):
-        queries.append(mechanism["overview"])
-    evaluation = memory.get("evaluation") if isinstance(memory.get("evaluation"), dict) else {}
-    if isinstance(evaluation.get("summary"), str):
-        queries.append(evaluation["summary"])
-    for key in ["core_abstraction", "core_thesis"]:
-        value = memory.get(key)
-        if isinstance(value, str) and value.strip():
-            queries.append(value)
-    for item in memory.get("next_focus") if isinstance(memory.get("next_focus"), list) else []:
-        if isinstance(item, str) and item.strip():
-            queries.append(item)
-    for item in (
-        memory.get("uncertainties") if isinstance(memory.get("uncertainties"), list) else []
-    ):
-        if isinstance(item, str) and item.strip():
-            queries.append(item)
-    claims = memory.get("claims") if isinstance(memory.get("claims"), list) else []
-    for item in claims:
-        if not isinstance(item, dict):
-            continue
-        if isinstance(item.get("text"), str):
-            queries.append(item["text"])
-        elif isinstance(item.get("claim"), str):
-            queries.append(item["claim"])
-    if audit:
-        for item in (
-            audit.get("missing_items") if isinstance(audit.get("missing_items"), list) else []
-        ):
-            if isinstance(item, str) and item.strip():
-                queries.append(item)
-    return dedupe_queries(queries)
-
-
-def pages_from_memory(memory: dict[str, Any]) -> list[int]:
-    pages: list[int] = []
-    reading_context = (
-        memory.get("reading_context") if isinstance(memory.get("reading_context"), dict) else {}
-    )
-    for value in (
-        reading_context.get("pages_read")
-        if isinstance(reading_context.get("pages_read"), list)
-        else []
-    ):
-        add_page(pages, value)
-    evidence_id_to_page: dict[str, int] = {}
-    evidence = memory.get("evidence") if isinstance(memory.get("evidence"), list) else []
-    for item in evidence:
-        if not isinstance(item, dict):
-            continue
-        page_value = item.get("page") or item.get("page_no")
-        add_page(pages, page_value)
-        evidence_id = item.get("id")
-        if isinstance(evidence_id, str):
-            try:
-                evidence_id_to_page[evidence_id] = int(page_value)
-            except (TypeError, ValueError):
-                pass
-    for value in memory.get("pages_read") if isinstance(memory.get("pages_read"), list) else []:
-        add_page(pages, value)
-    claims = memory.get("claims") if isinstance(memory.get("claims"), list) else []
-    for claim in claims:
-        if not isinstance(claim, dict):
-            continue
-        for value in (
-            claim.get("evidence_refs") if isinstance(claim.get("evidence_refs"), list) else []
-        ):
-            if isinstance(value, str) and value in evidence_id_to_page:
-                add_page(pages, evidence_id_to_page[value])
-            else:
-                add_page(pages, value)
-        for value in (
-            claim.get("evidence_pages") if isinstance(claim.get("evidence_pages"), list) else []
-        ):
-            add_page(pages, value)
     return pages
 
 
@@ -643,6 +479,14 @@ def dedupe_source_ids(values: Iterable[Any]) -> list[str]:
         if source_id and source_id not in result:
             result.append(source_id)
     return result
+
+
+def dict_value(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def list_payload(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
 
 
 def normalize_for_search(text: str) -> str:

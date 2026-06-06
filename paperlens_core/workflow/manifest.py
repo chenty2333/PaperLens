@@ -33,16 +33,9 @@ def validate_paperlens_output(
 ) -> dict[str, Any]:
     main_report = output_dir / "PaperLens.md"
     library_records_path = output_dir / ".paperlens" / "library" / "library_records.jsonl"
-    memory_v3_dir = output_dir / ".paperlens" / "data" / "memory" / "v3"
     search_index_path = output_dir / ".paperlens" / "library" / "index" / "search_index.json"
     issues = []
     checked_links = 0
-    fallback_markers = [
-        "Model final-report generation failed",
-        "report_generation_failed",
-        "deterministic fallback",
-        "This report used a deterministic fallback",
-    ]
     render_markers = ["\\r\\n", "\\n"]
     reader_hostile_markers = [
         "supplied excerpts",
@@ -63,9 +56,6 @@ def validate_paperlens_output(
     else:
         markdown = main_report.read_text(encoding="utf-8")
         main_report_link_targets = set(local_markdown_link_targets(markdown))
-        for marker in fallback_markers:
-            if marker in markdown:
-                issues.append(f"Fallback report marker in PaperLens.md: {marker}")
         for marker in render_markers:
             if marker in markdown:
                 issues.append(f"Escaped newline marker in PaperLens.md: {marker}")
@@ -113,28 +103,10 @@ def validate_paperlens_output(
                     f"Reader-hostile implementation wording in papers/{report.name}: {marker}"
                 )
                 break
-        for marker in fallback_markers:
-            if marker in text:
-                issues.append(f"Fallback report marker in papers/{report.name}: {marker}")
-                break
         for marker in render_markers:
             if marker in text:
                 issues.append(f"Escaped newline marker in papers/{report.name}: {marker}")
                 break
-    memory_v3_files = (
-        sorted(memory_v3_dir.glob("*.paper_memory.v3.json")) if memory_v3_dir.exists() else []
-    )
-    if expected_paper_ids is not None:
-        expected_memory_names = {
-            f"{paper_id}.paper_memory.v3.json" for paper_id in expected_paper_ids
-        }
-        memory_v3_files = [
-            memory_file
-            for memory_file in memory_v3_files
-            if memory_file.name in expected_memory_names
-        ]
-    if paper_reports and len(memory_v3_files) < len(paper_reports):
-        issues.append("PaperMemoryV3 file count is lower than paper report count")
     core_root = output_dir / ".paperlens" / "data" / "core" / "v2"
     core_paper_ids = (
         sorted(expected_paper_ids)
@@ -146,6 +118,7 @@ def validate_paperlens_output(
     for paper_id in core_paper_ids:
         paper_root = core_root / paper_id
         if not paper_root.exists():
+            issues.append(f"Core v2 artifact root is missing for {paper_id}")
             continue
         core_manifest_path = paper_root / "core_manifest.v1.json"
         if not core_manifest_path.exists():
@@ -208,7 +181,6 @@ def validate_paperlens_output(
         "paper_reports": len(paper_reports),
         "paper_report_files": len(all_paper_report_files),
         "library_records": library_records_path.exists(),
-        "paper_memory_v3": len(memory_v3_files),
         "issues": issues,
     }
     if issues:

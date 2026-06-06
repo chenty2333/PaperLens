@@ -15,9 +15,11 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 from paperlens_core.control import ControlState
+from paperlens_core.core_manifest import inspect_core_v2_artifact_set
 from paperlens_core.engine import PaperLensEngine
 from paperlens_core.library import read_library_records, search_library
 from paperlens_core.protocol import LibraryQuestionRequest, PaperQuestionRequest, RunRequest
+from paperlens_core.runtime import read_typed_artifact
 from paperlens_core.version import display_version
 from paperlens_core.workflow.stages import normalize_workflow_stage
 
@@ -300,9 +302,7 @@ def public_paper_record(output_dir: Path, record: dict[str, Any], qa_map: dict[s
         "memory": {
             "claim_count": len(memory.get("claims") or []),
             "evidence_count": len(memory.get("evidence_items") or []),
-            "memory_v3_path": (provenance.get("paper_memory_v3") or {}).get("path")
-            if isinstance(provenance.get("paper_memory_v3"), dict)
-            else None,
+            "core_v2": provenance.get("core_v2") if isinstance(provenance.get("core_v2"), dict) else {},
         },
         "qa": qa_map.get(paper_id, {"count": 0, "last_question": "", "last_time": ""}),
     }
@@ -350,15 +350,143 @@ def load_report(output_dir: Path, paper_id: str) -> dict[str, Any]:
 
 
 def load_evidence(output_dir: Path, paper_id: str) -> dict[str, Any]:
-    memory_dir = output_dir / INTERNAL_DIR / "data" / "memory" / "v3"
-    memory = read_json_file(memory_dir / f"{paper_id}.paper_memory.v3.json", {}) or {}
-    evidence = memory.get("evidence") if isinstance(memory.get("evidence"), list) else []
-    claims = memory.get("claims") if isinstance(memory.get("claims"), list) else []
+    output_dir = output_dir.expanduser().resolve()
+    data_dir = output_dir / INTERNAL_DIR / "data"
+    root = data_dir / "core" / "v2" / paper_id
+    manifest = inspect_core_v2_artifact_set(data_dir, paper_id)
+    issues = list(manifest.get("issues") if isinstance(manifest.get("issues"), list) else [])
+    try:
+        dom = read_typed_artifact(root / "paper_dom.v1.json", expected_type="paper_dom").data
+        graph = read_typed_artifact(root / "claim_graph.v1.json", expected_type="claim_graph").data
+        quality = read_typed_artifact(
+            root / "quality_metrics.v1.json", expected_type="core_quality_metrics"
+        ).data
+        audit = read_typed_artifact(
+            root / "audit_findings.v1.json", expected_type="audit_findings"
+        ).data
+    except (FileNotFoundError, ValueError) as exc:
+        return {
+            "paper_id": paper_id,
+            "status": "INCOMPLETE",
+            "publish_status": None,
+            "consumable": False,
+            "claims": [],
+            "evidence": [],
+            "quality": {},
+            "audit": [],
+            "issues": [*issues, str(exc)],
+        }
+    dom_sources = core_v2_dom_source_index(dom if isinstance(dom, dict) else {})
+    nodes = (graph.get("nodes") if isinstance(graph, dict) else {}) or {}
+    edges = (
+        graph.get("edges")
+        if isinstance(graph, dict) and isinstance(graph.get("edges"), list)
+        else []
+    )
+    if not isinstance(nodes, dict):
+        nodes = {}
+    claims: list[dict[str, Any]] = []
+    evidence: list[dict[str, Any]] = []
+    for node_id, raw_node in nodes.items():
+        if not isinstance(raw_node, dict):
+            continue
+        kind = string_or_none(raw_node.get("kind")) or ""
+        payload = raw_node.get("payload") if isinstance(raw_node.get("payload"), dict) else {}
+        if kind == "evidence":
+            source_id = string_or_none(payload.get("source_id")) or ""
+            source = dom_sources.get(source_id, {})
+            evidence.append(
+                {
+                    "id": str(node_id),
+                    "source_id": source_id,
+                    "source_kind": source.get("kind"),
+                    "page_no": source.get("page_no"),
+                    "interpretation": string_or_none(raw_node.get("label")) or "",
+                    "text": source.get("text") or "",
+                }
+            )
+            continue
+        evidence_ids = graph_evidence_ids_for(edges, str(node_id), nodes)
+        source_ids = [
+            string_or_none(nodes[evidence_id].get("payload", {}).get("source_id")) or ""
+            for evidence_id in evidence_ids
+            if isinstance(nodes.get(evidence_id), dict)
+            and isinstance(nodes[evidence_id].get("payload"), dict)
+        ]
+        claims.append(
+            {
+                "id": str(node_id),
+                "kind": kind,
+                "label": string_or_none(raw_node.get("label")) or "",
+                "confidence": payload.get("confidence"),
+                "uncertainty": string_or_none(payload.get("uncertainty")) or "",
+                "evidence_ids": evidence_ids,
+                "source_ids": [source_id for source_id in source_ids if source_id],
+                "covered_outputs": payload.get("covered_outputs")
+                if isinstance(payload.get("covered_outputs"), list)
+                else [],
+                "extracted_numbers": payload.get("extracted_numbers")
+                if isinstance(payload.get("extracted_numbers"), list)
+                else [],
+            }
+        )
     return {
         "paper_id": paper_id,
+        "status": manifest.get("status"),
+        "publish_status": manifest.get("publish_status"),
+        "consumable": manifest.get("consumable"),
         "claims": claims,
         "evidence": evidence,
+        "quality": quality if isinstance(quality, dict) else {},
+        "audit": audit if isinstance(audit, list) else [],
+        "issues": issues,
     }
+
+
+def core_v2_dom_source_index(dom: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for group_name in ["sections", "spans", "figures", "tables", "equations"]:
+        group = dom.get(group_name) if isinstance(dom.get(group_name), list) else []
+        for item in group:
+            if not isinstance(item, dict):
+                continue
+            source_id = string_or_none(item.get("source_id"))
+            if not source_id:
+                continue
+            text = (
+                string_or_none(item.get("text"))
+                or string_or_none(item.get("caption"))
+                or string_or_none(item.get("latex_or_text"))
+                or string_or_none(item.get("title"))
+                or ""
+            )
+            result[source_id] = {
+                "source_id": source_id,
+                "kind": string_or_none(item.get("kind")) or group_name.rstrip("s"),
+                "page_no": item.get("page_no"),
+                "text": text,
+            }
+    return result
+
+
+def graph_evidence_ids_for(
+    edges: list[Any], node_id: str, nodes: dict[str, dict[str, Any]]
+) -> list[str]:
+    evidence_ids = []
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        target_id = string_or_none(edge.get("target_id")) or ""
+        target = nodes.get(target_id)
+        if (
+            string_or_none(edge.get("source_id")) == node_id
+            and string_or_none(edge.get("kind")) == "supported_by"
+            and isinstance(target, dict)
+            and string_or_none(target.get("kind")) == "evidence"
+            and target_id not in evidence_ids
+        ):
+            evidence_ids.append(target_id)
+    return evidence_ids
 
 
 def resolve_output_asset(output_dir: Path, asset_path: str) -> Path:
@@ -668,7 +796,7 @@ class PaperLensServiceState:
             {
                 "type": "answer_started",
                 "level": "info",
-                "message": "Checking PaperLens memory and evidence",
+                "message": "Checking PaperLens ClaimGraph and evidence",
                 "data": {"answer_id": answer.answer_id, "scope": answer.scope},
             }
         )

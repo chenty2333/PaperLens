@@ -192,9 +192,58 @@ def select_sources_for_task(dom: PaperDOM, task_type: ReadingTaskType, *, limit:
         if len(deduped) >= limit:
             return deduped
     if not deduped:
-        fallback_spans = non_heading_spans(dom.spans, section_titles) or dom.spans
-        return [span.source_id for span in fallback_spans[: min(limit, 3)]]
+        return default_sources_for_task(
+            dom,
+            task_type,
+            limit=limit,
+            section_titles=section_titles,
+        )
     return deduped
+
+
+def default_sources_for_task(
+    dom: PaperDOM,
+    task_type: ReadingTaskType,
+    *,
+    limit: int,
+    section_titles: dict[str, str],
+) -> list[str]:
+    spans = non_heading_spans(dom.spans, section_titles) or dom.spans
+    start, end = {
+        ReadingTaskType.ORIENTATION: (0.0, 0.18),
+        ReadingTaskType.CLAIM_INVENTORY: (0.0, 0.28),
+        ReadingTaskType.METHOD_MECHANISM: (0.18, 0.58),
+        ReadingTaskType.IMPLEMENTATION_PATH: (0.25, 0.68),
+        ReadingTaskType.EVALUATION_SETUP: (0.48, 0.82),
+        ReadingTaskType.RESULT_EXTRACTION: (0.58, 0.92),
+        ReadingTaskType.LIMITATIONS: (0.72, 1.0),
+        ReadingTaskType.CONCEPT_BRIDGE: (0.0, 0.32),
+        ReadingTaskType.RELATED_POSITIONING: (0.0, 0.4),
+        ReadingTaskType.REPRODUCIBILITY: (0.68, 1.0),
+    }[task_type]
+    candidates: list[str] = [
+        span.source_id for span in positional_span_window(spans, start=start, end=end)
+    ]
+    if task_type in EQUATION_READING_TASKS:
+        candidates.extend(item.source_id for item in dom.equations)
+    if task_type == ReadingTaskType.RESULT_EXTRACTION:
+        candidates.extend(item.source_id for item in [*dom.figures, *dom.tables])
+    result = []
+    for source_id in candidates:
+        if source_id and source_id not in result:
+            result.append(source_id)
+        if len(result) >= limit:
+            return result
+    return result
+
+
+def positional_span_window(spans: list[Any], *, start: float, end: float) -> list[Any]:
+    if not spans:
+        return []
+    count = len(spans)
+    start_index = max(0, min(count - 1, int(count * start)))
+    end_index = max(start_index + 1, min(count, int(count * end) or 1))
+    return spans[start_index:end_index]
 
 
 def non_heading_section_span_ids(

@@ -10,11 +10,8 @@ from paperlens_core.schemas import PageArtifact, PaperRecord
 
 try:
     import pymupdf
-except ImportError:  # pragma: no cover - old import name fallback
-    try:
-        import fitz as pymupdf  # type: ignore[no-redef]
-    except ImportError:  # pragma: no cover
-        pymupdf = None  # type: ignore[assignment]
+except ImportError:  # pragma: no cover
+    pymupdf = None  # type: ignore[assignment]
 
 
 def require_pymupdf() -> Any:

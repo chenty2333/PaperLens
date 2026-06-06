@@ -126,25 +126,3 @@ class ClassificationDecision(BaseModel):
     validation_status: str | None = None
     validation_notes: list[str] = Field(default_factory=list)
 
-
-class PaperCard(BaseModel):
-    paper_id: str
-    contribution_claims: list[str] = Field(default_factory=list)
-    mechanisms: list[str] = Field(default_factory=list)
-    assumptions: list[str] = Field(default_factory=list)
-    evaluation: list[str] = Field(default_factory=list)
-    limitations: list[str] = Field(default_factory=list)
-    relation_to_user_work: str | None = None
-    evidence_refs: list[EvidenceRef] = Field(default_factory=list)
-    verification_status: str = "UNVERIFIED"
-
-
-class ClaimRecord(BaseModel):
-    claim_id: str
-    claim_text: str
-    claim_type: str
-    supporting_papers: list[str] = Field(default_factory=list)
-    contradicting_papers: list[str] = Field(default_factory=list)
-    risk_level: Literal["SAFE", "PROBABLY_SAFE", "RISKY", "UNSUPPORTED", "NEEDS_HUMAN_REVIEW"]
-    required_human_review: bool = False
-    safe_rewrite: str | None = None

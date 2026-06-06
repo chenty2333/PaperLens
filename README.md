@@ -5,17 +5,18 @@
 [![Windows Installer][ci-badge]][ci-workflow]
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](LICENSE)
 
-PaperLens is a desktop paper-reading agent. It is not a PDF reader, a traditional reference manager, or a generic summarizer. Its core job is to turn papers into auditable knowledge state: a structured PaperMemory, a readable capsule, evidence-bounded QA, and a local library of papers that the system has actually read.
+PaperLens is a desktop paper-reading agent. It is not a PDF reader, a traditional reference manager, or a generic summarizer. Its core job is to turn papers into auditable knowledge state: a source-anchored PaperDOM, a ClaimGraph, derived PaperMemory views, evidence-bounded QA, and a local graph library of papers that the system has actually read.
 
 ## What It Does
 
 - Reads PDFs with text, layout, page images, figure/table hints, and deterministic paper-local tools.
 - Builds the paper map once: sections, page numbers, figures/tables, and key text blocks.
-- Reads papers in chunks and updates PaperMemory as the source of truth; the reader does not write the report.
-- Runs one central verification pass that checks high-risk claims against local paper evidence and patches memory directly.
-- Writes the paper capsule section by section from memory and evidence, so no single model call has to produce the full report.
-- Answers questions from memory, evidence, local pages, and library records rather than from the rendered report.
-- Maintains a local library containing only papers PaperLens has processed.
+- Builds a deterministic Reading Plan over PaperDOM source IDs and records append-only observations.
+- Builds ClaimGraph as the source of truth; PaperMemory is a derived product view, not a model-edited state file.
+- Runs deterministic audit checks over graph nodes, edges, source IDs, and numeric grounding.
+- Writes the paper report as a readable ClaimGraph view; reports cannot introduce new facts.
+- Answers questions from ClaimGraph, evidence, local pages, and library graph records rather than from the rendered report.
+- Maintains a local graph library containing only papers PaperLens has processed.
 - Ships as a Windows Tauri desktop app with a Python `paperlens-core` sidecar.
 
 ## Current Product Shape
@@ -46,10 +47,19 @@ output/
     data/
       run.json
       events.jsonl
-      memory/
-        v3/
-          <paper_id>.paper_memory.v3.json
-          <paper_id>.memory_patches.jsonl
+      core/
+        v2/
+          <paper_id>/
+            paper_dom.v1.json
+            reading_plan.v1.json
+            observation_log.v1.json
+            claim_graph.v1.json
+            audit_findings.v1.json
+            quality_metrics.v1.json
+            paper_memory_view.v1.json
+            report_draft.v1.json
+            report_audit_findings.v1.json
+            core_manifest.v1.json
 ```
 
 Open `PaperLens.md` first when using raw output files. The desktop app reads the same output directory and presents the library, capsule, evidence, and chat surfaces.
@@ -80,7 +90,6 @@ Requirements:
 ```powershell
 npm ci
 uv run --extra dev ruff check .
-uv run --extra dev pytest
 npm run lint
 npm run build
 ```
@@ -119,7 +128,7 @@ The Windows installer workflow lives at [.github/workflows/windows-installer.yml
 It runs:
 
 - committed-secret guard;
-- Python lint/tests;
+- Python lint;
 - frontend lint/build;
 - Python sidecar build;
 - Tauri NSIS installer build;
@@ -145,7 +154,6 @@ The UI does not persist API keys to `localStorage`. Generated paper libraries, r
 
 ## Documentation
 
-- [PaperLens Core v1 design](docs/PaperLens_Core_v1.md)
 - [Chinese README](README.zh-CN.md)
 
 ## License

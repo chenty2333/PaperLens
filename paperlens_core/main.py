@@ -77,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     library_subparsers = library.add_subparsers(dest="library_command", required=True)
     library_build = library_subparsers.add_parser(
-        "build", help="Rebuild PaperLens local memory library"
+        "build", help="Rebuild PaperLens local graph library"
     )
     library_build.add_argument("--output-dir", required=True)
 
@@ -91,7 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     library_doctor.add_argument("--output-dir", required=True)
 
-    library_search = library_subparsers.add_parser("search", help="Search PaperLens local memory")
+    library_search = library_subparsers.add_parser("search", help="Search PaperLens local graph library")
     library_search.add_argument("--output-dir", required=True)
     library_search.add_argument("--query", required=True)
     library_search.add_argument("--limit", type=int, default=8)

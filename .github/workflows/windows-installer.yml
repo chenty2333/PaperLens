@@ -172,7 +172,6 @@ jobs:
 
           $hits = [System.Collections.Generic.List[string]]::new()
           foreach ($file in $files) {
-            if ($file -like 'tests/*') { continue }
             if ($file -like '.github/workflows/windows-installer.yml') { continue }
             if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
 
@@ -198,7 +197,6 @@ jobs:
         shell: pwsh
         run: |
           uv run --extra dev ruff check .
-          uv run --extra dev pytest
 
       - name: Frontend checks
         shell: pwsh

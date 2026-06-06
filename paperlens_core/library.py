@@ -23,7 +23,6 @@ from paperlens_core.library_graph import (
     normalize_graph_evidence,
     read_core_v2_graph_summary,
 )
-from paperlens_core.memory_v3 import read_paper_memory_v3
 
 
 APP_NAME = "PaperLens"
@@ -60,9 +59,8 @@ SEARCH_QUERY_EXPANSIONS: dict[str, tuple[str, ...]] = {
 
 
 LIBRARY_ASK_SYSTEM_PROMPT = """
-You answer questions over the user's local PaperLens paper memory library.
+You answer questions over the user's local PaperLens paper graph library.
 Use reviewed core_v2 graph_summary claims, nodes, source_ids, and evaluation term mentions first.
-Use PaperMemoryV3 only as supplemental context when a record has no reviewed graph evidence.
 Treat report paths as navigation targets, not evidence.
 Distinguish paper facts from cross-paper synthesis,
 PaperLens inferences, and background knowledge in source_attribution. If the local library does not
@@ -147,55 +145,9 @@ def enrich_row_with_core_v2_graph(*, output_dir: Path, row: dict[str, Any]) -> d
 
 def rebuild_library_from_output(output_dir: Path) -> list[Path]:
     data_dir = paperlens_data_dir(output_dir)
-    seen_paper_ids: set[str] = set()
     rows: list[dict[str, Any]] = []
-    for memory_path in sorted((data_dir / "memory" / "v3").glob("*.paper_memory.v3.json")):
-        paper_id = memory_path.name.split(".", 1)[0]
-        memory = read_paper_memory_v3(output_dir, paper_id)
-        if not paper_id:
-            continue
-        seen_paper_ids.add(paper_id)
-        metadata = dict_value(memory.get("metadata"))
-        reading_context = dict_value(memory.get("reading_context"))
-        report_path = first_existing_report(output_dir, paper_id)
-        report_text = ""
-        if report_path:
-            path = output_dir / report_path
-            if path.exists():
-                report_text = path.read_text(encoding="utf-8")
-        paper = {
-            "paper_id": paper_id,
-            "canonical_title": metadata.get("title") or paper_id,
-            "file_hash": metadata.get("pdf_sha256"),
-            "file_path": metadata.get("original_path"),
-            "page_count": metadata.get("pages"),
-            "venue": metadata.get("venue"),
-            "year": metadata.get("year"),
-            "doi": metadata.get("doi"),
-            "arxiv_id": metadata.get("arxiv_id"),
-        }
-        rows.append(
-            {
-                "paper": paper,
-                "decision": {"paper_id": paper_id, "class_label": reading_context.get("grade")},
-                "paper_memory_v3": memory,
-                "report_name": Path(report_path).name if report_path else f"{paper_id}.md",
-                "core_graph_report_name": first_existing_core_graph_report(
-                    output_dir=output_dir,
-                    paper_id=paper_id,
-                    report_path=report_path,
-                ),
-                "report_title": markdown_title(report_text)
-                or paper.get("canonical_title")
-                or paper_id,
-                "model_report": {},
-                "report_audit": dict_value(
-                    dict_value(memory.get("audit_trail")).get("report_audit")
-                ),
-            }
-        )
     for graph_root in sorted((data_dir / "core" / "v2").glob("*")):
-        if not graph_root.is_dir() or graph_root.name in seen_paper_ids:
+        if not graph_root.is_dir():
             continue
         paper_id = graph_root.name
         graph_summary = read_core_v2_graph_summary(output_dir, paper_id)
@@ -214,16 +166,9 @@ def rebuild_library_from_output(output_dir: Path) -> list[Path]:
                     "paper_id": paper_id,
                     "class_label": metadata.get("grade") or "HOLD",
                 },
-                "paper_memory_v3": {},
                 "report_name": Path(report_path).name if report_path else f"{paper_id}.md",
-                "core_graph_report_name": first_existing_core_graph_report(
-                    output_dir=output_dir,
-                    paper_id=paper_id,
-                    report_path=report_path,
-                ),
+                "core_graph_report_name": Path(report_path).name if report_path else f"{paper_id}.md",
                 "report_title": metadata.get("title") or paper_id,
-                "model_report": {},
-                "report_audit": {},
                 "core_v2_graph_summary": graph_summary,
             }
         )
@@ -297,7 +242,7 @@ def doctor_library(output_dir: Path) -> dict[str, Any]:
             duplicate_ids.append(paper_id)
         elif paper_id:
             seen_ids.add(paper_id)
-        issues = validate_memory_record(value)
+        issues = validate_library_record(value)
         if issues:
             record_issues[str(paper_id or "unknown")] = issues
     return {
@@ -323,87 +268,39 @@ def build_library_record(row: dict[str, Any]) -> dict[str, Any]:
     paper = dump_model(row.get("paper"))
     skim = dump_model(row.get("skim"))
     decision = dump_model(row.get("decision"))
-    card = dump_model(row.get("card"))
-    v3_memory = dict_value(row.get("paper_memory_v3"))
-    model_report = dict_value(row.get("model_report"))
-    report_audit = dict_value(row.get("report_audit"))
     graph_summary = dict_value(row.get("core_v2_graph_summary"))
-    audit_trail = dict_value(v3_memory.get("audit_trail"))
-    core_graph_available = bool(graph_summary)
+    if not graph_summary:
+        paper_id = string_or_empty(paper.get("paper_id")) or string_or_empty(row.get("paper_id"))
+        raise ValueError(f"Library record requires core_v2_graph_summary for {paper_id or 'unknown'}")
 
     paper_id = string_or_empty(paper.get("paper_id")) or string_or_empty(row.get("paper_id"))
     title = (
         string_or_none(row.get("report_title"))
         or string_or_none(paper.get("canonical_title"))
-        or string_or_none(model_report.get("title"))
+        or string_or_none(dict_value(graph_summary.get("metadata")).get("title"))
         or paper_id
     )
     report_name = string_or_none(row.get("report_name")) or f"{paper_id}.md"
     grade = (
         string_or_none(decision.get("class_label"))
-        or string_or_none(model_report.get("grade"))
+        or string_or_none(dict_value(graph_summary.get("metadata")).get("grade"))
         or "HOLD"
     )
     graph_brief = first_graph_label(graph_summary, "problem_nodes", "claim_nodes")
-    legacy_brief = (
-        string_or_none(model_report.get("one_line_reason"))
-        or string_or_none(model_report.get("core_takeaway"))
-        or first_v3_core_abstraction(v3_memory)
-        or string_or_none(dict_value(v3_memory.get("problem_frame")).get("problem"))
-        or string_or_none(skim.get("problem"))
-        or first_graph_label(graph_summary, "problem_nodes", "claim_nodes")
-        or ""
-    )
-    brief = graph_brief if core_graph_available else legacy_brief
-    graph_concepts = normalize_graph_concepts(graph_summary) if core_graph_available else []
-    concepts = (
-        graph_concepts if core_graph_available else normalize_concepts(v3_memory.get("concepts"))
-    )
-    conceptual_bridge = normalize_conceptual_bridge(v3_memory.get("conceptual_bridge"))
-    if core_graph_available:
-        claims = normalize_graph_claims(graph_summary)
-        mechanisms = graph_node_labels(
-            graph_summary, "mechanism_nodes", "implementation_nodes"
-        )
-        evidence_model = graph_node_labels(graph_summary, "evaluation_nodes", "result_nodes")
-        limits = graph_node_labels(graph_summary, "limitation_nodes")
-        evidence_items = normalize_graph_evidence(graph_summary)
-        problem = first_graph_label(graph_summary, "problem_nodes")
-        core_idea = graph_brief or brief
-        value = brief
-    else:
-        claims = normalize_claims(v3_memory.get("claims"), card.get("contribution_claims"))
-        if not claims:
-            claims = normalize_graph_claims(graph_summary)
-        mechanisms = (
-            normalized_v3_mechanisms(v3_memory)
-            or normalized_string_list(card.get("mechanisms"))
-            or graph_node_labels(graph_summary, "mechanism_nodes", "implementation_nodes")
-        )
-        evidence_model = (
-            normalized_v3_evaluation(v3_memory)
-            or normalized_string_list(card.get("evaluation"))
-            or graph_node_labels(graph_summary, "evaluation_nodes", "result_nodes")
-        )
-        limits = normalized_string_list(
-            v3_memory.get("limitations") or card.get("limitations")
-        ) or graph_node_labels(graph_summary, "limitation_nodes")
-        evidence_items = (
-            normalize_memory_evidence(v3_memory.get("evidence"))
-            or normalize_graph_evidence(graph_summary)
-        )
-        problem = string_or_none(skim.get("problem")) or ""
-        core_idea = (
-            first_v3_core_abstraction(v3_memory)
-            or string_or_none(dict_value(v3_memory.get("problem_frame")).get("problem"))
-            or string_or_none(skim.get("problem"))
-            or first_graph_label(graph_summary, "problem_nodes", "claim_nodes")
-            or brief
-        )
-        value = string_or_none(model_report.get("core_takeaway")) or brief
-    questions = normalized_string_list(v3_memory.get("open_questions"))
+    brief = graph_brief or string_or_none(skim.get("problem")) or ""
+    concepts = normalize_graph_concepts(graph_summary)
+    conceptual_bridge: dict[str, Any] = {"needed": False, "terms": []}
+    claims = normalize_graph_claims(graph_summary)
+    mechanisms = graph_node_labels(graph_summary, "mechanism_nodes", "implementation_nodes")
+    evidence_model = graph_node_labels(graph_summary, "evaluation_nodes", "result_nodes")
+    limits = graph_node_labels(graph_summary, "limitation_nodes")
+    evidence_items = normalize_graph_evidence(graph_summary)
+    problem = first_graph_label(graph_summary, "problem_nodes")
+    core_idea = graph_brief or brief
+    value = brief
+    questions: list[str] = []
     uncertainties = normalized_string_list(
-        dict_value(audit_trail.get("memory_audit")).get("repair_instructions")
+        dict_value(graph_summary.get("quality")).get("unresolved_audit_findings")
     )
     tags = infer_tags(
         title=title,
@@ -430,18 +327,13 @@ def build_library_record(row: dict[str, Any]) -> dict[str, Any]:
         "qa_seed_questions": questions,
         "uncertainties": uncertainties,
         "reader_takeaways": reader_takeaways(
-            model_report=model_report,
             brief=brief,
             core_idea=core_idea,
             claims=claims,
         ),
     }
-    evidence_refs = normalize_evidence_refs(card.get("evidence_refs"), skim.get("evidence_refs"))
+    evidence_refs: list[dict[str, Any]] = []
     memory_quality = {
-        "memory_audit_status": string_or_none(
-            dict_value(audit_trail.get("memory_audit")).get("status")
-        ),
-        "report_audit_verdict": string_or_none(report_audit.get("verdict")),
         "claim_count": len(claims),
         "concept_count": len(concepts),
         "evidence_item_count": len(memory["evidence_items"]),
@@ -467,8 +359,7 @@ def build_library_record(row: dict[str, Any]) -> dict[str, Any]:
         "paper_id": paper_id,
         "title": title,
         "grade": grade,
-        "recommendation": string_or_none(model_report.get("read_recommendation"))
-        or read_recommendation(grade),
+        "recommendation": read_recommendation(grade),
         "tags": tags,
         "source": {
             "pdf_sha256": string_or_none(paper.get("file_hash")),
@@ -482,27 +373,13 @@ def build_library_record(row: dict[str, Any]) -> dict[str, Any]:
         "model_trace": {
             "created_at": now_iso(),
             "library_record_schema": LIBRARY_RECORD_SCHEMA_VERSION,
-            "paper_memory_v3_schema": v3_memory.get("schema_version"),
             "core_v2_graph_summary_schema": graph_summary.get("schema_version"),
-            "report_audit_verdict": string_or_none(report_audit.get("verdict")),
         },
         "memory": memory,
         "graph_summary": graph_summary,
         "quality": memory_quality,
         "provenance": {
             "evidence_refs": evidence_refs,
-            "memory_audit": dict_value(audit_trail.get("memory_audit")),
-            "paper_memory_v3": {
-                "path": f".paperlens/data/memory/v3/{paper_id}.paper_memory.v3.json",
-                "claim_ids": [
-                    string_or_empty(item.get("id"))
-                    for item in list_payload(v3_memory.get("claims"))[:12]
-                ],
-                "evidence_ids": [
-                    string_or_empty(item.get("id"))
-                    for item in list_payload(v3_memory.get("evidence"))[:16]
-                ],
-            },
             "core_v2": graph_provenance(graph_summary),
         },
         "outputs": outputs,
@@ -775,7 +652,7 @@ def run_library_qa_agent(
             "recent_chat_history": normalize_chat_history(chat_history),
             "initial_library_matches": initial_matches,
             "library_record_count": len(records),
-            "legacy_prompt_for_compatibility": user_prompt,
+            "prompt_snapshot": user_prompt,
         }
     )
 
@@ -813,8 +690,8 @@ def build_library_ask_prompt(
             (
                 "Task: answer using the local PaperLens library. Explain which claims come from "
                 "specific papers, preferring reviewed core_v2 graph_summary node/source evidence "
-                "over legacy PaperMemoryV3 or rendered reports. Explain which points are "
-                "cross-paper synthesis, which context is background knowledge, and what remains "
+                "over rendered reports. Explain which points are cross-paper synthesis, "
+                "which context is background knowledge, and what remains "
                 "uncertain. Fill source_attribution instead of blending these categories into one "
                 "undifferentiated answer."
             ),
@@ -897,7 +774,7 @@ def read_library_records(output_dir: Path) -> list[dict[str, Any]]:
     return records
 
 
-def validate_memory_record(record: dict[str, Any]) -> list[str]:
+def validate_library_record(record: dict[str, Any]) -> list[str]:
     issues = []
     if record.get("schema_version") != LIBRARY_RECORD_SCHEMA_VERSION:
         issues.append("unsupported_schema_version")
@@ -988,8 +865,6 @@ def compact_library_record_for_agent(
         "quality": {
             "claim_count": quality.get("claim_count"),
             "evidence_item_count": quality.get("evidence_item_count"),
-            "memory_audit_status": quality.get("memory_audit_status"),
-            "report_audit_verdict": quality.get("report_audit_verdict"),
             "graph_publish_status": quality.get("graph_publish_status"),
             "graph_evidence_coverage": quality.get("graph_evidence_coverage"),
             "graph_reading_required_output_coverage": quality.get(
@@ -1033,9 +908,6 @@ def compact_library_record_for_agent(
             "evidence_refs": provenance.get("evidence_refs", [])[:16]
             if isinstance(provenance.get("evidence_refs"), list)
             else [],
-            "paper_memory_v3": provenance.get("paper_memory_v3")
-            if isinstance(provenance.get("paper_memory_v3"), dict)
-            else {},
             "core_v2": provenance.get("core_v2")
             if isinstance(provenance.get("core_v2"), dict)
             else {},
@@ -1045,7 +917,7 @@ def compact_library_record_for_agent(
 
 def render_offline_library_answer(question: str, matches: list[dict[str, Any]]) -> str:
     if not matches:
-        return f"本地记忆库里没有找到和“{question}”明显相关的论文。"
+        return f"本地图索引里没有找到和“{question}”明显相关的论文。"
     lines = [f"离线模式下无法调用模型综合回答。和“{question}”最相关的论文是："]
     for hit in matches[:5]:
         paper = hit["paper"]
@@ -1107,7 +979,7 @@ def normalize_library_source_attribution(
     if not any(result.values()) and answer:
         result["cross_paper_synthesis"] = [answer[:280]]
     if confidence == "low" and not result["evidence_limits"]:
-        result["evidence_limits"] = ["本地记忆库证据不足或模型未明确给出来源边界。"]
+        result["evidence_limits"] = ["本地图索引证据不足或模型未明确给出来源边界。"]
     return result
 
 
@@ -1135,24 +1007,6 @@ def first_existing_report(output_dir: Path, paper_id: str) -> str:
     return f"papers/{matches[0].name}" if matches else ""
 
 
-def first_existing_core_graph_report(
-    *,
-    output_dir: Path,
-    paper_id: str,
-    report_path: str,
-) -> str:
-    core_graph_dir = output_dir / "papers" / "core_graph"
-    if not core_graph_dir.exists():
-        return ""
-    report_name = Path(report_path).name if report_path else ""
-    if report_name.endswith(".md"):
-        candidate = core_graph_dir / f"{report_name[:-3]}.core_graph.md"
-        if candidate.exists():
-            return f"core_graph/{candidate.name}"
-    matches = sorted(core_graph_dir.glob(f"{paper_id}*.core_graph.md"))
-    return f"core_graph/{matches[0].name}" if matches else ""
-
-
 def dump_model(value: Any) -> dict[str, Any]:
     if value is None:
         return {}
@@ -1172,100 +1026,6 @@ def list_payload(value: Any) -> list[dict[str, Any]]:
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
-def normalize_concepts(value: Any) -> list[dict[str, str]]:
-    concepts = []
-    for item in value if isinstance(value, list) else []:
-        if not isinstance(item, dict):
-            continue
-        term = string_or_empty(item.get("term"))
-        explanation = string_or_empty(item.get("explanation"))
-        if (
-            term
-            and explanation
-            and not any(existing["term"].lower() == term.lower() for existing in concepts)
-        ):
-            concepts.append({"term": term, "explanation": explanation})
-        if len(concepts) >= 12:
-            break
-    return concepts
-
-
-def normalize_conceptual_bridge(value: Any) -> dict[str, Any]:
-    bridge = dict_value(value)
-    terms = []
-    for item in list_payload(bridge.get("terms")):
-        if not isinstance(item, dict):
-            continue
-        term = string_or_empty(item.get("term"))
-        explanation = string_or_empty(item.get("explanation"))
-        if not term or not explanation:
-            continue
-        terms.append(
-            {
-                "term": term,
-                "explanation": explanation,
-                "paper_role": string_or_empty(item.get("paper_role") or item.get("role")),
-                "provenance": string_or_empty(item.get("provenance")) or "background",
-            }
-        )
-        if len(terms) >= 6:
-            break
-    return {
-        "needed": bool(bridge.get("needed") or bridge.get("bridge_text") or terms),
-        "reader_gap": string_or_empty(bridge.get("reader_gap")),
-        "bridge_text": string_or_empty(bridge.get("bridge_text")),
-        "terms": terms,
-    }
-
-
-def first_v3_core_abstraction(memory: dict[str, Any]) -> str:
-    for item in list_payload(memory.get("core_abstractions")):
-        if isinstance(item, dict):
-            text = string_or_none(item.get("text"))
-            if text:
-                return text
-    return ""
-
-
-def normalize_claims(memory_claims: Any, card_claims: Any) -> list[dict[str, Any]]:
-    claims = []
-    for item in memory_claims if isinstance(memory_claims, list) else []:
-        if isinstance(item, dict):
-            claim = string_or_empty(item.get("claim") or item.get("text"))
-            confidence = string_or_empty(item.get("confidence")) or "medium"
-            raw_pages = (
-                item.get("evidence_pages") if isinstance(item.get("evidence_pages"), list) else []
-            )
-            pages = [int(page) for page in raw_pages if str(page).isdigit()]
-        else:
-            claim = string_or_empty(item)
-            confidence = "medium"
-            pages = []
-        if claim:
-            claims.append({"claim": claim, "confidence": confidence, "evidence_pages": pages[:8]})
-    for claim in normalized_string_list(card_claims):
-        if not any(
-            compact_compare_text(item["claim"]) == compact_compare_text(claim) for item in claims
-        ):
-            claims.append({"claim": claim, "confidence": "medium", "evidence_pages": []})
-    return claims[:12]
-
-
-def normalize_memory_evidence(value: Any) -> list[dict[str, Any]]:
-    evidence = []
-    for item in value if isinstance(value, list) else []:
-        if not isinstance(item, dict):
-            continue
-        claim = string_or_empty(item.get("claim") or item.get("interpretation"))
-        page_no = int_or_none(item.get("page_no") or item.get("page"))
-        quote = string_or_none(item.get("quote") or item.get("excerpt_or_caption"))
-        if claim:
-            evidence.append({"page_no": page_no, "claim": claim, "quote": quote})
-        if len(evidence) >= 12:
-            break
-    return evidence
-
-
 def merge_unique(first: list[str], second: list[str]) -> list[str]:
     result = []
     for item in [*first, *second]:
@@ -1275,41 +1035,13 @@ def merge_unique(first: list[str], second: list[str]) -> list[str]:
     return result
 
 
-def normalized_v3_mechanisms(memory: dict[str, Any]) -> list[str]:
-    mechanism = dict_value(memory.get("mechanism"))
-    steps = []
-    for item in list_payload(mechanism.get("steps")):
-        text = string_or_empty(item.get("text"))
-        if text:
-            steps.append(text)
-    overview = string_or_empty(mechanism.get("overview"))
-    if overview and overview not in steps:
-        steps.insert(0, overview)
-    return steps[:8]
-
-
-def normalized_v3_evaluation(memory: dict[str, Any]) -> list[str]:
-    evaluation = dict_value(memory.get("evaluation"))
-    items = []
-    for item in list_payload(evaluation.get("items")):
-        text = string_or_empty(item.get("text"))
-        if text:
-            items.append(text)
-    summary = string_or_empty(evaluation.get("summary"))
-    if summary and summary not in items:
-        items.insert(0, summary)
-    return items[:8]
-
-
 def reader_takeaways(
     *,
-    model_report: dict[str, Any],
     brief: str,
     core_idea: str,
     claims: list[dict[str, Any]],
 ) -> list[str]:
     candidates = [
-        string_or_empty(model_report.get("core_takeaway")),
         core_idea,
         brief,
     ] + [string_or_empty(claim.get("claim")) for claim in claims[:3]]
@@ -1321,30 +1053,6 @@ def reader_takeaways(
         if len(takeaways) >= 5:
             break
     return takeaways
-
-
-def normalize_evidence_refs(*sources: Any) -> list[dict[str, Any]]:
-    refs = []
-    for source in sources:
-        for item in source if isinstance(source, list) else []:
-            value = dump_model(item)
-            page_no = int_or_none(value.get("page_no"))
-            if not page_no:
-                continue
-            ref = {
-                "paper_id": string_or_none(value.get("paper_id")),
-                "page_no": page_no,
-                "section": string_or_none(value.get("section")),
-                "figure_id": string_or_none(value.get("figure_id")),
-                "table_id": string_or_none(value.get("table_id")),
-                "quote_hash": string_or_none(value.get("quote_hash")),
-                "verification_status": string_or_none(value.get("verification_status")),
-            }
-            key = json.dumps(ref, ensure_ascii=False, sort_keys=True)
-            if not any(existing["_key"] == key for existing in refs):
-                ref["_key"] = key
-                refs.append(ref)
-    return [{key: value for key, value in ref.items() if key != "_key"} for ref in refs[:16]]
 
 
 def infer_tags(

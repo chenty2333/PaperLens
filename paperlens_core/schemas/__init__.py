@@ -1,10 +1,8 @@
 from paperlens_core.schemas.models import (
     ArtifactVersion,
     ClassificationDecision,
-    ClaimRecord,
     EvidenceRef,
     PageArtifact,
-    PaperCard,
     PaperRecord,
     PaperState,
     ReviewItem,
@@ -15,10 +13,8 @@ from paperlens_core.schemas.models import (
 __all__ = [
     "ArtifactVersion",
     "ClassificationDecision",
-    "ClaimRecord",
     "EvidenceRef",
     "PageArtifact",
-    "PaperCard",
     "PaperRecord",
     "PaperState",
     "ReviewItem",

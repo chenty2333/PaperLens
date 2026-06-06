@@ -9,14 +9,12 @@ from paperlens_core.report.graph_view import GraphReportDraft, render_graph_repo
 from paperlens_core.runtime import read_typed_artifact
 
 
-def write_core_graph_report_view(
+def render_core_graph_report_view(
     *,
-    output_dir: Path,
     data_dir: Path,
     paper_id: str,
     title: str,
-    report_name: str,
-) -> Path | None:
+) -> str | None:
     manifest = inspect_core_v2_artifact_set(data_dir, paper_id)
     if manifest.get("consumable") is not True:
         return None
@@ -55,16 +53,7 @@ def write_core_graph_report_view(
         dom=dom,
         quality=quality,
     )
-    path = output_dir / "papers" / "core_graph" / core_graph_report_filename(report_name)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(markdown, encoding="utf-8")
-    return path
-
-
-def core_graph_report_filename(report_name: str) -> str:
-    if report_name.endswith(".md"):
-        return report_name[:-3] + ".core_graph.md"
-    return report_name + ".core_graph.md"
+    return markdown
 
 
 def graph_report_quality_context(

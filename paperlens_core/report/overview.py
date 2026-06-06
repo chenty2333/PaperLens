@@ -3,17 +3,14 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from paperlens_core.library_graph import first_graph_label
 from paperlens_core.report.rows import (
     classification_counts,
     reading_priority_key,
     row_decision,
 )
-from paperlens_core.report.text import (
-    clean_model_inline_text,
-    compact_reason,
-    sanitize_reader_hostile_text,
-)
-from paperlens_core.schemas import PaperCard, PaperRecord, ReviewItem, SkimCard
+from paperlens_core.report.text import compact_reason
+from paperlens_core.schemas import PaperRecord, ReviewItem
 
 
 def render_paperlens_report(
@@ -104,28 +101,19 @@ def core_graph_report_link(row: dict[str, Any], *, output_language: str) -> str:
     name = _string_or_none(row.get("core_graph_report_name"))
     if not name:
         return ""
+    if name == _string_or_none(row.get("report_name")):
+        return ""
     label = "Core graph report" if output_language == "en" else "事实图报告"
     return f"[{label}](./papers/{name})"
 
 
 def one_line_row_reason(row: dict[str, Any]) -> str:
-    decision = row_decision(row)
-    model_report = row.get("model_report")
-    if isinstance(model_report, dict):
-        reason = sanitize_reader_hostile_text(
-            clean_model_inline_text(model_report.get("one_line_reason"))
-        )
+    graph_summary = row.get("core_v2_graph_summary")
+    if isinstance(graph_summary, dict):
+        reason = first_graph_label(graph_summary, "problem_nodes", "claim_nodes")
         if reason:
             return compact_reason(reason, max_chars=110)
-    skim = row.get("skim")
-    card = row.get("card")
-    if isinstance(card, PaperCard) and card.contribution_claims:
-        return _normalize_excerpt(card.contribution_claims[0], limit=90)
-    if isinstance(skim, SkimCard) and skim.problem:
-        return _normalize_excerpt(skim.problem, limit=90)
-    if decision.reason_codes:
-        return ", ".join(decision.reason_codes[:3])
-    return "没有足够理由说明。"
+    return "No reviewed ClaimGraph summary."
 
 
 def markdown_title(markdown: str) -> str | None:
@@ -166,13 +154,6 @@ def is_internal_review_noise(item: ReviewItem) -> bool:
         "visual_required_pages",
     }
     return reason in hidden_reasons
-
-
-def _normalize_excerpt(text: str, *, limit: int) -> str:
-    cleaned = re.sub(r"\s+", " ", text).strip()
-    if len(cleaned) <= limit:
-        return cleaned
-    return cleaned[:limit].rsplit(" ", 1)[0] + " ..."
 
 
 def _string_or_none(value: Any) -> str | None:

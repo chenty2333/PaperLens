@@ -90,7 +90,7 @@ type PaperSummary = {
   memory?: {
     claim_count?: number
     evidence_count?: number
-    memory_v3_path?: string | null
+    core_v2_path?: string | null
   }
   qa?: {
     count?: number
