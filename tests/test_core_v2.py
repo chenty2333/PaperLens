@@ -2943,6 +2943,63 @@ def test_report_memory_context_prefers_reviewed_core_memory_view(tmp_path):
     )
 
 
+def test_report_memory_context_marks_legacy_fallback_when_core_unreviewed(tmp_path):
+    data_dir = tmp_path / ".paperlens" / "data"
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    layout = {
+        "pages": [
+            {
+                "page_no": 1,
+                "text": "Abstract\n\nWe propose a block table method for faster serving.",
+                "section_candidates": [{"title": "Abstract", "level": 1}],
+            }
+        ]
+    }
+    write_core_v2_artifacts(data_dir=data_dir, paper=paper, layout=layout)
+    (data_dir / "core" / "v2" / "p_test" / "quality_metrics.v1.json").unlink()
+    legacy_memory = {
+        "schema_version": "paper_memory.v3",
+        "paper_id": "p_test",
+        "problem_frame": {"problem": "Legacy problem frame for serving latency."},
+        "claims": [
+            {
+                "id": "legacy_claim",
+                "text": "Legacy claim should be treated as unreviewed fallback.",
+                "evidence_refs": ["E1"],
+            }
+        ],
+        "evidence": [{"id": "E1", "page": 1, "source_type": "page"}],
+    }
+
+    context = build_report_memory_context(
+        data_dir=data_dir,
+        paper_id="p_test",
+        paper_memory_v3=legacy_memory,
+    )
+    compact = compact_paper_memory_for_report(context)
+
+    assert context["schema_version"] == "paperlens.report_memory_context.v1"
+    assert context["source_of_truth"] == "legacy_memory_v3_unreviewed_core_fallback"
+    assert context["quality"]["artifact_set_status"] == "INCOMPLETE"
+    assert context["quality"]["consumable"] is False
+    assert "missing:quality_metrics.v1.json" in context["quality"]["issues"]
+    assert "unreviewed fallback" in context["fallback_policy"]
+    assert compact["source_of_truth"] == "legacy_memory_v3_unreviewed_core_fallback"
+    assert compact["quality"]["artifact_set_status"] == "INCOMPLETE"
+    assert "unreviewed fallback" in compact["legacy_memory_policy"]
+    assert report_focus_pages(context, skim=None, card=None) == [1]
+    assert any(
+        "Legacy problem frame" in query
+        for query in report_focus_queries(context, paper=paper, skim=None, card=None)
+    )
+
+
 def test_agent_memory_tools_search_core_memory_view(tmp_path):
     source_id = "span:p_test:p1:1"
     memory = {

@@ -54,7 +54,28 @@ def build_report_memory_context(
                 "core_memory_view": envelope.data,
                 "legacy_memory_v3": memory_v3_prompt_view(paper_memory_v3),
             }
-    return memory_v3_prompt_view(paper_memory_v3)
+    return {
+        "schema_version": REPORT_MEMORY_CONTEXT_SCHEMA_VERSION,
+        "source_of_truth": "legacy_memory_v3_unreviewed_core_fallback",
+        "fallback_policy": (
+            "Core v2 PaperMemoryView is unavailable or not reviewed. Use legacy_memory_v3 only "
+            "as unreviewed fallback context; paper-specific factual claims still require source "
+            "evidence and should not be treated as reviewed core facts."
+        ),
+        "quality": report_memory_quality_from_manifest(manifest),
+        "paper_memory_v3": memory_v3_prompt_view(paper_memory_v3),
+    }
+
+
+def report_memory_quality_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "artifact_set_status": manifest.get("status"),
+        "publish_status": manifest.get("publish_status"),
+        "artifact_publish_status": manifest.get("artifact_publish_status"),
+        "current_audit_publish_status": manifest.get("current_audit_publish_status"),
+        "consumable": manifest.get("consumable"),
+        "issues": manifest.get("issues", []),
+    }
 
 
 def core_memory_view_dict(memory: dict[str, Any] | None) -> dict[str, Any]:
@@ -83,6 +104,7 @@ def report_focus_queries(
         queries.extend(card.contribution_claims[:2])
         queries.extend(card.mechanisms[:2])
         queries.extend(card.evaluation[:2])
+    memory = paper_memory_v3_dict(memory) or memory
     frame = dict_value(memory.get("problem_frame"))
     queries.extend([frame.get("problem"), frame.get("why_it_matters")])
     for item in list_payload(memory.get("core_abstractions"))[:3]:
@@ -104,6 +126,7 @@ def report_focus_pages(
         for page in core_memory_pages(core):
             if page not in pages:
                 pages.append(page)
+    memory = paper_memory_v3_dict(memory) or memory
     for item in list_payload(memory.get("evidence"))[:12]:
         if isinstance(item, dict):
             page = safe_int(item.get("page"))
@@ -120,6 +143,15 @@ def report_focus_pages(
             if page and page not in pages:
                 pages.append(page)
     return pages[:10]
+
+
+def paper_memory_v3_dict(memory: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(memory, dict):
+        return {}
+    if memory.get("schema_version") == "paper_memory.v3":
+        return memory
+    nested = dict_value(memory.get("paper_memory_v3"))
+    return nested if nested.get("schema_version") == "paper_memory.v3" else {}
 
 
 def compact_paper_memory_for_report(memory: dict[str, Any] | None) -> dict[str, Any]:
@@ -139,15 +171,11 @@ def compact_paper_memory_for_report(memory: dict[str, Any] | None) -> dict[str, 
             result["legacy_memory_v3"] = compact_memory_v3_for_report(fallback)
             result["legacy_memory_policy"] = memory.get("fallback_policy")
         return result
-    v3 = (
-        dict_value(memory.get("paper_memory_v3"))
-        if "paper_memory_v3" in memory
-        else dict_value(memory)
-    )
+    v3 = paper_memory_v3_dict(memory) or dict_value(memory)
     if v3.get("schema_version") != "paper_memory.v3":
         return {}
     audit_trail = dict_value(v3.get("audit_trail"))
-    return {
+    result = {
         "paper_memory_v3": compact_memory_v3_for_report(v3),
         "memory_audit": compact_memory_audit_for_report(
             dict_value(audit_trail.get("memory_audit"))
@@ -158,6 +186,16 @@ def compact_paper_memory_for_report(memory: dict[str, Any] | None) -> dict[str, 
             if key in {"verdict", "safe_usage_note"}
         },
     }
+    source_of_truth = string_or_none(memory.get("source_of_truth"))
+    if source_of_truth:
+        result["source_of_truth"] = source_of_truth
+    fallback_policy = string_or_none(memory.get("fallback_policy"))
+    if fallback_policy:
+        result["legacy_memory_policy"] = fallback_policy
+    quality = dict_value(memory.get("quality"))
+    if quality:
+        result["quality"] = quality
+    return result
 
 
 def compact_core_memory_view_for_report(memory: dict[str, Any]) -> dict[str, Any]:
