@@ -27,9 +27,10 @@ def build_report_memory_context(
     paper_id: str,
     paper_memory_v3: dict[str, Any],
 ) -> dict[str, Any]:
+    root = data_dir / "core" / "v2" / paper_id
+    core_exists = root.exists()
     manifest = inspect_core_v2_artifact_set(data_dir, paper_id)
     if manifest.get("consumable") is True:
-        root = data_dir / "core" / "v2" / paper_id
         try:
             envelope = read_typed_artifact(
                 root / "paper_memory_view.v1.json",
@@ -54,6 +55,17 @@ def build_report_memory_context(
                 "core_memory_view": envelope.data,
                 "legacy_memory_v3": memory_v3_prompt_view(paper_memory_v3),
             }
+    if core_exists:
+        return {
+            "schema_version": REPORT_MEMORY_CONTEXT_SCHEMA_VERSION,
+            "source_of_truth": "unreviewed_core_v2_no_report_fact_source",
+            "fallback_policy": (
+                "Core v2 artifacts exist but are unavailable or not reviewed. Do not use "
+                "legacy_memory_v3 for paper-specific report facts; cite source evidence or "
+                "leave the claim out."
+            ),
+            "quality": report_memory_quality_from_manifest(manifest),
+        }
     return {
         "schema_version": REPORT_MEMORY_CONTEXT_SCHEMA_VERSION,
         "source_of_truth": "legacy_memory_v3_unreviewed_core_fallback",
@@ -170,6 +182,15 @@ def compact_paper_memory_for_report(memory: dict[str, Any] | None) -> dict[str, 
         if fallback.get("schema_version") == "paper_memory.v3":
             result["legacy_memory_v3"] = compact_memory_v3_for_report(fallback)
             result["legacy_memory_policy"] = memory.get("fallback_policy")
+        return result
+    if memory.get("source_of_truth") == "unreviewed_core_v2_no_report_fact_source":
+        result = {
+            "source_of_truth": "unreviewed_core_v2_no_report_fact_source",
+            "legacy_memory_policy": memory.get("fallback_policy"),
+        }
+        quality = dict_value(memory.get("quality"))
+        if quality:
+            result["quality"] = quality
         return result
     v3 = paper_memory_v3_dict(memory) or dict_value(memory)
     if v3.get("schema_version") != "paper_memory.v3":

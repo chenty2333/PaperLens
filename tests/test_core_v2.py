@@ -3142,7 +3142,7 @@ def test_report_memory_context_prefers_reviewed_core_memory_view(tmp_path):
     )
 
 
-def test_report_memory_context_marks_legacy_fallback_when_core_unreviewed(tmp_path):
+def test_report_memory_context_suppresses_legacy_fallback_when_core_unreviewed(tmp_path):
     data_dir = tmp_path / ".paperlens" / "data"
     paper = PaperRecord(
         paper_id="p_test",
@@ -3184,16 +3184,17 @@ def test_report_memory_context_marks_legacy_fallback_when_core_unreviewed(tmp_pa
     compact = compact_paper_memory_for_report(context)
 
     assert context["schema_version"] == "paperlens.report_memory_context.v1"
-    assert context["source_of_truth"] == "legacy_memory_v3_unreviewed_core_fallback"
+    assert context["source_of_truth"] == "unreviewed_core_v2_no_report_fact_source"
     assert context["quality"]["artifact_set_status"] == "INCOMPLETE"
     assert context["quality"]["consumable"] is False
     assert "missing:quality_metrics.v1.json" in context["quality"]["issues"]
-    assert "unreviewed fallback" in context["fallback_policy"]
-    assert compact["source_of_truth"] == "legacy_memory_v3_unreviewed_core_fallback"
+    assert "Do not use legacy_memory_v3" in context["fallback_policy"]
+    assert "paper_memory_v3" not in context
+    assert compact["source_of_truth"] == "unreviewed_core_v2_no_report_fact_source"
     assert compact["quality"]["artifact_set_status"] == "INCOMPLETE"
-    assert "unreviewed fallback" in compact["legacy_memory_policy"]
-    assert report_focus_pages(context, skim=None, card=None) == [1]
-    assert any(
+    assert "Do not use legacy_memory_v3" in compact["legacy_memory_policy"]
+    assert report_focus_pages(context, skim=None, card=None) == []
+    assert not any(
         "Legacy problem frame" in query
         for query in report_focus_queries(context, paper=paper, skim=None, card=None)
     )
