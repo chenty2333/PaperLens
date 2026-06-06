@@ -14,6 +14,7 @@ def render_core_graph_report_view(
     data_dir: Path,
     paper_id: str,
     title: str,
+    output_language: str = "zh",
 ) -> str | None:
     manifest = inspect_core_v2_artifact_set(data_dir, paper_id)
     if manifest.get("status") != "COMPLETE":
@@ -52,6 +53,7 @@ def render_core_graph_report_view(
         graph=graph,
         dom=dom,
         quality=quality,
+        output_language=output_language,
     )
     return markdown
 

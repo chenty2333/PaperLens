@@ -17,7 +17,7 @@ WORKFLOW_STAGES: tuple[WorkflowStage, ...] = (
     WorkflowStage("stage_03_skim", "MAPPED", "建立论文地图"),
     WorkflowStage("stage_07_normal_read", "CORE_GRAPH_BUILT", "构建事实图"),
     WorkflowStage("stage_08_evidence_verify", "CORE_GRAPH_REVIEWED", "审计事实图"),
-    WorkflowStage("stage_15_export", "REPORT_EXPORTED", "导出事实图报告"),
+    WorkflowStage("stage_15_export", "REPORT_EXPORTED", "导出论文报告"),
     WorkflowStage("stage_17_manifest", "RUN_MANIFEST_READY", "保存运行结果"),
 )
 

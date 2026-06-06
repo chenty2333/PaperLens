@@ -36,14 +36,14 @@ class GraphReportDraft(BaseModel):
 
 
 SECTION_TITLES = {
-    "problem": "Problem Frame",
-    "claim": "Claims",
-    "mechanism": "Mechanism",
-    "implementation": "Implementation",
-    "evaluation": "Evaluation",
-    "result": "Results",
-    "limitation": "Limitations",
-    "concept": "Concept Bridge",
+    "problem": {"zh": "问题与动机", "en": "Problem"},
+    "claim": {"zh": "核心主张", "en": "Claims"},
+    "mechanism": {"zh": "方法机制", "en": "Mechanism"},
+    "implementation": {"zh": "实现细节", "en": "Implementation"},
+    "evaluation": {"zh": "实验设置", "en": "Evaluation Setup"},
+    "result": {"zh": "结果与结论", "en": "Results"},
+    "limitation": {"zh": "限制与边界", "en": "Limitations"},
+    "concept": {"zh": "相关概念", "en": "Concept Bridge"},
 }
 
 NUMBER_TEXT_PATTERN = re.compile(
@@ -52,10 +52,10 @@ NUMBER_TEXT_PATTERN = re.compile(
 
 
 def build_report_draft_from_graph(
-    graph: ClaimGraph, *, max_nodes_per_kind: int = 8
+    graph: ClaimGraph, *, max_nodes_per_kind: int = 8, output_language: str = "zh"
 ) -> GraphReportDraft:
     sections: list[ReportSection] = []
-    for kind, title in SECTION_TITLES.items():
+    for kind, titles in SECTION_TITLES.items():
         nodes = [node for node in graph.nodes.values() if node.kind == kind][:max_nodes_per_kind]
         if not nodes:
             continue
@@ -73,7 +73,7 @@ def build_report_draft_from_graph(
         sections.append(
             ReportSection(
                 section_id=kind,
-                title=title,
+                title=localized_section_title(kind, titles, output_language=output_language),
                 paragraphs=paragraphs,
             )
         )
@@ -280,46 +280,228 @@ def render_graph_report_markdown(
     graph: ClaimGraph,
     dom: PaperDOM,
     quality: dict | None = None,
+    output_language: str = "zh",
 ) -> str:
     quality = quality or {}
+    output_language = "en" if output_language == "en" else "zh"
+    display_title = reader_display_title(title=title, draft=draft, dom=dom)
     lines = [
-        f"# {title or draft.paper_id}",
+        f"# {display_title}",
         "",
-        "> Deterministic ClaimGraph report view. Paragraph facts come from graph nodes; evidence",
-        "> is declared with ClaimGraph evidence IDs and PaperDOM source IDs.",
-        "",
-        f"- Paper ID: `{draft.paper_id}`",
-        f"- Graph schema: `{graph.schema_version}`",
+        report_review_line(quality, output_language=output_language),
     ]
-    publish_status = quality.get("publish_status")
-    if publish_status:
-        lines.append(f"- Publish status: `{publish_status}`")
+
+    anchor = report_anchor(draft, output_language=output_language)
+    if anchor:
+        label = "First hold this abstraction:" if output_language == "en" else "先抓住这个抽象："
+        lines.extend(["", f"**{label}** {anchor}"])
     lines.append("")
+
     for section in draft.sections:
-        lines.extend([f"## {section.title}", ""])
-        for paragraph in section.paragraphs:
-            node_ids = [node_id for node_id in paragraph.used_node_ids if node_id in graph.nodes]
-            evidence_ids = [
-                evidence_id
-                for evidence_id in paragraph.used_evidence_ids
-                if evidence_id in graph.nodes
-            ]
-            source_ids = graph_report_source_ids(graph=graph, evidence_ids=evidence_ids)
-            lines.extend(
-                [
-                    paragraph.markdown.strip(),
-                    "",
-                    f"- ClaimGraph nodes: {inline_code_list(node_ids)}",
-                    f"- Evidence nodes: {inline_code_list(evidence_ids)}",
-                    f"- PaperDOM sources: {inline_code_list(source_ids)}",
-                ]
+        section_title = reader_section_title(section, output_language=output_language)
+        section_texts = [
+            text
+            for text in (
+                reader_markdown(paragraph.markdown, output_language=output_language)
+                for paragraph in section.paragraphs
             )
-            for source_id in source_ids[:4]:
-                source = describe_dom_source(dom, source_id)
-                if source:
-                    lines.append(f"  - {source}")
-            lines.append("")
+            if text
+        ]
+        if not section_texts:
+            continue
+        lines.extend([f"## {section_title}", ""])
+        for text in section_texts:
+            lines.extend([text, ""])
+
+    boundary = report_trust_boundary(quality, output_language=output_language)
+    if boundary:
+        label = "Trust boundary" if output_language == "en" else "可信边界"
+        lines.extend([f"{label}：{boundary}", ""])
     return "\n".join(lines).rstrip() + "\n"
+
+
+def localized_section_title(
+    kind: str,
+    titles: dict[str, str],
+    *,
+    output_language: str,
+) -> str:
+    return titles.get("en" if output_language == "en" else "zh") or titles.get("zh") or kind
+
+
+def reader_display_title(*, title: str, draft: GraphReportDraft, dom: PaperDOM) -> str:
+    candidate = (title or "").strip()
+    dom_title = (dom.title or "").strip()
+    document_title = first_document_title(dom)
+    if document_title and (
+        not candidate
+        or title_looks_like_filename(candidate)
+        or title_looks_like_filename(dom_title)
+    ):
+        return document_title
+    if dom_title and (not candidate or title_looks_like_filename(candidate)):
+        return dom_title
+    return candidate or dom_title or draft.paper_id
+
+
+def first_document_title(dom: PaperDOM) -> str:
+    for span in dom.spans[:80]:
+        text = " ".join(str(span.text or "").split()).strip()
+        if not text or len(text) < 24:
+            continue
+        if span.page_no and span.page_no > 2:
+            break
+        lower = text.lower()
+        if lower.startswith(("abstract", "index terms", "keywords")):
+            continue
+        if "," in text and len(text.split(",")) >= 3:
+            continue
+        if re.fullmatch(r"[\d\s.]+", text):
+            continue
+        return text
+    return ""
+
+
+def title_looks_like_filename(title: str) -> bool:
+    text = title.strip()
+    return bool(
+        re.search(r"(^\d+[_-])|[_]{2,}|[_].*[_]|\.pdf$", text, flags=re.IGNORECASE)
+        or text.startswith("p_")
+    )
+
+
+def report_review_line(quality: dict, *, output_language: str) -> str:
+    status = str(quality.get("publish_status") or quality.get("artifact_publish_status") or "")
+    if output_language == "en":
+        return f"Review: {review_status_label(status, output_language=output_language)}"
+    return f"复核：{review_status_label(status, output_language=output_language)}"
+
+
+def review_status_label(status: str, *, output_language: str) -> str:
+    normalized = status.strip().upper()
+    if output_language == "en":
+        return {
+            "REVIEWED": "passed",
+            "REVIEWED_WITH_LIMITS": "passed with limits",
+            "DRAFT_WEAK": "weak draft",
+            "BLOCKED": "blocked",
+        }.get(normalized, "completed")
+    return {
+        "REVIEWED": "已通过",
+        "REVIEWED_WITH_LIMITS": "通过但有边界",
+        "DRAFT_WEAK": "弱草稿",
+        "BLOCKED": "未通过",
+    }.get(normalized, "已完成")
+
+
+def report_anchor(draft: GraphReportDraft, *, output_language: str) -> str:
+    priority = ["problem", "claim", "mechanism"]
+    selected: list[str] = []
+    for section_id in priority:
+        for section in draft.sections:
+            if section.section_id != section_id:
+                continue
+            for paragraph in section.paragraphs:
+                text = reader_markdown(paragraph.markdown, output_language=output_language)
+                if text:
+                    selected.append(strip_markdown_heading(text))
+                    break
+            break
+    if not selected:
+        return ""
+    if output_language == "en":
+        return compact_source_text(" ".join(selected), limit=360)
+    return compact_source_text(" ".join(selected), limit=220)
+
+
+def strip_markdown_heading(text: str) -> str:
+    return re.sub(r"^\s{0,3}#{1,6}\s+", "", text.strip())
+
+
+def reader_section_title(section: ReportSection, *, output_language: str) -> str:
+    titles = SECTION_TITLES.get(section.section_id)
+    if titles:
+        return localized_section_title(section.section_id, titles, output_language=output_language)
+    return clean_internal_markers(section.title).strip() or section.section_id
+
+
+def reader_markdown(markdown: str, *, output_language: str = "zh") -> str:
+    cleaned_lines: list[str] = []
+    for line in str(markdown or "").splitlines():
+        if is_internal_report_line(line):
+            continue
+        cleaned = clean_internal_markers(line)
+        cleaned = strip_observation_prefix(cleaned)
+        if output_language == "zh" and is_english_mechanical_evidence(cleaned):
+            continue
+        cleaned_lines.append(cleaned)
+    return "\n".join(line for line in cleaned_lines if line.strip()).strip()
+
+
+def strip_observation_prefix(text: str) -> str:
+    return re.sub(
+        r"^(问题定位|核心主张|方法机制|实现路径|评估设置|实验结果|限制边界|概念桥接|相关工作定位|可复现性)证据：\s*",
+        "",
+        text.strip(),
+    )
+
+
+def is_english_mechanical_evidence(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return True
+    if stripped.lower().startswith(("abstract-", "abstract—", "to solve ", "where c ")):
+        return True
+    cjk = len(re.findall(r"[\u4e00-\u9fff]", stripped))
+    latin = len(re.findall(r"[A-Za-z]", stripped))
+    return cjk < 8 and latin > 40
+
+
+def is_internal_report_line(line: str) -> bool:
+    stripped = line.strip()
+    if re.search(r"\b(?:problem|claim|mechanism|implementation|evaluation|result|limitation|concept):obs_", stripped):
+        return True
+    if "evidence:" in stripped or "span:" in stripped:
+        return True
+    return stripped.startswith(
+        (
+            "- ClaimGraph nodes:",
+            "- Evidence nodes:",
+            "- PaperDOM sources:",
+            "ClaimGraph nodes:",
+            "Evidence nodes:",
+            "PaperDOM sources:",
+        )
+    )
+
+
+def clean_internal_markers(text: str) -> str:
+    cleaned = str(text or "")
+    for marker in ["ClaimGraph", "PaperDOM", "source_id", "evidence_id", "observation_id"]:
+        cleaned = cleaned.replace(marker, "")
+    cleaned = re.sub(
+        r"`?(?:problem|claim|mechanism|implementation|evaluation|result|limitation|concept):obs_[A-Za-z0-9_:-]+`?",
+        "",
+        cleaned,
+    )
+    cleaned = re.sub(r"`?evidence:[A-Za-z0-9_:/.-]+`?", "", cleaned)
+    cleaned = re.sub(r"`?span:[A-Za-z0-9_:/.-]+`?", "", cleaned)
+    return cleaned.strip()
+
+
+def report_trust_boundary(quality: dict, *, output_language: str) -> str:
+    error_count = int(quality.get("current_audit_error_count") or 0)
+    warning_count = int(quality.get("current_audit_warning_count") or 0)
+    status = str(quality.get("publish_status") or "").upper()
+    if not error_count and not warning_count and status == "REVIEWED":
+        return ""
+    if output_language == "en":
+        if error_count:
+            return "Automatic review found unresolved evidence issues; use this as a reading lead."
+        return "Automatic review passed with some evidence boundaries."
+    if error_count:
+        return "自动复核发现未解决的证据问题，这份报告只能作为阅读线索。"
+    return "自动复核已通过，但仍建议在引用关键数值、实现细节或强结论前回到原文核对。"
 
 
 def graph_report_source_ids(*, graph: ClaimGraph, evidence_ids: list[str]) -> list[str]:

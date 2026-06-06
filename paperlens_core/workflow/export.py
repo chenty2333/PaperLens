@@ -92,6 +92,7 @@ def write_final_report_bundle(
             data_dir=data_dir,
             paper_id=paper.paper_id,
             title=paper.canonical_title or paper.paper_id,
+            output_language=output_language,
         )
         if report_markdown is None:
             raise RuntimeError(

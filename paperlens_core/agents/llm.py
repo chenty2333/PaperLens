@@ -881,6 +881,8 @@ def parse_json_text_for_schema(
     schema: dict[str, Any],
 ) -> dict[str, Any]:
     candidates = list(iter_json_object_candidates(text))
+    if schema_name == "paperlens_core_v2_graph_report_draft":
+        candidates.extend(iter_graph_report_draft_array_candidates(text))
     if not candidates:
         raise LlmError("Model response did not contain a JSON object")
     best_missing: list[str] | None = None
@@ -980,7 +982,145 @@ def normalize_artifact_data_payload(data: dict[str, Any], artifact_type: str) ->
                 if isinstance(candidate, dict)
             ]
         }
+    if artifact_type == "graph_report_draft":
+        draft = graph_report_draft_object(data)
+        sections = draft.get("sections")
+        if not isinstance(sections, list):
+            sections = draft.get("report_sections")
+        if not isinstance(sections, list):
+            sections = draft.get("outline")
+        if not isinstance(sections, list):
+            sections = graph_report_sections_from_named_fields(draft)
+        if not isinstance(sections, list):
+            return data
+        paper_id = str(draft.get("paper_id") or data.get("paper_id") or "").strip()
+        result: dict[str, Any] = {
+            "schema_version": str(draft.get("schema_version") or "graph_report_draft.v2"),
+            "paper_id": paper_id,
+            "sections": [
+                normalize_graph_report_section_payload(section, index)
+                for index, section in enumerate(sections, start=1)
+                if isinstance(section, dict)
+            ],
+        }
+        return result
     return data
+
+
+def graph_report_draft_object(data: dict[str, Any]) -> dict[str, Any]:
+    for key in ("report", "paper_report", "report_draft", "draft", "article", "data"):
+        value = data.get(key)
+        if isinstance(value, dict):
+            return value
+    return data
+
+
+def graph_report_sections_from_named_fields(draft: dict[str, Any]) -> list[dict[str, Any]] | None:
+    section_fields = [
+        ("takeaway", "一句话理解"),
+        ("summary", "一句话理解"),
+        ("problem", "问题与动机"),
+        ("motivation", "问题与动机"),
+        ("claims", "核心主张"),
+        ("claim", "核心主张"),
+        ("method", "方法机制"),
+        ("mechanism", "方法机制"),
+        ("implementation", "实现细节"),
+        ("evaluation", "实验设置"),
+        ("experiment", "实验设置"),
+        ("results", "结果与结论"),
+        ("result", "结果与结论"),
+        ("limitations", "限制与边界"),
+        ("limitation", "限制与边界"),
+        ("concept", "相关概念"),
+        ("concept_bridge", "相关概念"),
+    ]
+    sections: list[dict[str, Any]] = []
+    for key, title in section_fields:
+        value = draft.get(key)
+        if value is None:
+            continue
+        paragraphs = graph_report_paragraphs_from_value(value)
+        if paragraphs:
+            sections.append({"section_id": key, "title": title, "paragraphs": paragraphs})
+    return sections or None
+
+
+def graph_report_paragraphs_from_value(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, str) and value.strip():
+        return [{"markdown": value.strip()}]
+    if isinstance(value, dict):
+        text = first_text_value(value, ("markdown", "body", "text", "content", "summary"))
+        return [{"markdown": text}] if text else []
+    if isinstance(value, list):
+        result = []
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                result.append({"markdown": item.strip()})
+            elif isinstance(item, dict):
+                result.append(item)
+        return result
+    return []
+
+
+def normalize_graph_report_section_payload(section: dict[str, Any], index: int) -> dict[str, Any]:
+    paragraphs = section.get("paragraphs")
+    if not isinstance(paragraphs, list):
+        paragraphs = section.get("items")
+    if not isinstance(paragraphs, list):
+        paragraphs = section.get("claims")
+    if not isinstance(paragraphs, list):
+        body = first_text_value(section, ("markdown", "body", "text", "content"))
+        paragraphs = [{"markdown": body}] if body else []
+    section_id = str(section.get("section_id") or section.get("id") or f"section_{index:02d}")
+    title = first_text_value(section, ("title", "heading", "name")) or section_id
+    return {
+        "section_id": section_id,
+        "title": title,
+        "paragraphs": [
+            normalize_graph_report_paragraph_payload(
+                graph_report_paragraph_object(paragraph),
+                section_id,
+                paragraph_index,
+            )
+            for paragraph_index, paragraph in enumerate(paragraphs, start=1)
+            if isinstance(graph_report_paragraph_object(paragraph), dict)
+        ],
+    }
+
+
+def graph_report_paragraph_object(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        return {"markdown": value.strip()}
+    return None
+
+
+def normalize_graph_report_paragraph_payload(
+    paragraph: dict[str, Any],
+    section_id: str,
+    index: int,
+) -> dict[str, Any]:
+    return {
+        "paragraph_id": str(
+            paragraph.get("paragraph_id")
+            or paragraph.get("id")
+            or f"{section_id}_{index:02d}"
+        ),
+        "markdown": first_text_value(
+            paragraph,
+            ("markdown", "body", "text", "content", "paragraph"),
+        ),
+        "used_node_ids": string_list_value(
+            paragraph,
+            ("used_node_ids", "node_ids", "claim_ids", "nodes"),
+        ),
+        "used_evidence_ids": string_list_value(
+            paragraph,
+            ("used_evidence_ids", "evidence_ids", "evidences"),
+        ),
+    }
 
 
 def normalize_observation_card_payload(card: dict[str, Any]) -> dict[str, Any]:
@@ -1063,6 +1203,21 @@ def first_text_value(card: dict[str, Any], keys: tuple[str, ...]) -> str | None:
     return None
 
 
+def string_list_value(card: dict[str, Any], keys: tuple[str, ...]) -> list[str]:
+    for key in keys:
+        value = card.get(key)
+        if isinstance(value, list):
+            result = []
+            for item in value:
+                text = str(item or "").strip()
+                if text and text not in result:
+                    result.append(text)
+            return result
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+    return []
+
+
 OBSERVATION_TYPE_VALUES = {
     "problem",
     "claim",
@@ -1135,6 +1290,28 @@ def iter_json_object_candidates(text: str) -> Iterable[dict[str, Any]]:
             yield parsed
 
 
+def iter_graph_report_draft_array_candidates(text: str) -> Iterable[dict[str, Any]]:
+    cleaned = text.strip()
+    seen: set[str] = set()
+    for candidate in json_array_candidate_strings(cleaned):
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, list) and graph_report_array_looks_like_sections(parsed):
+            yield {"sections": parsed}
+
+
+def graph_report_array_looks_like_sections(value: list[Any]) -> bool:
+    if not value or not all(isinstance(item, dict) for item in value):
+        return False
+    section_keys = {"section_id", "title", "heading", "paragraphs", "items", "body", "markdown"}
+    return any(bool(section_keys & set(item)) for item in value)
+
+
 def json_candidate_strings(text: str) -> Iterable[str]:
     fence_pattern = re.compile(r"```(?:json)?\s*(.*?)\s*```", flags=re.DOTALL | re.IGNORECASE)
     for match in fence_pattern.finditer(text):
@@ -1143,6 +1320,22 @@ def json_candidate_strings(text: str) -> Iterable[str]:
     decoder = json.JSONDecoder()
     for index, char in enumerate(text):
         if char != "{":
+            continue
+        try:
+            _parsed, end = decoder.raw_decode(text[index:])
+        except json.JSONDecodeError:
+            continue
+        yield text[index : index + end].strip()
+
+
+def json_array_candidate_strings(text: str) -> Iterable[str]:
+    fence_pattern = re.compile(r"```(?:json)?\s*(.*?)\s*```", flags=re.DOTALL | re.IGNORECASE)
+    for match in fence_pattern.finditer(text):
+        yield match.group(1).strip()
+
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(text):
+        if char != "[":
             continue
         try:
             _parsed, end = decoder.raw_decode(text[index:])

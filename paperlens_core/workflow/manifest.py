@@ -118,6 +118,17 @@ def validate_paperlens_output(
     checked_links = 0
     render_markers = ["\\r\\n", "\\n"]
     reader_hostile_markers = [
+        "ClaimGraph nodes",
+        "Evidence nodes",
+        "PaperDOM sources",
+        "ClaimGraph",
+        "PaperDOM",
+        "source_id",
+        "evidence_id",
+        "node_id",
+        "observation_id",
+        "span:",
+        "obs_",
         "supplied excerpts",
         "the user provided",
         "你给到",

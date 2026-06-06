@@ -19,6 +19,7 @@ from paperlens_core.control import ControlState
 from paperlens_core.core_manifest import write_core_v2_manifest
 from paperlens_core.dom import PaperDOM, PaperSpan, build_paper_dom_from_layout
 from paperlens_core.events import EventWriter
+from paperlens_core.grounding import text_overlaps_any_reference
 from paperlens_core.graph import ClaimGraph, build_claim_graph
 from paperlens_core.memory import materialize_paper_memory
 from paperlens_core.reading import (
@@ -36,7 +37,11 @@ from paperlens_core.reading import (
     make_observation_id,
     validate_relation_candidates,
 )
-from paperlens_core.report import audit_report_draft_against_graph, build_report_draft_from_graph
+from paperlens_core.report import (
+    GraphReportDraft,
+    audit_report_draft_against_graph,
+    build_report_draft_from_graph,
+)
 from paperlens_core.runtime import (
     ArtifactEnvelope,
     NodeSpec,
@@ -54,6 +59,11 @@ CORE_V2_AUDIT_SUITE_VERSION = "paperlens_core.v2.audit_suite"
 
 CORE_V2_OBSERVER_SYSTEM_PROMPT = """
 You are the PaperLens observation node.
+Return JSON only.
+""".strip()
+
+CORE_V2_REPORT_WRITER_SYSTEM_PROMPT = """
+You are the PaperLens report writer node.
 Return JSON only.
 """.strip()
 
@@ -153,6 +163,7 @@ def run_core_v2_observation_read(
             data_dir=workflow.data_dir,
             paper=paper,
             stage=stage,
+            output_language=workflow.config.output_language,
             record_usage=workflow.record_llm_usage,
             record_agent_run=workflow.write_agent_run,
         )
@@ -364,6 +375,70 @@ RELATION_CANDIDATES_SCHEMA: dict[str, Any] = {
 }
 
 
+GRAPH_REPORT_DRAFT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["artifact_type", "artifact_version", "producer", "data"],
+    "properties": {
+        "artifact_type": {"type": "string", "enum": ["graph_report_draft"]},
+        "artifact_version": {"type": "string"},
+        "producer": {"type": "string"},
+        "data": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["paper_id", "sections"],
+            "properties": {
+                "schema_version": {"type": "string"},
+                "paper_id": {"type": "string"},
+                "sections": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 9,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["section_id", "title", "paragraphs"],
+                        "properties": {
+                            "section_id": {"type": "string"},
+                            "title": {"type": "string"},
+                            "paragraphs": {
+                                "type": "array",
+                                "minItems": 1,
+                                "maxItems": 4,
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": [
+                                        "paragraph_id",
+                                        "markdown",
+                                        "used_node_ids",
+                                        "used_evidence_ids",
+                                    ],
+                                    "properties": {
+                                        "paragraph_id": {"type": "string"},
+                                        "markdown": {"type": "string"},
+                                        "used_node_ids": {
+                                            "type": "array",
+                                            "minItems": 1,
+                                            "items": {"type": "string"},
+                                        },
+                                        "used_evidence_ids": {
+                                            "type": "array",
+                                            "minItems": 1,
+                                            "items": {"type": "string"},
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+}
+
+
 def write_core_v2_artifacts(
     *,
     data_dir: Path,
@@ -462,9 +537,11 @@ def run_core_v2_model_observation_tasks(
     data_dir: Path,
     paper: PaperRecord,
     stage: str,
+    output_language: str,
     record_usage: Any,
     record_agent_run: Any,
 ) -> dict[str, Any]:
+    output_language = "en" if output_language == "en" else "zh"
     dom, reading_plan = load_core_v2_dom_and_plan(data_dir, paper.paper_id)
     log = ObservationLog(paper_id=paper.paper_id)
     total_usage: dict[str, Any] = {}
@@ -516,6 +593,7 @@ def run_core_v2_model_observation_tasks(
                         paper=paper,
                         dom=dom,
                         task=task,
+                        output_language=output_language,
                     ),
                     schema_name="paperlens_core_v2_observation_cards",
                     schema=OBSERVATION_CARDS_SCHEMA,
@@ -567,6 +645,7 @@ def run_core_v2_model_observation_tasks(
                 dom,
                 task,
                 reason="; ".join(node_result.issues) or node_result.status.value,
+                output_language=output_language,
             )
         else:
             try:
@@ -577,7 +656,12 @@ def run_core_v2_model_observation_tasks(
                     allowed_source_ids=node_result.tool_source_ids.get("paper_dom.read_sources", []),
                 )
             except ValueError as exc:
-                cards = fallback_observation_cards_from_task(dom, task, reason=str(exc))
+                cards = fallback_observation_cards_from_task(
+                    dom,
+                    task,
+                    reason=str(exc),
+                    output_language=output_language,
+                )
         log = log.append_many(cards)
         completed_tasks += 1
 
@@ -592,6 +676,22 @@ def run_core_v2_model_observation_tasks(
     if relation_log.candidates:
         request_ids.append(f"rel_{paper.paper_id}")
 
+    claim_graph = build_claim_graph(
+        paper.paper_id,
+        list(log.cards),
+        relation_candidates=list(relation_log.candidates) if relation_log else None,
+    )
+    report_draft = run_core_v2_report_writer(
+        client=client,
+        paper=paper,
+        dom=dom,
+        graph=claim_graph,
+        output_language=output_language,
+        stage=stage,
+        record_usage=record_usage,
+        record_agent_run=record_agent_run,
+    )
+
     paths = write_core_v2_from_observation_log(
         data_dir=data_dir,
         paper=paper,
@@ -599,6 +699,8 @@ def run_core_v2_model_observation_tasks(
         reading_plan=reading_plan,
         observation_log=log,
         relation_log=relation_log,
+        report_draft=report_draft,
+        output_language=output_language,
         producer="paperlens_core_v2_model_observer",
     )
     return {
@@ -609,6 +711,331 @@ def run_core_v2_model_observation_tasks(
         "usage": total_usage,
         "request_ids": request_ids,
     }
+
+
+def run_core_v2_report_writer(
+    *,
+    client: JsonLlmClient,
+    paper: PaperRecord,
+    dom: PaperDOM,
+    graph: ClaimGraph,
+    output_language: str,
+    stage: str,
+    record_usage: Any,
+    record_agent_run: Any,
+) -> GraphReportDraft:
+    raw: Any = None
+    usage: dict[str, Any] = {}
+    output_language = "en" if output_language == "en" else "zh"
+    try:
+        with llm_call_context(
+            stage=stage,
+            paper_id=paper.paper_id,
+            operation="core_v2_report_writer",
+            schema_name="paperlens_core_v2_graph_report_draft",
+        ):
+            raw = client.invoke_json(
+                system_prompt=CORE_V2_REPORT_WRITER_SYSTEM_PROMPT,
+                user_prompt=build_graph_report_writer_prompt(
+                    paper=paper,
+                    dom=dom,
+                    graph=graph,
+                    output_language=output_language,
+                ),
+                schema_name="paperlens_core_v2_graph_report_draft",
+                schema=GRAPH_REPORT_DRAFT_SCHEMA,
+                max_tokens=12000,
+            )
+        usage = dict(getattr(raw, "usage", {}) or {})
+        record_usage(stage, usage)
+        envelope = ArtifactEnvelope.model_validate(raw.data).require_type("graph_report_draft")
+        if not isinstance(envelope.data, dict):
+            raise ValueError("graph_report_draft envelope data must be an object")
+        draft = GraphReportDraft.model_validate(envelope.data)
+        draft = normalize_model_report_draft(
+            draft,
+            graph=graph,
+            paper_id=paper.paper_id,
+            output_language=output_language,
+        )
+        findings = audit_report_draft_against_graph(draft, graph)
+        record_agent_run(
+            {
+                "agent_run_id": f"core_v2_report_{paper.paper_id}",
+                "paper_id": paper.paper_id,
+                "stage": stage,
+                "operation": "core_v2_report_writer",
+                "provider_kind": client.config.kind,
+                "model": client.config.model,
+                "usage": usage,
+                "request_id": getattr(raw, "request_id", None),
+                "status": "PASS",
+                "report_audit_precheck_findings": len(findings),
+            }
+        )
+        return draft
+    except Exception as exc:
+        record_agent_run(
+            {
+                "agent_run_id": f"core_v2_report_{paper.paper_id}",
+                "paper_id": paper.paper_id,
+                "stage": stage,
+                "operation": "core_v2_report_writer",
+                "provider_kind": client.config.kind,
+                "model": client.config.model,
+                "usage": usage,
+                "request_id": getattr(raw, "request_id", None),
+                "status": "FAIL",
+                "issues": [str(exc)],
+            }
+        )
+        return build_report_draft_from_graph(graph, output_language=output_language)
+
+
+def build_graph_report_writer_prompt(
+    *,
+    paper: PaperRecord,
+    dom: PaperDOM,
+    graph: ClaimGraph,
+    output_language: str,
+) -> str:
+    language_rule = (
+        "Write all reader-facing markdown in Chinese. Keep technical terms readable; include "
+        "English method names only when they are paper terms."
+        if output_language != "en"
+        else "Write all reader-facing markdown in English."
+    )
+    payload = {
+        "prompt_version": "paperlens_core.v2.graph_report_writer",
+        "paper": {
+            "paper_id": paper.paper_id,
+            "title": dom.title or paper.canonical_title,
+        },
+        "graph_pack": report_writer_graph_pack(graph, dom),
+        "output_contract": {
+            "artifact_type": "graph_report_draft",
+            "paper_id": paper.paper_id,
+            "language_rule": language_rule,
+            "reader_report_rule": (
+                "The markdown is the final report text for a human reader. Do not mention "
+                "ClaimGraph, PaperDOM, source_id, evidence_id, node_id, observation_id, span, "
+                "or any internal identifier in markdown."
+            ),
+            "grounding_rule": (
+                "Every paragraph must declare used_node_ids and used_evidence_ids in JSON. "
+                "The markdown may explain and connect facts, but must not add factual claims "
+                "beyond the labels of the declared graph nodes."
+            ),
+            "shape_rule": (
+                "Use a readable paper-report structure: takeaway, problem, method mechanism, "
+                "implementation details, evaluation setup, results, and limitations when present."
+            ),
+        },
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def report_writer_graph_pack(graph: ClaimGraph, dom: PaperDOM) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for node in graph.nodes.values():
+        if node.kind == "evidence":
+            continue
+        evidence_ids = graph.evidence_ids_for(node.node_id)
+        source_ids = []
+        for evidence_id in evidence_ids:
+            evidence_node = graph.nodes.get(evidence_id)
+            source_id = str((evidence_node.payload if evidence_node else {}).get("source_id") or "")
+            if source_id and source_id not in source_ids:
+                source_ids.append(source_id)
+        result.append(
+            {
+                "node_id": node.node_id,
+                "kind": node.kind,
+                "label": node.label,
+                "evidence_ids": evidence_ids,
+                "sources": [report_source_summary(dom, source_id) for source_id in source_ids[:3]],
+                "confidence": node.payload.get("confidence"),
+                "uncertainty": node.payload.get("uncertainty"),
+            }
+        )
+    return result
+
+
+def report_source_summary(dom: PaperDOM, source_id: str) -> dict[str, Any]:
+    for span in dom.spans:
+        if span.source_id == source_id:
+            return {
+                "source_id": source_id,
+                "kind": span.kind,
+                "page_no": span.page_no,
+                "text": first_sentence(span.text, limit=900),
+            }
+    for figure in dom.figures:
+        if figure.source_id == source_id:
+            return {
+                "source_id": source_id,
+                "kind": figure.kind,
+                "page_no": figure.page_no,
+                "text": first_sentence(figure.caption or "", limit=700),
+            }
+    for table in dom.tables:
+        if table.source_id == source_id:
+            return {
+                "source_id": source_id,
+                "kind": table.kind,
+                "page_no": table.page_no,
+                "text": first_sentence(table.caption or "", limit=700),
+            }
+    for equation in dom.equations:
+        if equation.source_id == source_id:
+            return {
+                "source_id": source_id,
+                "kind": equation.kind,
+                "page_no": equation.page_no,
+                "text": first_sentence(equation.latex_or_text, limit=700),
+            }
+    return {"source_id": source_id, "kind": "unknown", "page_no": None, "text": ""}
+
+
+def normalize_model_report_draft(
+    draft: GraphReportDraft,
+    *,
+    graph: ClaimGraph,
+    paper_id: str,
+    output_language: str,
+) -> GraphReportDraft:
+    known_fact_nodes = {
+        node_id for node_id, node in graph.nodes.items() if node.kind != "evidence"
+    }
+    known_evidence_nodes = {
+        node_id for node_id, node in graph.nodes.items() if node.kind == "evidence"
+    }
+    sections = []
+    for section in draft.sections:
+        paragraphs = []
+        for paragraph in section.paragraphs:
+            node_ids = [
+                node_id for node_id in paragraph.used_node_ids if node_id in known_fact_nodes
+            ]
+            if not node_ids:
+                node_ids = infer_report_paragraph_node_ids(
+                    paragraph.markdown,
+                    section=section,
+                    graph=graph,
+                )
+            evidence_ids = [
+                evidence_id
+                for evidence_id in paragraph.used_evidence_ids
+                if evidence_id in known_evidence_nodes
+            ]
+            for node_id in node_ids:
+                for evidence_id in graph.evidence_ids_for(node_id):
+                    if evidence_id in known_evidence_nodes and evidence_id not in evidence_ids:
+                        evidence_ids.append(evidence_id)
+            markdown = remove_visible_internal_ids(paragraph.markdown)
+            if markdown and node_ids and evidence_ids:
+                paragraphs.append(
+                    paragraph.model_copy(
+                        update={
+                            "markdown": markdown,
+                            "used_node_ids": node_ids,
+                            "used_evidence_ids": evidence_ids,
+                        }
+                    )
+                )
+        if paragraphs:
+            sections.append(section.model_copy(update={"paragraphs": paragraphs}))
+    if not sections:
+        return build_report_draft_from_graph(graph, output_language=output_language)
+    return draft.model_copy(update={"paper_id": paper_id, "sections": sections})
+
+
+def infer_report_paragraph_node_ids(
+    markdown: str,
+    *,
+    section: Any,
+    graph: ClaimGraph,
+) -> list[str]:
+    kind = report_section_fact_kind(section)
+    if not kind:
+        return []
+    candidates = [node for node in graph.nodes.values() if node.kind == kind]
+    matched = [
+        node.node_id
+        for node in candidates
+        if text_overlaps_any_reference(markdown, [node.label])
+    ]
+    if matched:
+        return matched[:4]
+    return [node.node_id for node in candidates[:1]]
+
+
+def report_section_fact_kind(section: Any) -> str | None:
+    section_id = str(getattr(section, "section_id", "") or "").lower()
+    title = str(getattr(section, "title", "") or "").lower()
+    direct = {
+        "problem": "problem",
+        "motivation": "problem",
+        "claim": "claim",
+        "claims": "claim",
+        "takeaway": "claim",
+        "summary": "claim",
+        "method": "mechanism",
+        "mechanism": "mechanism",
+        "implementation": "implementation",
+        "evaluation": "evaluation",
+        "experiment": "evaluation",
+        "results": "result",
+        "result": "result",
+        "limitations": "limitation",
+        "limitation": "limitation",
+        "concept": "concept",
+        "concept_bridge": "concept",
+    }
+    if section_id in direct:
+        return direct[section_id]
+    title_hints = [
+        ("问题", "problem"),
+        ("动机", "problem"),
+        ("主张", "claim"),
+        ("贡献", "claim"),
+        ("方法", "mechanism"),
+        ("机制", "mechanism"),
+        ("实现", "implementation"),
+        ("实验", "evaluation"),
+        ("评估", "evaluation"),
+        ("结果", "result"),
+        ("结论", "result"),
+        ("限制", "limitation"),
+        ("边界", "limitation"),
+        ("概念", "concept"),
+    ]
+    for hint, kind in title_hints:
+        if hint in title:
+            return kind
+    return None
+
+
+def remove_visible_internal_ids(text: str) -> str:
+    cleaned_lines = []
+    for line in str(text or "").splitlines():
+        if any(
+            marker in line
+            for marker in [
+                "ClaimGraph",
+                "PaperDOM",
+                "source_id",
+                "evidence_id",
+                "node_id",
+                "observation_id",
+            ]
+        ) or re.search(
+            r"\b(?:problem|claim|mechanism|implementation|evaluation|result|limitation|concept):obs_",
+            line,
+        ) or "evidence:" in line or "span:" in line:
+            continue
+        cleaned_lines.append(line)
+    return "\n".join(cleaned_lines).strip()
 
 
 def _run_relation_discovery(
@@ -733,6 +1160,8 @@ def write_core_v2_from_observation_log(
     reading_plan: ReadingPlan,
     observation_log: ObservationLog,
     relation_log: RelationCandidateLog | None = None,
+    report_draft: GraphReportDraft | None = None,
+    output_language: str = "zh",
     producer: str,
 ) -> dict[str, Path]:
     validate_core_v2_write_inputs(
@@ -751,6 +1180,8 @@ def write_core_v2_from_observation_log(
         claim_graph=claim_graph,
         reading_plan=reading_plan,
         relation_log=relation_log if relation_log and relation_log.candidates else None,
+        report_draft=report_draft,
+        output_language=output_language,
         metadata={
             "title": paper.canonical_title,
             "observer_schema_version": CORE_V2_MODEL_OBSERVER_VERSION,
@@ -901,12 +1332,14 @@ def refresh_core_v2_audit_artifacts(
     observation_log = load_core_v2_observation_log(data_dir, paper.paper_id)
     _, claim_graph = load_core_v2_dom_and_graph(data_dir, paper.paper_id)
     relation_log = _load_relation_candidate_log(data_dir, paper.paper_id)
+    report_draft = load_core_v2_report_draft(data_dir, paper.paper_id)
     derived = build_core_v2_derived_views(
         dom=dom,
         observation_log=observation_log,
         claim_graph=claim_graph,
         reading_plan=reading_plan,
         relation_log=relation_log if relation_log and relation_log.candidates else None,
+        report_draft=report_draft,
         metadata={
             "title": paper.canonical_title,
             "authors": paper.authors,
@@ -975,6 +1408,8 @@ def build_core_v2_derived_views(
     claim_graph: ClaimGraph,
     reading_plan: ReadingPlan | None = None,
     relation_log: RelationCandidateLog | None = None,
+    report_draft: GraphReportDraft | None = None,
+    output_language: str = "zh",
     metadata: dict[str, Any],
 ) -> dict[str, Any]:
     observation_findings = (
@@ -1000,7 +1435,18 @@ def build_core_v2_derived_views(
         *audit_reading_required_outputs(claim_graph, reading_plan),
         *relation_findings,
     ]
-    report_draft = build_report_draft_from_graph(claim_graph)
+    if report_draft is None:
+        report_draft = build_report_draft_from_graph(
+            claim_graph,
+            output_language=output_language,
+        )
+    else:
+        report_draft = normalize_model_report_draft(
+            report_draft,
+            graph=claim_graph,
+            paper_id=claim_graph.paper_id,
+            output_language=output_language,
+        )
     report_audit_findings = audit_report_draft_against_graph(report_draft, claim_graph)
     all_findings = [*audit_findings, *report_audit_findings]
     quality_metrics = compute_core_quality_metrics(
@@ -1041,12 +1487,22 @@ def fallback_observation_cards_from_task(
     task: ReadingTask,
     *,
     reason: str,
+    output_language: str = "zh",
 ) -> list[ObservationCard]:
     spans_by_id = {span.source_id: span for span in dom.spans}
-    card = bootstrap_observation_for_task(dom, spans_by_id, task)
+    card = bootstrap_observation_for_task(
+        dom,
+        spans_by_id,
+        task,
+        output_language=output_language,
+    )
     if card is None:
         raise ValueError(f"Observation task {task.task_id} returned no valid observation cards")
-    fallback_note = f"Model observation output was unusable; deterministic fallback used: {reason}"
+    fallback_note = (
+        f"Model observation output was unusable; deterministic fallback used: {reason}"
+        if output_language == "en"
+        else f"模型观察输出不可用，已使用确定性兜底：{reason}"
+    )
     uncertainty = f"{card.uncertainty} {fallback_note}".strip() if card.uncertainty else fallback_note
     return [card.model_copy(update={"uncertainty": uncertainty})]
 
@@ -1055,12 +1511,14 @@ def bootstrap_observation_for_task(
     dom: PaperDOM,
     spans_by_id: dict[str, PaperSpan],
     task: ReadingTask,
+    *,
+    output_language: str = "zh",
 ) -> ObservationCard | None:
     source_id = next((item for item in task.target_source_ids if item in spans_by_id), None)
     if not source_id:
         return None
     span = spans_by_id[source_id]
-    statement = observation_statement(task.task_type, span.text)
+    statement = observation_statement(task.task_type, span.text, output_language=output_language)
     if not statement:
         return None
     observation_type = observation_type_for_task(task.task_type)
@@ -1082,6 +1540,8 @@ def bootstrap_observation_for_task(
         uncertainty=(
             "Deterministic bootstrap observation; replace with task-specific model reading "
             "before treating as reviewed knowledge."
+            if output_language == "en"
+            else "确定性启动观察；在作为已复核知识使用前，需要由任务化模型阅读替换。"
         ),
         covered_outputs=bootstrap_covered_outputs(observation_type, task),
         extracted_numbers=extract_numbers(statement),
@@ -1110,22 +1570,41 @@ def observation_type_for_task(task_type: ReadingTaskType) -> ObservationType:
     }[task_type]
 
 
-def observation_statement(task_type: ReadingTaskType, text: str) -> str:
+def observation_statement(
+    task_type: ReadingTaskType,
+    text: str,
+    *,
+    output_language: str = "zh",
+) -> str:
     sentence = first_sentence(text)
     if not sentence:
         return ""
-    prefix = {
-        ReadingTaskType.ORIENTATION: "Problem framing evidence: ",
-        ReadingTaskType.CLAIM_INVENTORY: "Claim inventory evidence: ",
-        ReadingTaskType.METHOD_MECHANISM: "Mechanism evidence: ",
-        ReadingTaskType.IMPLEMENTATION_PATH: "Implementation evidence: ",
-        ReadingTaskType.EVALUATION_SETUP: "Evaluation setup evidence: ",
-        ReadingTaskType.RESULT_EXTRACTION: "Result evidence: ",
-        ReadingTaskType.LIMITATIONS: "Limitation evidence: ",
-        ReadingTaskType.CONCEPT_BRIDGE: "Concept bridge evidence: ",
-        ReadingTaskType.RELATED_POSITIONING: "Related-positioning evidence: ",
-        ReadingTaskType.REPRODUCIBILITY: "Reproducibility evidence: ",
-    }[task_type]
+    if output_language == "en":
+        prefix = {
+            ReadingTaskType.ORIENTATION: "Problem framing evidence: ",
+            ReadingTaskType.CLAIM_INVENTORY: "Claim inventory evidence: ",
+            ReadingTaskType.METHOD_MECHANISM: "Mechanism evidence: ",
+            ReadingTaskType.IMPLEMENTATION_PATH: "Implementation evidence: ",
+            ReadingTaskType.EVALUATION_SETUP: "Evaluation setup evidence: ",
+            ReadingTaskType.RESULT_EXTRACTION: "Result evidence: ",
+            ReadingTaskType.LIMITATIONS: "Limitation evidence: ",
+            ReadingTaskType.CONCEPT_BRIDGE: "Concept bridge evidence: ",
+            ReadingTaskType.RELATED_POSITIONING: "Related-positioning evidence: ",
+            ReadingTaskType.REPRODUCIBILITY: "Reproducibility evidence: ",
+        }[task_type]
+    else:
+        prefix = {
+            ReadingTaskType.ORIENTATION: "问题定位证据：",
+            ReadingTaskType.CLAIM_INVENTORY: "核心主张证据：",
+            ReadingTaskType.METHOD_MECHANISM: "方法机制证据：",
+            ReadingTaskType.IMPLEMENTATION_PATH: "实现路径证据：",
+            ReadingTaskType.EVALUATION_SETUP: "评估设置证据：",
+            ReadingTaskType.RESULT_EXTRACTION: "实验结果证据：",
+            ReadingTaskType.LIMITATIONS: "限制边界证据：",
+            ReadingTaskType.CONCEPT_BRIDGE: "概念桥接证据：",
+            ReadingTaskType.RELATED_POSITIONING: "相关工作定位证据：",
+            ReadingTaskType.REPRODUCIBILITY: "可复现性证据：",
+        }[task_type]
     return prefix + sentence
 
 
@@ -1203,6 +1682,23 @@ def load_core_v2_observation_log(data_dir: Path, paper_id: str) -> ObservationLo
     return ObservationLog.model_validate(log_envelope.data)
 
 
+def load_core_v2_report_draft(data_dir: Path, paper_id: str) -> GraphReportDraft | None:
+    root = data_dir / "core" / "v2" / paper_id
+    try:
+        draft_envelope = read_typed_artifact(
+            root / "report_draft.v2.json",
+            expected_type="graph_report_draft",
+        )
+    except (FileNotFoundError, ValueError):
+        return None
+    if not isinstance(draft_envelope.data, dict):
+        return None
+    try:
+        return GraphReportDraft.model_validate(draft_envelope.data)
+    except Exception:
+        return None
+
+
 def load_core_v2_dom_and_graph(data_dir: Path, paper_id: str) -> tuple[PaperDOM, ClaimGraph]:
     root = data_dir / "core" / "v2" / paper_id
     dom_envelope = read_typed_artifact(root / "paper_dom.v2.json", expected_type="paper_dom")
@@ -1219,9 +1715,18 @@ def build_observation_task_prompt(
     paper: PaperRecord,
     dom: PaperDOM,
     task: ReadingTask,
+    output_language: str = "zh",
 ) -> str:
+    output_language = "en" if output_language == "en" else "zh"
+    language_rule = (
+        "Write statement, uncertainty, and any explanatory text in Chinese. Keep paper terms "
+        "or method names in English only when they are original technical terms."
+        if output_language != "en"
+        else "Write statement, uncertainty, and any explanatory text in English."
+    )
     payload = {
         "prompt_version": CORE_V2_MODEL_OBSERVER_VERSION,
+        "output_language": output_language,
         "paper": {
             "paper_id": paper.paper_id,
             "title": paper.canonical_title,
@@ -1239,6 +1744,7 @@ def build_observation_task_prompt(
         "output_contract": {
             "artifact_type": "observation_cards",
             "allowed_source_ids": task.target_source_ids,
+            "language_rule": language_rule,
             "rule": (
                 "Return an ArtifactEnvelope with data.cards. Each card must cite source_ids from "
                 "output_contract.allowed_source_ids by exact string copy and declare "
