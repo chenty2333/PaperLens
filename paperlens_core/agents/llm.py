@@ -886,8 +886,9 @@ def parse_json_text_for_schema(
     best_missing: list[str] | None = None
     for candidate in candidates:
         data = dict(candidate)
+        data = coerce_artifact_envelope_payload(data, schema)
         apply_schema_compatible_defaults(data, schema, schema_name=schema_name)
-        missing = missing_required_schema_keys(data, schema)
+        missing = missing_required_schema_paths(data, schema)
         if not missing:
             return data
         if best_missing is None or len(missing) < len(best_missing):
@@ -896,6 +897,227 @@ def parse_json_text_for_schema(
     raise LlmError(
         f"Provider JSON did not match schema {schema_name}; missing keys: {missing_text}"
     )
+
+
+def coerce_artifact_envelope_payload(data: dict[str, Any], schema: dict[str, Any]) -> dict[str, Any]:
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    if not isinstance(properties, dict):
+        return data
+    required = schema.get("required")
+    if not isinstance(required, list):
+        return data
+    envelope_keys = {"artifact_type", "artifact_version", "producer", "data"}
+    if not envelope_keys.issubset({str(item) for item in required}):
+        return data
+
+    data_schema = properties.get("data")
+    artifact_type_schema = properties.get("artifact_type")
+    if not isinstance(data_schema, dict) or not isinstance(artifact_type_schema, dict):
+        return data
+    artifact_type = artifact_type_from_schema(artifact_type_schema)
+    if not artifact_type:
+        return data
+    if isinstance(data.get("artifact_type"), str) and data["artifact_type"].strip():
+        artifact_type = data["artifact_type"].strip()
+    if isinstance(data.get("data"), dict):
+        envelope_data = normalize_artifact_data_payload(data["data"], artifact_type)
+        result = dict(data)
+        result["artifact_type"] = artifact_type
+        result.setdefault("artifact_version", "v2")
+        result.setdefault("producer", "paperlens_llm_adapter")
+        result["data"] = envelope_data
+        return result
+
+    payload = {key: value for key, value in data.items() if key not in envelope_keys}
+    payload = normalize_artifact_data_payload(payload, artifact_type)
+    if missing_required_schema_keys(payload, data_schema):
+        return data
+    return {
+        "artifact_type": artifact_type,
+        "artifact_version": "v2",
+        "producer": "paperlens_llm_adapter",
+        "data": payload,
+    }
+
+
+def artifact_type_from_schema(schema: dict[str, Any]) -> str | None:
+    enum = schema.get("enum")
+    if isinstance(enum, list) and len(enum) == 1:
+        value = str(enum[0]).strip()
+        return value or None
+    const = schema.get("const")
+    if isinstance(const, str) and const.strip():
+        return const.strip()
+    return None
+
+
+def normalize_artifact_data_payload(data: dict[str, Any], artifact_type: str) -> dict[str, Any]:
+    if artifact_type == "observation_cards":
+        cards = data.get("cards")
+        if not isinstance(cards, list):
+            cards = data.get("observations")
+        if not isinstance(cards, list):
+            return data
+        return {
+            "cards": [
+                normalize_observation_card_payload(card)
+                for card in cards
+                if isinstance(card, dict)
+            ]
+        }
+    if artifact_type == "relation_candidates":
+        candidates = data.get("candidates")
+        if not isinstance(candidates, list):
+            candidates = data.get("relations")
+        if not isinstance(candidates, list):
+            candidates = data.get("edges")
+        if not isinstance(candidates, list):
+            return data
+        return {
+            "candidates": [
+                normalize_relation_candidate_payload(candidate)
+                for candidate in candidates
+                if isinstance(candidate, dict)
+            ]
+        }
+    return data
+
+
+def normalize_observation_card_payload(card: dict[str, Any]) -> dict[str, Any]:
+    statement = first_text_value(
+        card,
+        (
+            "statement",
+            "observation",
+            "claim",
+            "finding",
+            "reasoning",
+            "description",
+            "rationale",
+            "explanation",
+            "details",
+            "detailed_mechanism",
+            "analysis",
+            "answer",
+            "summary",
+            "content",
+            "text",
+            "what_i_saw",
+        ),
+    )
+    source_ids = card.get("source_ids") if isinstance(card.get("source_ids"), list) else []
+    if not source_ids:
+        source_ids = (
+            card.get("cited_source_ids")
+            if isinstance(card.get("cited_source_ids"), list)
+            else []
+        )
+    if not source_ids:
+        source_ids = (
+            card.get("evidence_ids") if isinstance(card.get("evidence_ids"), list) else []
+        )
+    if not source_ids:
+        source_ids = (
+            card.get("citation_ids") if isinstance(card.get("citation_ids"), list) else []
+        )
+    if not source_ids:
+        source_ids = (
+            card.get("paper_dom_source_ids")
+            if isinstance(card.get("paper_dom_source_ids"), list)
+            else []
+        )
+    if not source_ids:
+        source_ids = card.get("sources") if isinstance(card.get("sources"), list) else []
+    if not source_ids and isinstance(card.get("source_id"), str):
+        source_ids = [card.get("source_id")]
+    if not source_ids:
+        source_ids = source_ids_from_citations(card.get("citations"))
+    observation_type = (
+        card.get("observation_type")
+        or card.get("card_type")
+        or card.get("type")
+        or observation_type_from_card_id(card.get("card_id"))
+        or observation_type_from_outputs(card.get("covered_outputs"))
+    )
+    return {
+        "observation_type": observation_type,
+        "statement": statement,
+        "source_ids": source_ids,
+        "confidence": card.get("confidence") or "medium",
+        "provenance": card.get("provenance") or "explicit",
+        "uncertainty": card.get("uncertainty") if "uncertainty" in card else None,
+        "covered_outputs": (
+            card.get("covered_outputs") if isinstance(card.get("covered_outputs"), list) else []
+        ),
+        "extracted_numbers": (
+            card.get("extracted_numbers") if isinstance(card.get("extracted_numbers"), list) else []
+        ),
+    }
+
+
+def first_text_value(card: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = card.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+OBSERVATION_TYPE_VALUES = {
+    "problem",
+    "claim",
+    "mechanism",
+    "implementation",
+    "evaluation",
+    "result",
+    "limitation",
+    "concept",
+}
+
+
+def observation_type_from_card_id(value: Any) -> str | None:
+    text = str(value or "").strip().lower()
+    if not text:
+        return None
+    prefix = re.split(r"[_:\-\s]+", text, maxsplit=1)[0]
+    return prefix if prefix in OBSERVATION_TYPE_VALUES else None
+
+
+def observation_type_from_outputs(value: Any) -> str | None:
+    if not isinstance(value, list):
+        return None
+    for item in value:
+        output = str(item or "").strip().lower()
+        if output in OBSERVATION_TYPE_VALUES:
+            return output
+    return None
+
+
+def source_ids_from_citations(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            source_id = item.strip()
+            if source_id and source_id not in result:
+                result.append(source_id)
+            continue
+        if not isinstance(item, dict):
+            continue
+        source_id = str(item.get("source_id") or "").strip()
+        if source_id and source_id not in result:
+            result.append(source_id)
+    return result
+
+
+def normalize_relation_candidate_payload(candidate: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source_observation_id": candidate.get("source_observation_id"),
+        "target_observation_id": candidate.get("target_observation_id"),
+        "kind": candidate.get("kind"),
+        "confidence": candidate.get("confidence") or "medium",
+    }
 
 
 def iter_json_object_candidates(text: str) -> Iterable[dict[str, Any]]:
@@ -970,3 +1192,35 @@ def missing_required_schema_keys(data: dict[str, Any], schema: dict[str, Any]) -
     if not isinstance(required, list):
         return []
     return [str(key) for key in required if isinstance(key, str) and key not in data]
+
+
+def missing_required_schema_paths(value: Any, schema: dict[str, Any], path: str = "") -> list[str]:
+    if not isinstance(schema, dict):
+        return []
+    missing: list[str] = []
+    properties = schema.get("properties")
+    if isinstance(value, dict) and isinstance(properties, dict):
+        for key in missing_required_schema_keys(value, schema):
+            missing.append(join_schema_path(path, key))
+        for key, prop_schema in properties.items():
+            if key in value and isinstance(prop_schema, dict):
+                missing.extend(
+                    missing_required_schema_paths(
+                        value[key],
+                        prop_schema,
+                        join_schema_path(path, key),
+                    )
+                )
+    items = schema.get("items")
+    if isinstance(value, list) and isinstance(items, dict):
+        min_items = schema.get("minItems")
+        if isinstance(min_items, int) and len(value) < min_items:
+            missing.append(f"{path}:minItems={min_items}" if path else f"minItems={min_items}")
+        for index, item in enumerate(value):
+            item_path = f"{path}[{index}]" if path else f"[{index}]"
+            missing.extend(missing_required_schema_paths(item, items, item_path))
+    return missing
+
+
+def join_schema_path(path: str, key: str) -> str:
+    return f"{path}.{key}" if path else key

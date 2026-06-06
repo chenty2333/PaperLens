@@ -16,7 +16,7 @@ def render_core_graph_report_view(
     title: str,
 ) -> str | None:
     manifest = inspect_core_v2_artifact_set(data_dir, paper_id)
-    if manifest.get("consumable") is not True:
+    if manifest.get("status") != "COMPLETE":
         return None
     root = data_dir / "core" / "v2" / paper_id
     try:

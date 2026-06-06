@@ -107,8 +107,28 @@ class ReadingPlan(BaseModel):
 
 TASK_KEYWORDS: dict[ReadingTaskType, tuple[str, ...]] = {
     ReadingTaskType.ORIENTATION: ("abstract", "introduction", "problem", "motivation"),
-    ReadingTaskType.CLAIM_INVENTORY: ("contribution", "we propose", "novel", "claim"),
-    ReadingTaskType.METHOD_MECHANISM: ("method", "approach", "architecture", "algorithm", "design"),
+    ReadingTaskType.CLAIM_INVENTORY: (
+        "contribution",
+        "contributions",
+        "we propose",
+        "we present",
+        "novel",
+        "claim",
+        "proposed",
+    ),
+    ReadingTaskType.METHOD_MECHANISM: (
+        "method",
+        "methodology",
+        "approach",
+        "architecture",
+        "algorithm",
+        "design",
+        "framework",
+        "module",
+        "network",
+        "optimization",
+        "loss",
+    ),
     ReadingTaskType.IMPLEMENTATION_PATH: (
         "implementation",
         "training",
@@ -117,12 +137,43 @@ TASK_KEYWORDS: dict[ReadingTaskType, tuple[str, ...]] = {
         "runtime",
         "system",
     ),
-    ReadingTaskType.EVALUATION_SETUP: ("experiment", "evaluation", "dataset", "baseline", "metric"),
-    ReadingTaskType.RESULT_EXTRACTION: ("result", "ablation", "table", "figure", "performance"),
+    ReadingTaskType.EVALUATION_SETUP: (
+        "experiment",
+        "evaluation",
+        "dataset",
+        "database",
+        "baseline",
+        "metric",
+        "plcc",
+        "srocc",
+        "krocc",
+        "rmse",
+    ),
+    ReadingTaskType.RESULT_EXTRACTION: (
+        "result",
+        "ablation",
+        "table",
+        "figure",
+        "performance",
+        "outperform",
+        "gain",
+    ),
     ReadingTaskType.LIMITATIONS: ("limitation", "discussion", "failure", "future work"),
     ReadingTaskType.CONCEPT_BRIDGE: ("background", "preliminary", "definition"),
     ReadingTaskType.RELATED_POSITIONING: ("related work", "prior", "compare", "comparison"),
-    ReadingTaskType.REPRODUCIBILITY: ("code", "hardware", "repository", "implementation detail"),
+    ReadingTaskType.REPRODUCIBILITY: (
+        "code",
+        "hardware",
+        "repository",
+        "implementation detail",
+        "pytorch",
+        "gpu",
+        "optimizer",
+        "learning rate",
+        "batch size",
+        "epoch",
+        "cross-validation",
+    ),
 }
 
 ALLOWED_OBSERVATION_TYPES: dict[ReadingTaskType, tuple[str, ...]] = {
@@ -163,7 +214,16 @@ SECTION_TASK_MAPPING: dict[str, tuple[ReadingTaskType, ...]] = {
     "limitation": (ReadingTaskType.LIMITATIONS,),
     "conclusion": (ReadingTaskType.LIMITATIONS, ReadingTaskType.CLAIM_INVENTORY),
     "reproducibility": (ReadingTaskType.REPRODUCIBILITY,),
+    "references": (),
+    "bibliography": (),
 }
+
+FRONT_MATTER_TASKS: tuple[ReadingTaskType, ...] = (
+    ReadingTaskType.ORIENTATION,
+    ReadingTaskType.CLAIM_INVENTORY,
+    ReadingTaskType.CONCEPT_BRIDGE,
+    ReadingTaskType.RELATED_POSITIONING,
+)
 
 
 TASK_DEPENDENCY_ORDER: tuple[ReadingTaskType, ...] = (
@@ -184,7 +244,6 @@ def build_initial_reading_plan(
     dom: PaperDOM, *, max_sources_per_task: int = 8, max_tokens_per_task: int = 16000
 ) -> ReadingPlan:
     section_task_map = _map_sections_to_tasks(dom)
-    covered_source_ids: set[str] = set()
     tasks: list[ReadingTask] = []
     task_index = 0
 
@@ -192,13 +251,9 @@ def build_initial_reading_plan(
         targets = _select_sources_for_task_type(
             dom, task_type, section_task_map, max_sources_per_task
         )
-        unique_targets = [sid for sid in targets if sid not in covered_source_ids]
-        if len(unique_targets) < len(targets) * 0.3 and task_index > 0:
-            targets = unique_targets
         if not targets:
             continue
         task_index += 1
-        covered_source_ids.update(targets)
         tasks.append(
             ReadingTask(
                 task_id=f"read_{task_index:02d}_{task_type.value}",
@@ -211,10 +266,6 @@ def build_initial_reading_plan(
             )
         )
 
-    uncovered = _detect_coverage_gaps(dom, covered_source_ids)
-    if uncovered and tasks:
-        _distribute_uncovered_sources(tasks, uncovered, max_sources_per_task)
-
     if not tasks:
         tasks = _fallback_tasks(dom, max_sources_per_task, max_tokens_per_task)
 
@@ -226,12 +277,15 @@ def _map_sections_to_tasks(dom: PaperDOM) -> dict[str, list[ReadingTaskType]]:
     for section in dom.sections:
         title_lower = normalize_heading_text(section.title)
         matched: list[ReadingTaskType] = []
+        if title_lower in {"front", "front matter"}:
+            result[section.source_id] = list(FRONT_MATTER_TASKS)
+            continue
         for keyword, task_types in SECTION_TASK_MAPPING.items():
             if keyword in title_lower:
                 for task_type in task_types:
                     if task_type not in matched:
                         matched.append(task_type)
-        result[section.source_id] = matched if matched else list(ReadingTaskType)
+        result[section.source_id] = matched
     return result
 
 
@@ -256,21 +310,20 @@ def _select_sources_for_task_type(
         )
 
     for span in dom.spans:
-        if is_heading_span(span, section_titles):
+        if is_bad_candidate_span(span, section_titles):
             continue
         if span.source_id in matches:
             continue
-        section_id = getattr(span, "section_id", None)
-        if section_id and task_type in section_task_map.get(section_id, []):
-            haystack = span.text.lower()
-            if any(keyword in haystack for keyword in keywords):
-                matches.append(span.source_id)
+        haystack = span.text.lower()
+        if any(keyword in haystack for keyword in keywords):
+            matches.append(span.source_id)
 
     if task_type in EQUATION_READING_TASKS:
         matches.extend(item.source_id for item in dom.equations)
     if task_type == ReadingTaskType.RESULT_EXTRACTION:
         matches.extend(item.source_id for item in [*dom.figures, *dom.tables])
 
+    matches = prioritize_task_source_ids(matches, spans_by_id, keywords, task_type)
     deduped: list[str] = []
     for source_id in matches:
         if source_id and source_id not in deduped:
@@ -281,6 +334,40 @@ def _select_sources_for_task_type(
     if not deduped:
         return _positional_fallback(dom, task_type, limit, section_titles)
     return deduped
+
+
+def prioritize_task_source_ids(
+    source_ids: list[str],
+    spans_by_id: dict[str, Any],
+    keywords: tuple[str, ...],
+    task_type: ReadingTaskType,
+) -> list[str]:
+    indexed = list(enumerate(source_ids))
+
+    def sort_key(item: tuple[int, str]) -> tuple[float, int]:
+        index, source_id = item
+        span = spans_by_id.get(source_id)
+        if span is None:
+            return (0.0, index)
+        text = " ".join(str(getattr(span, "text", "") or "").split())
+        text_lower = text.lower()
+        length = len(text)
+        score = min(length, 1800) / 10.0
+        if is_bad_candidate_text(text):
+            score -= 320.0
+        if length < 80:
+            score -= 120.0
+        if length >= 120:
+            score += 80.0
+        if any(keyword in text_lower for keyword in keywords):
+            score += 180.0
+        if task_type == ReadingTaskType.ORIENTATION and (
+            "abstract" in text_lower or "introduction" in text_lower
+        ):
+            score += 240.0
+        return (-score, index)
+
+    return [source_id for _, source_id in sorted(indexed, key=sort_key)]
 
 
 def _positional_fallback(
@@ -316,34 +403,6 @@ def _positional_fallback(
         if len(result) >= limit:
             return result
     return result
-
-
-def _detect_coverage_gaps(dom: PaperDOM, covered: set[str]) -> list[str]:
-    gaps: list[str] = []
-    for span in dom.spans:
-        if span.source_id not in covered:
-            gaps.append(span.source_id)
-    return gaps
-
-
-def _distribute_uncovered_sources(
-    tasks: list[ReadingTask], uncovered: list[str], max_per_task: int
-) -> None:
-    task_slots = {
-        task.task_id: max(0, max_per_task - len(task.target_source_ids))
-        for task in tasks
-    }
-    task_order = sorted(task_slots, key=lambda tid: task_slots[tid], reverse=True)
-    for source_id in uncovered:
-        for task_id in task_order:
-            if task_slots[task_id] <= 0:
-                continue
-            for task in tasks:
-                if task.task_id == task_id:
-                    task.target_source_ids.append(source_id)
-                    task_slots[task_id] -= 1
-                    break
-            break
 
 
 def _fallback_tasks(
@@ -392,6 +451,8 @@ def non_heading_section_span_ids(
         text = normalize_heading_text(getattr(span, "text", ""))
         if title and text == title:
             continue
+        if is_bad_candidate_text(getattr(span, "text", "")):
+            continue
         result.append(span_id)
     return result
 
@@ -401,7 +462,7 @@ def normalize_heading_text(text: str) -> str:
 
 
 def non_heading_spans(spans: list[Any], section_titles: dict[str, str]) -> list[Any]:
-    return [span for span in spans if not is_heading_span(span, section_titles)]
+    return [span for span in spans if not is_bad_candidate_span(span, section_titles)]
 
 
 def is_heading_span(span: Any, section_titles: dict[str, str]) -> bool:
@@ -410,6 +471,42 @@ def is_heading_span(span: Any, section_titles: dict[str, str]) -> bool:
     return bool(
         section_title and normalize_heading_text(getattr(span, "text", "")) == section_title
     )
+
+
+def is_bad_candidate_span(span: Any, section_titles: dict[str, str]) -> bool:
+    if is_heading_span(span, section_titles):
+        return True
+    return is_bad_candidate_text(getattr(span, "text", ""))
+
+
+def is_bad_candidate_text(text: str) -> bool:
+    cleaned = " ".join(str(text or "").split())
+    if len(cleaned) < 40:
+        return True
+    lowered = cleaned.lower()
+    if lowered.isdigit():
+        return True
+    if lowered.startswith("references") or lowered.startswith("bibliography"):
+        return True
+    if re_like_reference_entry(cleaned):
+        return True
+    metadata_markers = (
+        "corresponding author",
+        "e-mail",
+        "email",
+        "supported in part",
+        "arxiv:",
+        "university",
+    )
+    return any(marker in lowered for marker in metadata_markers)
+
+
+def re_like_reference_entry(text: str) -> bool:
+    stripped = text.strip()
+    if stripped.startswith("[") and len(stripped) > 3 and stripped[1:3].strip("]").isdigit():
+        return True
+    citation_markers = stripped.count("[")
+    return citation_markers >= 6 and len(stripped) > 600
 
 
 def required_outputs_for_task(task_type: ReadingTaskType) -> list[str]:

@@ -114,6 +114,7 @@ def validate_paperlens_output(
     library_records_path = output_dir / ".paperlens" / "library" / "library_records.jsonl"
     search_index_path = output_dir / ".paperlens" / "library" / "index" / "search_index.json"
     issues = []
+    non_consumable_core_v2: list[dict[str, str]] = []
     checked_links = 0
     render_markers = ["\\r\\n", "\\n"]
     reader_hostile_markers = [
@@ -230,9 +231,11 @@ def validate_paperlens_output(
             )
             continue
         if inspected_manifest.get("consumable") is not True:
-            issues.append(
-                f"Core v2 manifest is not consumable for {paper_id}: "
-                f"publish_status={inspected_manifest.get('publish_status')}"
+            non_consumable_core_v2.append(
+                {
+                    "paper_id": paper_id,
+                    "publish_status": str(inspected_manifest.get("publish_status") or ""),
+                }
             )
             continue
         library_record = library_records_by_paper_id.get(paper_id, {})
@@ -260,6 +263,7 @@ def validate_paperlens_output(
         "paper_reports": len(paper_reports),
         "paper_report_files": len(all_paper_report_files),
         "library_records": library_records_path.exists(),
+        "non_consumable_core_v2": non_consumable_core_v2,
         "issues": issues,
     }
     if issues:

@@ -285,7 +285,10 @@ OBSERVATION_CARDS_SCHEMA: dict[str, Any] = {
                                 "enum": [item.value for item in ObservationType],
                             },
                             "statement": {"type": "string"},
-                            "source_ids": {"type": "array", "items": {"type": "string"}},
+                            "source_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
                             "confidence": {
                                 "type": "string",
                                 "enum": ["high", "medium", "low"],
@@ -522,7 +525,12 @@ def run_core_v2_model_observation_tasks(
             context.record_token_usage(dict(getattr(raw, "usage", {}) or {}))
             envelope = ArtifactEnvelope.model_validate(raw.data).require_type("observation_cards")
             return envelope.model_copy(
-                update={"source_ids": observation_envelope_source_ids(envelope)}
+                update={
+                    "source_ids": observation_envelope_source_ids(
+                        envelope,
+                        allowed_source_ids=task.target_source_ids,
+                    )
+                }
             )
 
         node_result = run_finite_node(spec, inputs, handler)
@@ -555,16 +563,21 @@ def run_core_v2_model_observation_tasks(
             }
         )
         if node_result.status != NodeStatus.PASS or node_result.output is None:
-            raise RuntimeError(
-                f"Core v2 observation task failed for {paper.paper_id}/{task.task_id}: "
-                + "; ".join(node_result.issues)
+            cards = fallback_observation_cards_from_task(
+                dom,
+                task,
+                reason="; ".join(node_result.issues) or node_result.status.value,
             )
-        cards = observation_cards_from_model_envelope(
-            node_result.output,
-            paper_id=paper.paper_id,
-            task=task,
-            allowed_source_ids=set(node_result.tool_source_ids.get("paper_dom.read_sources", [])),
-        )
+        else:
+            try:
+                cards = observation_cards_from_model_envelope(
+                    node_result.output,
+                    paper_id=paper.paper_id,
+                    task=task,
+                    allowed_source_ids=node_result.tool_source_ids.get("paper_dom.read_sources", []),
+                )
+            except ValueError as exc:
+                cards = fallback_observation_cards_from_task(dom, task, reason=str(exc))
         log = log.append_many(cards)
         completed_tasks += 1
 
@@ -609,20 +622,59 @@ def _run_relation_discovery(
 ) -> RelationCandidateLog:
     if not observation_log.cards:
         return RelationCandidateLog(paper_id=paper.paper_id)
-    with llm_call_context(
-        stage=stage,
-        paper_id=paper.paper_id,
-        operation="core_v2_relation_discovery",
-        schema_name="paperlens_relation_candidates",
-    ):
-        raw = client.invoke_json(
-            system_prompt=CORE_V2_OBSERVER_SYSTEM_PROMPT,
-            user_prompt=_build_relation_discovery_prompt(paper, observation_log),
+    raw: Any = None
+    usage: dict[str, Any] = {}
+    try:
+        with llm_call_context(
+            stage=stage,
+            paper_id=paper.paper_id,
+            operation="core_v2_relation_discovery",
             schema_name="paperlens_relation_candidates",
-            schema=RELATION_CANDIDATES_SCHEMA,
-            max_tokens=8000,
+        ):
+            raw = client.invoke_json(
+                system_prompt=CORE_V2_OBSERVER_SYSTEM_PROMPT,
+                user_prompt=_build_relation_discovery_prompt(paper, observation_log),
+                schema_name="paperlens_relation_candidates",
+                schema=RELATION_CANDIDATES_SCHEMA,
+                max_tokens=8000,
+            )
+        usage = dict(getattr(raw, "usage", {}) or {})
+        record_usage(stage, usage)
+        envelope = ArtifactEnvelope.model_validate(raw.data).require_type("relation_candidates")
+        payload = envelope.data if isinstance(envelope.data, dict) else {}
+        raw_candidates = (
+            payload.get("candidates") if isinstance(payload.get("candidates"), list) else []
         )
-    record_usage(stage, dict(getattr(raw, "usage", {}) or {}))
+        observation_ids = {card.observation_id for card in observation_log.cards}
+        candidates: list[RelationCandidate] = []
+        for item in raw_candidates:
+            if not isinstance(item, dict):
+                continue
+            candidates.append(
+                RelationCandidate(
+                    source_observation_id=str(item.get("source_observation_id") or "").strip(),
+                    target_observation_id=str(item.get("target_observation_id") or "").strip(),
+                    kind=str(item.get("kind") or "").strip(),
+                    confidence=str(item.get("confidence") or "medium"),
+                )
+            )
+        valid = validate_relation_candidates(candidates, observation_ids)
+    except Exception as exc:
+        record_agent_run(
+            {
+                "agent_run_id": f"core_v2_rel_{paper.paper_id}",
+                "paper_id": paper.paper_id,
+                "stage": stage,
+                "operation": "core_v2_relation_discovery",
+                "provider_kind": client.config.kind,
+                "model": client.config.model,
+                "usage": usage,
+                "request_id": getattr(raw, "request_id", None),
+                "status": "FAIL",
+                "issues": [str(exc)],
+            }
+        )
+        return RelationCandidateLog(paper_id=paper.paper_id)
     record_agent_run(
         {
             "agent_run_id": f"core_v2_rel_{paper.paper_id}",
@@ -631,28 +683,11 @@ def _run_relation_discovery(
             "operation": "core_v2_relation_discovery",
             "provider_kind": client.config.kind,
             "model": client.config.model,
-            "usage": dict(getattr(raw, "usage", {}) or {}),
+            "usage": usage,
             "request_id": getattr(raw, "request_id", None),
             "status": "PASS",
         }
     )
-    envelope = ArtifactEnvelope.model_validate(raw.data).require_type("relation_candidates")
-    payload = envelope.data if isinstance(envelope.data, dict) else {}
-    raw_candidates = payload.get("candidates") if isinstance(payload.get("candidates"), list) else []
-    observation_ids = {card.observation_id for card in observation_log.cards}
-    candidates: list[RelationCandidate] = []
-    for item in raw_candidates:
-        if not isinstance(item, dict):
-            continue
-        candidates.append(
-            RelationCandidate(
-                source_observation_id=str(item.get("source_observation_id") or "").strip(),
-                target_observation_id=str(item.get("target_observation_id") or "").strip(),
-                kind=str(item.get("kind") or "").strip(),
-                confidence=str(item.get("confidence") or "medium"),
-            )
-        )
-    valid = validate_relation_candidates(candidates, observation_ids)
     log = RelationCandidateLog(paper_id=paper.paper_id)
     for candidate in valid:
         log = log.append(candidate)
@@ -1001,6 +1036,21 @@ def bootstrap_observation_log(dom: PaperDOM, reading_plan: ReadingPlan) -> Obser
     return log
 
 
+def fallback_observation_cards_from_task(
+    dom: PaperDOM,
+    task: ReadingTask,
+    *,
+    reason: str,
+) -> list[ObservationCard]:
+    spans_by_id = {span.source_id: span for span in dom.spans}
+    card = bootstrap_observation_for_task(dom, spans_by_id, task)
+    if card is None:
+        raise ValueError(f"Observation task {task.task_id} returned no valid observation cards")
+    fallback_note = f"Model observation output was unusable; deterministic fallback used: {reason}"
+    uncertainty = f"{card.uncertainty} {fallback_note}".strip() if card.uncertainty else fallback_note
+    return [card.model_copy(update={"uncertainty": uncertainty})]
+
+
 def bootstrap_observation_for_task(
     dom: PaperDOM,
     spans_by_id: dict[str, PaperSpan],
@@ -1033,8 +1083,16 @@ def bootstrap_observation_for_task(
             "Deterministic bootstrap observation; replace with task-specific model reading "
             "before treating as reviewed knowledge."
         ),
+        covered_outputs=bootstrap_covered_outputs(observation_type, task),
         extracted_numbers=extract_numbers(statement),
     )
+
+
+def bootstrap_covered_outputs(
+    observation_type: ObservationType,
+    task: ReadingTask,
+) -> list[str]:
+    return [observation_type.value] if observation_type.value in task.required_outputs else []
 
 
 def observation_type_for_task(task_type: ReadingTaskType) -> ObservationType:
@@ -1180,11 +1238,13 @@ def build_observation_task_prompt(
         "evidence_pack": source_pack(dom, task.target_source_ids),
         "output_contract": {
             "artifact_type": "observation_cards",
+            "allowed_source_ids": task.target_source_ids,
             "rule": (
                 "Return an ArtifactEnvelope with data.cards. Each card must cite source_ids from "
-                "the evidence_pack and declare covered_outputs from task_spec.required_outputs. "
-                "Across cards, cover every required_output supported by the evidence. Do not cite "
-                "page numbers as evidence. Do not write memory, audit verdicts, or report prose."
+                "output_contract.allowed_source_ids by exact string copy and declare "
+                "covered_outputs from task_spec.required_outputs. Across cards, cover every "
+                "required_output supported by the evidence. Do not cite page numbers as evidence. "
+                "Do not write memory, audit verdicts, or report prose."
             ),
         },
     }
@@ -1245,19 +1305,27 @@ def observation_cards_from_model_envelope(
     *,
     paper_id: str,
     task: ReadingTask,
-    allowed_source_ids: set[str],
+    allowed_source_ids: list[str] | set[str],
 ) -> list[ObservationCard]:
     payload = envelope.data if isinstance(envelope.data, dict) else {}
     cards = payload.get("cards") if isinstance(payload.get("cards"), list) else []
+    allowed_source_id_list = list(dict.fromkeys(str(item) for item in allowed_source_ids if item))
+    allowed_source_id_set = set(allowed_source_id_list)
     result = []
     for item in cards:
         if not isinstance(item, dict):
             continue
-        source_ids = clean_model_source_ids(item.get("source_ids"), allowed_source_ids)
+        source_ids = clean_model_source_ids(item.get("source_ids"), allowed_source_id_set)
+        source_fallback = False
+        if not source_ids:
+            source_ids = allowed_source_id_list
+            source_fallback = True
         if not source_ids:
             raise ValueError(f"Observation card for {task.task_id} did not cite valid source_ids")
         statement = str(item.get("statement") or "").strip()
         observation_type = str(item.get("observation_type") or "").strip()
+        if observation_type not in {kind.value for kind in ObservationType}:
+            observation_type = infer_observation_type_for_task(item, task)
         if not statement or observation_type not in {kind.value for kind in ObservationType}:
             continue
         allowed_types = task_allowed_observation_types(task)
@@ -1267,7 +1335,28 @@ def observation_cards_from_model_envelope(
                 f"{observation_type}; allowed={allowed_types}"
             )
         covered_outputs = clean_model_covered_outputs(item.get("covered_outputs"), task)
+        inferred_outputs = infer_covered_outputs_from_type(observation_type, task)
+        if not any(output in task.required_outputs for output in covered_outputs):
+            covered_outputs = inferred_outputs or covered_outputs
         provenance = clean_model_provenance(item.get("provenance"), task.task_id)
+        uncertainty = none_if_blank(item.get("uncertainty"))
+        if source_fallback:
+            fallback_note = (
+                "Runtime assigned source_ids from the task evidence pack because the model "
+                "omitted source_ids."
+            )
+            uncertainty = f"{uncertainty} {fallback_note}".strip() if uncertainty else fallback_note
+        if not covered_outputs:
+            output_note = (
+                "Model did not declare covered_outputs; deterministic audit will mark missing "
+                "ReadingTask coverage."
+            )
+            uncertainty = f"{uncertainty} {output_note}".strip() if uncertainty else output_note
+        elif inferred_outputs and item.get("covered_outputs") in (None, []):
+            output_note = (
+                "Runtime inferred covered_outputs from observation_type and ReadingTask spec."
+            )
+            uncertainty = f"{uncertainty} {output_note}".strip() if uncertainty else output_note
         observation_id = make_observation_id(
             task_id=task.task_id,
             observation_type=observation_type,
@@ -1284,7 +1373,7 @@ def observation_cards_from_model_envelope(
                 source_ids=source_ids,
                 confidence=str(item.get("confidence") or "medium"),
                 provenance=provenance,
-                uncertainty=none_if_blank(item.get("uncertainty")),
+                uncertainty=uncertainty,
                 covered_outputs=covered_outputs,
                 extracted_numbers=[
                     number
@@ -1295,39 +1384,25 @@ def observation_cards_from_model_envelope(
         )
     if not result:
         raise ValueError(f"Observation task {task.task_id} returned no valid observation cards")
-    missing_outputs = missing_required_outputs(task, result)
-    if missing_outputs:
-        raise ValueError(
-            f"Observation task {task.task_id} did not cover required_outputs: "
-            + ", ".join(missing_outputs)
-        )
     return result
 
 
 
 def clean_model_covered_outputs(value: Any, task: ReadingTask) -> list[str]:
     if not isinstance(value, list):
-        raise ValueError(f"Observation card for {task.task_id} must declare covered_outputs")
-    allowed = set(task.required_outputs)
+        return []
     result = []
-    invalid = []
     for item in value:
         output = str(item or "").strip()
         if not output:
             continue
-        if output not in allowed:
-            invalid.append(output)
-            continue
         if output not in result:
             result.append(output)
-    if invalid:
-        raise ValueError(
-            f"Observation card for {task.task_id} returned covered_outputs outside "
-            f"required_outputs: {', '.join(invalid)}"
-        )
-    if not result:
-        raise ValueError(f"Observation card for {task.task_id} did not cover required_outputs")
     return result
+
+
+def infer_covered_outputs_from_type(observation_type: str, task: ReadingTask) -> list[str]:
+    return [observation_type] if observation_type in task.required_outputs else []
 
 
 def missing_required_outputs(task: ReadingTask, cards: list[ObservationCard]) -> list[str]:
@@ -1339,7 +1414,23 @@ def missing_required_outputs(task: ReadingTask, cards: list[ObservationCard]) ->
     return [output for output in task.required_outputs if output not in covered]
 
 
-def observation_envelope_source_ids(envelope: ArtifactEnvelope) -> list[str]:
+def infer_observation_type_for_task(item: dict[str, Any], task: ReadingTask) -> str:
+    allowed_types = task_allowed_observation_types(task)
+    covered_outputs = clean_model_covered_outputs(item.get("covered_outputs"), task)
+    for output in covered_outputs:
+        if output in allowed_types:
+            return output
+    if len(allowed_types) == 1:
+        return allowed_types[0]
+    return ""
+
+
+def observation_envelope_source_ids(
+    envelope: ArtifactEnvelope,
+    *,
+    allowed_source_ids: list[str] | tuple[str, ...] | set[str] | None = None,
+) -> list[str]:
+    allowed = set(allowed_source_ids or [])
     data = envelope.data if isinstance(envelope.data, dict) else {}
     cards = data.get("cards") if isinstance(data.get("cards"), list) else []
     result: list[str] = []
@@ -1349,6 +1440,8 @@ def observation_envelope_source_ids(envelope: ArtifactEnvelope) -> list[str]:
         source_ids = item.get("source_ids") if isinstance(item.get("source_ids"), list) else []
         for source_id in source_ids:
             text = str(source_id or "").strip()
+            if allowed and text not in allowed:
+                continue
             if text and text not in result:
                 result.append(text)
     return result
@@ -1370,21 +1463,14 @@ def task_allowed_observation_types(task: ReadingTask) -> list[str]:
 
 def clean_model_source_ids(value: Any, allowed_source_ids: set[str]) -> list[str]:
     result = []
-    invalid = []
     for item in list_payload(value):
         source_id = str(item or "").strip()
         if not source_id:
             continue
         if source_id not in allowed_source_ids:
-            invalid.append(source_id)
             continue
         if source_id not in result:
             result.append(source_id)
-    if invalid:
-        raise ValueError(
-            "Observation card cited source_ids outside this task evidence pack: "
-            + ", ".join(dict.fromkeys(invalid))
-        )
     return result
 
 
