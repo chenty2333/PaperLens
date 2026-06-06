@@ -145,6 +145,14 @@ def enrich_row_with_core_v2_graph(*, output_dir: Path, row: dict[str, Any]) -> d
     return enriched
 
 
+def core_graph_summary_is_readable(summary: dict[str, Any]) -> bool:
+    quality = dict_value(summary.get("quality"))
+    return (
+        summary.get("graph_access") == "readable"
+        and quality.get("artifact_set_consumable") is True
+    )
+
+
 def rebuild_library_from_output(output_dir: Path) -> list[Path]:
     data_dir = paperlens_data_dir(output_dir)
     seen_paper_ids: set[str] = set()
@@ -319,6 +327,7 @@ def build_library_record(row: dict[str, Any]) -> dict[str, Any]:
     report_audit = dict_value(row.get("report_audit"))
     graph_summary = dict_value(row.get("core_v2_graph_summary"))
     audit_trail = dict_value(v3_memory.get("audit_trail"))
+    core_graph_primary = core_graph_summary_is_readable(graph_summary)
 
     paper_id = string_or_empty(paper.get("paper_id")) or string_or_empty(row.get("paper_id"))
     title = (
@@ -333,7 +342,12 @@ def build_library_record(row: dict[str, Any]) -> dict[str, Any]:
         or string_or_none(model_report.get("grade"))
         or "HOLD"
     )
-    brief = (
+    graph_brief = (
+        first_graph_label(graph_summary, "problem_nodes", "claim_nodes")
+        if core_graph_primary
+        else ""
+    )
+    legacy_brief = (
         string_or_none(model_report.get("one_line_reason"))
         or string_or_none(model_report.get("core_takeaway"))
         or first_v3_core_abstraction(v3_memory)
@@ -342,26 +356,51 @@ def build_library_record(row: dict[str, Any]) -> dict[str, Any]:
         or first_graph_label(graph_summary, "problem_nodes", "claim_nodes")
         or ""
     )
-    concepts = normalize_concepts(v3_memory.get("concepts")) or normalize_graph_concepts(
-        graph_summary
-    )
+    brief = graph_brief or legacy_brief
+    graph_concepts = normalize_graph_concepts(graph_summary) if core_graph_primary else []
+    concepts = graph_concepts or normalize_concepts(v3_memory.get("concepts"))
     conceptual_bridge = normalize_conceptual_bridge(v3_memory.get("conceptual_bridge"))
-    claims = normalize_claims(v3_memory.get("claims"), card.get("contribution_claims"))
-    if not claims:
+    if core_graph_primary:
         claims = normalize_graph_claims(graph_summary)
-    mechanisms = (
-        normalized_v3_mechanisms(v3_memory)
-        or normalized_string_list(card.get("mechanisms"))
-        or graph_node_labels(graph_summary, "mechanism_nodes", "implementation_nodes")
-    )
-    evidence_model = (
-        normalized_v3_evaluation(v3_memory)
-        or normalized_string_list(card.get("evaluation"))
-        or graph_node_labels(graph_summary, "evaluation_nodes", "result_nodes")
-    )
-    limits = normalized_string_list(
-        v3_memory.get("limitations") or card.get("limitations")
-    ) or graph_node_labels(graph_summary, "limitation_nodes")
+        mechanisms = graph_node_labels(
+            graph_summary, "mechanism_nodes", "implementation_nodes"
+        )
+        evidence_model = graph_node_labels(graph_summary, "evaluation_nodes", "result_nodes")
+        limits = graph_node_labels(graph_summary, "limitation_nodes")
+        evidence_items = normalize_graph_evidence(graph_summary)
+        problem = first_graph_label(graph_summary, "problem_nodes")
+        core_idea = graph_brief or brief
+        value = brief
+    else:
+        claims = normalize_claims(v3_memory.get("claims"), card.get("contribution_claims"))
+        if not claims:
+            claims = normalize_graph_claims(graph_summary)
+        mechanisms = (
+            normalized_v3_mechanisms(v3_memory)
+            or normalized_string_list(card.get("mechanisms"))
+            or graph_node_labels(graph_summary, "mechanism_nodes", "implementation_nodes")
+        )
+        evidence_model = (
+            normalized_v3_evaluation(v3_memory)
+            or normalized_string_list(card.get("evaluation"))
+            or graph_node_labels(graph_summary, "evaluation_nodes", "result_nodes")
+        )
+        limits = normalized_string_list(
+            v3_memory.get("limitations") or card.get("limitations")
+        ) or graph_node_labels(graph_summary, "limitation_nodes")
+        evidence_items = (
+            normalize_memory_evidence(v3_memory.get("evidence"))
+            or normalize_graph_evidence(graph_summary)
+        )
+        problem = string_or_none(skim.get("problem")) or ""
+        core_idea = (
+            first_v3_core_abstraction(v3_memory)
+            or string_or_none(dict_value(v3_memory.get("problem_frame")).get("problem"))
+            or string_or_none(skim.get("problem"))
+            or first_graph_label(graph_summary, "problem_nodes", "claim_nodes")
+            or brief
+        )
+        value = string_or_none(model_report.get("core_takeaway")) or brief
     questions = normalized_string_list(v3_memory.get("open_questions"))
     uncertainties = normalized_string_list(
         dict_value(audit_trail.get("memory_audit")).get("repair_instructions")
@@ -376,21 +415,14 @@ def build_library_record(row: dict[str, Any]) -> dict[str, Any]:
     tags = merge_unique(tags, graph_summary_tags(graph_summary))[:10]
     memory = {
         "brief": brief,
-        "core_idea": (
-            first_v3_core_abstraction(v3_memory)
-            or string_or_none(dict_value(v3_memory.get("problem_frame")).get("problem"))
-            or string_or_none(skim.get("problem"))
-            or first_graph_label(graph_summary, "problem_nodes", "claim_nodes")
-            or brief
-        ),
-        "problem": string_or_none(skim.get("problem")) or "",
+        "core_idea": core_idea,
+        "problem": problem,
         "mechanism": join_sentences(mechanisms),
         "mechanism_steps": mechanisms,
         "evidence_summary": join_sentences(evidence_model),
-        "evidence_items": normalize_memory_evidence(v3_memory.get("evidence"))
-        or normalize_graph_evidence(graph_summary),
+        "evidence_items": evidence_items,
         "limits": limits,
-        "value": string_or_none(model_report.get("core_takeaway")) or brief,
+        "value": value,
         "concepts": concepts,
         "conceptual_bridge": conceptual_bridge,
         "claims": claims,
@@ -400,7 +432,7 @@ def build_library_record(row: dict[str, Any]) -> dict[str, Any]:
         "reader_takeaways": reader_takeaways(
             model_report=model_report,
             brief=brief,
-            core_idea=(first_v3_core_abstraction(v3_memory) or brief),
+            core_idea=core_idea,
             claims=claims,
         ),
     }

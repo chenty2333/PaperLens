@@ -16,6 +16,7 @@ from paperlens_core.agent_loop import PaperToolRegistry
 from paperlens_core.dom import PaperDOM, PaperSection, PaperSpan, build_paper_dom_from_layout
 from paperlens_core.graph import GraphEdge, GraphNode, graph_from_observations
 from paperlens_core.library import (
+    build_library_record,
     doctor_library,
     rebuild_library_from_output,
     read_library_records,
@@ -3370,6 +3371,93 @@ def test_core_v2_qa_context_reports_missing_claim_graph_artifact(tmp_path):
     assert "missing:claim_graph.v1.json" in context["quality"]["issues"]
     assert context["matches"] == []
     assert core_v2_context_priority(context) == "unavailable:missing_core_v2_claim_graph"
+
+
+def test_library_record_prefers_readable_core_graph_over_legacy_memory():
+    record = build_library_record(
+        {
+            "paper": {"paper_id": "p_test", "canonical_title": "Test Paper"},
+            "decision": {"paper_id": "p_test", "class_label": "KEEP"},
+            "paper_memory_v3": {
+                "claims": [{"claim": "Legacy memory claim should not be indexed."}],
+                "mechanism": {
+                    "overview": "Legacy memory mechanism should not be indexed.",
+                    "steps": [{"text": "Legacy memory step should not be indexed."}],
+                },
+                "evaluation": {
+                    "summary": "Legacy memory evaluation should not be indexed.",
+                    "items": [{"text": "Legacy memory result should not be indexed."}],
+                },
+                "limitations": ["Legacy memory limit should not be indexed."],
+                "evidence": [
+                    {
+                        "claim": "Legacy memory evidence should not be indexed.",
+                        "quote": "legacy quote",
+                        "page_no": 9,
+                    }
+                ],
+            },
+            "core_v2_graph_summary": {
+                "schema_version": "paperlens.graph_library_summary.v1",
+                "graph_access": "readable",
+                "quality": {
+                    "artifact_set_consumable": True,
+                    "publish_status": PublishStatus.REVIEWED,
+                },
+                "problem_nodes": [
+                    {
+                        "node_id": "problem:obs_problem",
+                        "kind": "problem",
+                        "label": "Graph problem statement.",
+                        "source_ids": ["span:p_test:p1:1"],
+                        "pages": [1],
+                        "confidence": "high",
+                        "evidence_samples": [
+                            {
+                                "source_id": "span:p_test:p1:1",
+                                "page_no": 1,
+                                "text": "Graph problem evidence.",
+                            }
+                        ],
+                    }
+                ],
+                "claim_nodes": [
+                    {
+                        "node_id": "claim:obs_claim",
+                        "kind": "claim",
+                        "label": "Graph claim should be indexed.",
+                        "source_ids": ["span:p_test:p2:1"],
+                        "pages": [2],
+                        "confidence": "high",
+                        "evidence_samples": [
+                            {
+                                "source_id": "span:p_test:p2:1",
+                                "page_no": 2,
+                                "text": "Graph claim evidence.",
+                            }
+                        ],
+                    }
+                ],
+                "method_family": ["Graph method family"],
+                "mechanism_nodes": [{"label": "Graph mechanism should be indexed."}],
+                "evaluation_nodes": [{"label": "Graph evaluation should be indexed."}],
+                "result_nodes": [{"label": "Graph result should be indexed."}],
+                "limitation_nodes": [{"label": "Graph limit should be indexed."}],
+            },
+        }
+    )
+
+    assert record["memory"]["brief"] == "Graph problem statement."
+    assert record["memory"]["claims"][0]["claim"] == "Graph claim should be indexed."
+    assert record["memory"]["mechanism_steps"] == ["Graph mechanism should be indexed."]
+    assert "Graph evaluation should be indexed" in record["memory"]["evidence_summary"]
+    assert "Graph result should be indexed" in record["memory"]["evidence_summary"]
+    assert record["memory"]["limits"] == ["Graph limit should be indexed."]
+    assert record["memory"]["evidence_items"][0]["source_id"] == "span:p_test:p1:1"
+    search_text = record["search_text"]
+    assert "Graph claim should be indexed." in search_text
+    assert "Legacy memory claim should not be indexed." not in search_text
+    assert "Legacy memory mechanism should not be indexed." not in search_text
 
 
 def test_library_rebuild_indexes_core_v2_claim_graph_without_memory_v3(tmp_path):
