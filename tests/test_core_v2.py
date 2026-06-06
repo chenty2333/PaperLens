@@ -2442,6 +2442,74 @@ def test_core_v2_qa_context_returns_no_matches_for_unrelated_question(tmp_path):
     assert "p_test.md" not in offline["answer_markdown"]
 
 
+def test_core_v2_qa_context_reaudits_stale_reviewed_graph_with_current_reading_gaps(tmp_path):
+    output_dir = tmp_path / "out"
+    data_dir = output_dir / ".paperlens" / "data"
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    layout = {
+        "pages": [
+            {
+                "page_no": 1,
+                "text": "Abstract\n\nWe propose a block table method for serving.",
+                "section_candidates": [{"title": "Abstract", "level": 1}],
+            }
+        ]
+    }
+    dom = build_paper_dom_from_layout(
+        paper_id=paper.paper_id,
+        title=paper.canonical_title,
+        layout=layout,
+    )
+    claim_span = next(span for span in dom.spans if "block table method" in span.text)
+    narrow_plan = reading_plan_subset(dom, ReadingTaskType.CLAIM_INVENTORY)
+    full_plan = build_initial_reading_plan(dom)
+    claim_task = reading_task(narrow_plan, ReadingTaskType.CLAIM_INVENTORY)
+    write_core_v2_from_observation_log(
+        data_dir=data_dir,
+        paper=paper,
+        dom=dom,
+        reading_plan=narrow_plan,
+        observation_log=ObservationLog(paper_id="p_test").append(
+            ObservationCard(
+                observation_id="obs_claim",
+                paper_id="p_test",
+                task_id=claim_task.task_id,
+                observation_type=ObservationType.CLAIM,
+                statement="The paper proposes a block table method.",
+                source_ids=[claim_span.source_id],
+                covered_outputs=claim_task.required_outputs,
+            )
+        ),
+        producer="unit_test",
+    )
+    root = data_dir / "core" / "v2" / "p_test"
+    write_typed_artifact(
+        root / "reading_plan.v1.json",
+        artifact_type="reading_plan",
+        data=full_plan.model_dump(),
+        producer="unit_test_stale_plan",
+        metadata={"paper_id": paper.paper_id},
+    )
+
+    context = load_core_v2_qa_context(
+        output_dir=output_dir,
+        paper_id="p_test",
+        question="block table method 是什么？",
+    )
+
+    assert context["retrieval_policy"] == "not_reviewed_by_current_graph_audit"
+    assert context["quality"]["artifact_publish_status"] == PublishStatus.REVIEWED
+    assert context["quality"]["current_audit_publish_status"] == PublishStatus.DRAFT_WEAK
+    assert "missing_reading_required_output" in context["quality"]["current_audit_issue_codes"]
+    assert context["matches"] == []
+
+
 def test_core_v2_qa_grounding_filters_unknown_source_ids_and_claims():
     core_context = {
         "retrieval_policy": "claim_graph_nodes_with_paper_dom_source_ids",

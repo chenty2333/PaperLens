@@ -6,6 +6,12 @@ import re
 from pathlib import Path
 from typing import Any
 
+from paperlens_core.audit import (
+    audit_claim_graph,
+    audit_reading_required_outputs,
+    publish_status_from_findings,
+)
+from paperlens_core.audit.findings import AuditFinding
 from paperlens_core.agent_loop import AgentLoop, PaperToolRegistry
 from paperlens_core.agents.llm import JsonLlmClient
 from paperlens_core.config import CoreConfig
@@ -23,6 +29,7 @@ from paperlens_core.runtime import PaperLensRuntime
 from paperlens_core.runtime import context_pack_prompt
 from paperlens_core.workflow.core_v2 import (
     load_core_v2_dom_and_graph,
+    load_core_v2_dom_and_plan,
 )
 
 
@@ -316,6 +323,35 @@ def load_core_v2_qa_context(
             "quality": core_v2_quality_context(core_manifest),
             "matches": [],
         }
+    try:
+        _, reading_plan = load_core_v2_dom_and_plan(data_dir, paper_id)
+    except (FileNotFoundError, ValueError):
+        reading_plan = None
+    current_audit_findings = [
+        *audit_claim_graph(graph, dom),
+        *audit_reading_required_outputs(graph, reading_plan),
+    ]
+    current_publish_status = publish_status_from_findings(current_audit_findings).value
+    quality = core_v2_quality_context(
+        core_manifest,
+        current_publish_status=current_publish_status,
+        current_audit_findings=current_audit_findings,
+    )
+    if current_publish_status not in CORE_V2_CONSUMABLE_STATUSES:
+        return {
+            "schema_version": CORE_V2_QA_CONTEXT_VERSION,
+            "paper_id": paper_id,
+            "question": question,
+            "question_type": resolved_question_type,
+            "retrieval_intent": retrieval_intent,
+            "retrieval_policy": core_v2_current_non_consumable_policy(current_publish_status),
+            "answer_source_policy": (
+                "Core v2 ClaimGraph failed current deterministic audit; do not use it as "
+                "paper-claim evidence."
+            ),
+            "quality": quality,
+            "matches": [],
+        }
     matches = search_core_v2_graph(
         dom=dom,
         graph=graph,
@@ -334,16 +370,29 @@ def load_core_v2_qa_context(
             "Use graph node IDs and PaperDOM source IDs for paper claims; report Markdown is not "
             "evidence."
         ),
-        "quality": core_v2_quality_context(core_manifest),
+        "quality": quality,
         "matches": matches,
     }
 
 
-def core_v2_quality_context(core_manifest: dict[str, Any]) -> dict[str, Any]:
+def core_v2_quality_context(
+    core_manifest: dict[str, Any],
+    *,
+    current_publish_status: str | None = None,
+    current_audit_findings: list[AuditFinding] | None = None,
+) -> dict[str, Any]:
     quality_metrics = core_manifest.get("required_artifacts", {}).get("quality_metrics", {})
+    artifact_publish_status = core_manifest.get("publish_status")
+    effective_publish_status = current_publish_status or artifact_publish_status
+    findings = current_audit_findings or []
     return {
         "status": core_manifest.get("status"),
-        "publish_status": core_manifest.get("publish_status"),
+        "publish_status": effective_publish_status,
+        "artifact_publish_status": artifact_publish_status,
+        "current_audit_publish_status": current_publish_status,
+        "current_audit_error_count": audit_finding_count(findings, severity="ERROR"),
+        "current_audit_warning_count": audit_finding_count(findings, severity="WARNING"),
+        "current_audit_issue_codes": sorted({finding.code for finding in findings}),
         "consumable": core_manifest.get("consumable"),
         "issues": core_manifest.get("issues", []),
         "quality_metrics_artifact": quality_metrics,
@@ -360,6 +409,16 @@ def core_v2_non_consumable_policy(core_manifest: dict[str, Any]) -> str:
     if publish_status == "BLOCKED":
         return "blocked_by_core_v2_audit"
     return "not_reviewed_by_core_v2_audit"
+
+
+def core_v2_current_non_consumable_policy(current_publish_status: str) -> str:
+    if current_publish_status == "BLOCKED":
+        return "blocked_by_current_graph_audit"
+    return "not_reviewed_by_current_graph_audit"
+
+
+def audit_finding_count(findings: list[AuditFinding], *, severity: str) -> int:
+    return sum(1 for finding in findings if finding.severity == severity)
 
 
 def qa_context_objective(core_v2_context: dict[str, Any]) -> str:
