@@ -4,9 +4,15 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from paperlens_core.core_manifest import inspect_core_v2_artifact_root
+from paperlens_core.config import CoreConfig
+from paperlens_core.events import EventWriter, write_json
+from paperlens_core.quality_snapshot import write_core_quality_snapshot
+from paperlens_core.report import classification_counts, paper_report_filename
+from paperlens_core.schemas import ClassificationDecision, PaperRecord
+from paperlens_core.workflow.utils import dict_value
 
 
 CORE_MANIFEST_CONSISTENCY_KEYS = [
@@ -23,6 +29,78 @@ CORE_MANIFEST_CONSISTENCY_KEYS = [
     "required_artifacts",
     "issues",
 ]
+
+
+class ManifestWorkflowContext(Protocol):
+    input_dir: Path
+    output_dir: Path
+    data_dir: Path
+    config: CoreConfig
+    events: EventWriter
+    papers: list[PaperRecord]
+    classifications: list[ClassificationDecision]
+    budget: Any
+
+    def checkpoint(self, stage: str) -> None: ...
+
+
+def run_manifest_stage(workflow: ManifestWorkflowContext) -> dict[str, Any]:
+    stage = "stage_17_manifest"
+    workflow.checkpoint(stage)
+    workflow.events.stage_started(stage, "Writing manifest")
+    output_validation = validate_paperlens_output(
+        workflow.output_dir,
+        expected_report_names={paper_report_filename(paper) for paper in workflow.papers},
+        expected_paper_ids={paper.paper_id for paper in workflow.papers},
+    )
+    model_call_summary = summarize_model_calls(workflow.data_dir / "model_calls.jsonl")
+    write_json(workflow.data_dir / "model_call_summary.json", model_call_summary)
+    core_quality_snapshot_path = write_core_quality_snapshot(workflow.output_dir)
+    core_quality_snapshot_payload = json.loads(
+        core_quality_snapshot_path.read_text(encoding="utf-8")
+    )
+    core_quality_snapshot_data = dict_value(core_quality_snapshot_payload.get("data"))
+    manifest = {
+        "run_id": workflow.events.run_id,
+        "input_dir": str(workflow.input_dir),
+        "output_dir": str(workflow.output_dir),
+        "paper_count": len(workflow.papers),
+        "mode": "offline_debug" if workflow.config.offline_debug else "agentic",
+        "read_mode": workflow.config.read_mode,
+        "topic_comparison_enabled": workflow.config.topic_comparison_enabled,
+        "output_language": workflow.config.output_language,
+        "classification_counts": classification_counts(workflow.classifications),
+        "artifacts": {
+            "main_report": "PaperLens.md",
+            "paper_reports": "papers/",
+            "internal_state": ".paperlens/state.sqlite",
+            "page_images": ".paperlens/pages/",
+            "figure_crops": ".paperlens/figures/",
+            "library_records": ".paperlens/library/library_records.jsonl",
+            "core_v2": ".paperlens/data/core/v2/",
+            "core_quality_snapshot": ".paperlens/data/core_quality_snapshot.v1.json",
+            "library_index": ".paperlens/library/index/search_index.json",
+            "data": ".paperlens/data/",
+            "model_call_summary": ".paperlens/data/model_call_summary.json",
+            "output_validation": output_validation,
+        },
+        "model_calls": model_call_summary,
+        "core_quality": {
+            "paper_count": core_quality_snapshot_data.get("paper_count"),
+            "aggregate": dict_value(core_quality_snapshot_data.get("aggregate")),
+        },
+        "budget": workflow.budget.public_dict(),
+    }
+    write_json(
+        workflow.data_dir / "run.json",
+        {
+            "status": "completed",
+            "config": workflow.config.public_dict(),
+            "manifest": manifest,
+        },
+    )
+    workflow.events.stage_completed(stage, "Manifest written", manifest)
+    return manifest
 
 
 def validate_paperlens_output(

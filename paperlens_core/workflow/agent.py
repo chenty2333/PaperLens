@@ -13,11 +13,6 @@ from paperlens_core.config import CoreConfig
 from paperlens_core.control import ControlState
 from paperlens_core.db import ArtifactDb
 from paperlens_core.events import EventWriter, write_json
-from paperlens_core.quality_snapshot import write_core_quality_snapshot
-from paperlens_core.report import (
-    classification_counts,
-    paper_report_filename,
-)
 from paperlens_core.runtime import (
     llm_cache_path,
     read_llm_cache,
@@ -29,12 +24,9 @@ from paperlens_core.schemas import (
     PaperRecord,
     SkimCard,
 )
-from paperlens_core.workflow.export import write_final_report_bundle
+from paperlens_core.workflow.export import run_export_stage
 from paperlens_core.state import transition_state
-from paperlens_core.workflow.manifest import (
-    summarize_model_calls,
-    validate_paperlens_output,
-)
+from paperlens_core.workflow.manifest import run_manifest_stage
 from paperlens_core.workflow.stages import (
     WORKFLOW_STAGE_ORDER,
     normalize_workflow_stage,
@@ -51,10 +43,7 @@ from paperlens_core.workflow.core_v2 import (
     run_core_v2_observation_stage,
 )
 from paperlens_core.workflow.visual import run_vlm_page_mode as run_visual_vlm_page_mode
-from paperlens_core.workflow.utils import (
-    dict_value,
-    utc_timestamp,
-)
+from paperlens_core.workflow.utils import utc_timestamp
 
 
 class PaperLensWorkflow:
@@ -374,86 +363,7 @@ class PaperLensWorkflow:
         run_core_v2_audit_stage(self)
 
     def stage_15_export(self) -> list[Path]:
-        stage = "stage_15_export"
-        self.checkpoint(stage)
-        self.events.stage_started(stage, "Writing final reading reports")
-        active_ids = {paper.paper_id for paper in self.papers}
-        report_paths = write_final_report_bundle(
-            output_dir=self.output_dir,
-            data_dir=self.data_dir,
-            papers=self.papers,
-            skim_cards=self.skim_cards,
-            decisions=self.classifications,
-            review_items=[
-                item for item in self.db.list_review_items() if item.paper_id in active_ids
-            ],
-            budget=self.budget.public_dict(),
-            budget_provider=self.budget.public_dict,
-            config=self.config.public_dict(),
-            topic=self.config.topic,
-            idea=self.config.idea,
-        )
-        self.events.stage_completed(
-            stage,
-            "Final reading reports written",
-            {"reports": [str(path) for path in report_paths]},
-        )
-        return report_paths
+        return run_export_stage(self)
 
     def stage_17_manifest(self) -> dict[str, Any]:
-        stage = "stage_17_manifest"
-        self.checkpoint(stage)
-        self.events.stage_started(stage, "Writing manifest")
-        output_validation = validate_paperlens_output(
-            self.output_dir,
-            expected_report_names={paper_report_filename(paper) for paper in self.papers},
-            expected_paper_ids={paper.paper_id for paper in self.papers},
-        )
-        model_call_summary = summarize_model_calls(self.data_dir / "model_calls.jsonl")
-        write_json(self.data_dir / "model_call_summary.json", model_call_summary)
-        core_quality_snapshot_path = write_core_quality_snapshot(self.output_dir)
-        core_quality_snapshot_payload = json.loads(
-            core_quality_snapshot_path.read_text(encoding="utf-8")
-        )
-        core_quality_snapshot_data = dict_value(core_quality_snapshot_payload.get("data"))
-        manifest = {
-            "run_id": self.events.run_id,
-            "input_dir": str(self.input_dir),
-            "output_dir": str(self.output_dir),
-            "paper_count": len(self.papers),
-            "mode": "offline_debug" if self.config.offline_debug else "agentic",
-            "read_mode": self.config.read_mode,
-            "topic_comparison_enabled": self.config.topic_comparison_enabled,
-            "output_language": self.config.output_language,
-            "classification_counts": classification_counts(self.classifications),
-            "artifacts": {
-                "main_report": "PaperLens.md",
-                "paper_reports": "papers/",
-                "internal_state": ".paperlens/state.sqlite",
-                "page_images": ".paperlens/pages/",
-                "figure_crops": ".paperlens/figures/",
-                "library_records": ".paperlens/library/library_records.jsonl",
-                "core_v2": ".paperlens/data/core/v2/",
-                "core_quality_snapshot": ".paperlens/data/core_quality_snapshot.v1.json",
-                "library_index": ".paperlens/library/index/search_index.json",
-                "data": ".paperlens/data/",
-                "model_call_summary": ".paperlens/data/model_call_summary.json",
-                "output_validation": output_validation,
-            },
-            "model_calls": model_call_summary,
-            "core_quality": {
-                "paper_count": core_quality_snapshot_data.get("paper_count"),
-                "aggregate": dict_value(core_quality_snapshot_data.get("aggregate")),
-            },
-            "budget": self.budget.public_dict(),
-        }
-        write_json(
-            self.data_dir / "run.json",
-            {
-                "status": "completed",
-                "config": self.config.public_dict(),
-                "manifest": manifest,
-            },
-        )
-        self.events.stage_completed(stage, "Manifest written", manifest)
-        return manifest
+        return run_manifest_stage(self)

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
+from paperlens_core.config import CoreConfig
+from paperlens_core.db import ArtifactDb
+from paperlens_core.events import EventWriter
 from paperlens_core.library import write_paperlens_library
 from paperlens_core.library_graph import read_core_v2_graph_summary
 from paperlens_core.report import (
@@ -12,6 +15,48 @@ from paperlens_core.report import (
     render_paperlens_report,
 )
 from paperlens_core.schemas import ClassificationDecision, PaperRecord, ReviewItem, SkimCard
+
+
+class ExportWorkflowContext(Protocol):
+    output_dir: Path
+    data_dir: Path
+    config: CoreConfig
+    events: EventWriter
+    db: ArtifactDb
+    papers: list[PaperRecord]
+    skim_cards: list[SkimCard]
+    classifications: list[ClassificationDecision]
+    budget: Any
+
+    def checkpoint(self, stage: str) -> None: ...
+
+
+def run_export_stage(workflow: ExportWorkflowContext) -> list[Path]:
+    stage = "stage_15_export"
+    workflow.checkpoint(stage)
+    workflow.events.stage_started(stage, "Writing final reading reports")
+    active_ids = {paper.paper_id for paper in workflow.papers}
+    report_paths = write_final_report_bundle(
+        output_dir=workflow.output_dir,
+        data_dir=workflow.data_dir,
+        papers=workflow.papers,
+        skim_cards=workflow.skim_cards,
+        decisions=workflow.classifications,
+        review_items=[
+            item for item in workflow.db.list_review_items() if item.paper_id in active_ids
+        ],
+        budget=workflow.budget.public_dict(),
+        budget_provider=workflow.budget.public_dict,
+        config=workflow.config.public_dict(),
+        topic=workflow.config.topic,
+        idea=workflow.config.idea,
+    )
+    workflow.events.stage_completed(
+        stage,
+        "Final reading reports written",
+        {"reports": [str(path) for path in report_paths]},
+    )
+    return report_paths
 
 
 def write_final_report_bundle(
