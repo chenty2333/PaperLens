@@ -143,6 +143,22 @@ def audit_report_draft_against_graph(
                 for evidence_id in paragraph.used_evidence_ids
                 if evidence_id in evidence_node_ids
             ]
+            known_source_ids = graph_report_source_ids(
+                graph=graph,
+                evidence_ids=known_evidence_ids,
+            )
+            if known_evidence_ids and not known_source_ids:
+                findings.append(
+                    AuditFinding(
+                        finding_id=f"paragraph_missing_sources:{paragraph.paragraph_id}",
+                        severity=AuditSeverity.ERROR,
+                        code="report_paragraph_missing_source_ids",
+                        message=(
+                            "Report paragraph declares evidence IDs, but those evidence nodes do "
+                            "not expose PaperDOM source IDs"
+                        ),
+                    )
+                )
             for node_id in known_node_ids:
                 if not any(
                     (node_id, evidence_id) in support_edges for evidence_id in known_evidence_ids
@@ -176,11 +192,7 @@ def audit_report_draft_against_graph(
                             "Report paragraph text does not overlap declared ClaimGraph node labels"
                         ),
                         node_id=known_node_ids[0],
-                        source_ids=[
-                            source_id
-                            for evidence_id in known_evidence_ids
-                            for source_id in evidence_source_ids(graph, evidence_id)
-                        ],
+                        source_ids=known_source_ids,
                     )
                 )
             for node_id in known_node_ids:
@@ -223,11 +235,7 @@ def audit_report_draft_against_graph(
                                     "in its declared ClaimGraph node labels"
                                 ),
                                 node_id=known_node_ids[0] if known_node_ids else None,
-                                source_ids=[
-                                    source_id
-                                    for evidence_id in known_evidence_ids
-                                    for source_id in evidence_source_ids(graph, evidence_id)
-                                ],
+                                source_ids=known_source_ids,
                             )
                         )
             for evidence_id in known_evidence_ids:

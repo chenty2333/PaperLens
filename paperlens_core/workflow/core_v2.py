@@ -43,9 +43,7 @@ CORE_V2_MODEL_OBSERVER_VERSION = "paperlens_core.v2.model_observer"
 CORE_V2_AUDIT_SUITE_VERSION = "paperlens_core.v2.audit_suite"
 
 CORE_V2_OBSERVER_SYSTEM_PROMPT = """
-You are PaperLens ObservationReader.
-Record only source-bound observations from the supplied evidence pack.
-Do not write summaries, memory, audits, or report prose.
+You are the PaperLens observation node.
 Return JSON only.
 """.strip()
 

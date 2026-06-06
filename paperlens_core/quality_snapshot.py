@@ -144,6 +144,10 @@ def build_paper_quality_snapshot(
         else None
     )
     report_paragraph_count = count_report_paragraphs(report_draft)
+    report_source_id_covered_paragraph_count = count_report_source_backed_paragraphs(
+        report_draft_model,
+        graph,
+    )
     unsupported_report_paragraph_count = count_report_unsupported_paragraphs(current_report_rows)
     qa_metrics = qa_metrics_for_paper(qa_rows, paper_id)
 
@@ -203,6 +207,12 @@ def build_paper_quality_snapshot(
         "audit_error_count": count_findings_by_severity(current_audit_rows, "ERROR"),
         "audit_warning_count": count_findings_by_severity(current_audit_rows, "WARNING"),
         "report_paragraph_count": report_paragraph_count,
+        "report_source_id_covered_paragraph_count": report_source_id_covered_paragraph_count,
+        "report_source_id_coverage": rate(
+            report_source_id_covered_paragraph_count,
+            report_paragraph_count,
+            default=1.0,
+        ),
         "unsupported_report_paragraph_count": unsupported_report_paragraph_count,
         "unsupported_report_paragraph_rate": rate(
             unsupported_report_paragraph_count,
@@ -241,6 +251,10 @@ def aggregate_quality(
         ),
         "average_unsupported_report_paragraph_rate": average_metric(
             papers, "unsupported_report_paragraph_rate"
+        ),
+        "average_report_source_id_coverage": average_metric(
+            papers,
+            "report_source_id_coverage",
         ),
         "qa_total": total_qa,
         "qa_graph_hit_count": qa_graph_hits,
@@ -389,6 +403,32 @@ def count_report_paragraphs(report_draft: dict[str, Any]) -> int:
         if isinstance(section, dict) and isinstance(section.get("paragraphs"), list):
             total += len([item for item in section["paragraphs"] if isinstance(item, dict)])
     return total
+
+
+def count_report_source_backed_paragraphs(
+    report_draft: GraphReportDraft | None,
+    graph: ClaimGraph | None,
+) -> int:
+    if report_draft is None or graph is None:
+        return 0
+    total = 0
+    for section in report_draft.sections:
+        for paragraph in section.paragraphs:
+            if report_paragraph_source_ids(paragraph.used_evidence_ids, graph):
+                total += 1
+    return total
+
+
+def report_paragraph_source_ids(evidence_ids: list[str], graph: ClaimGraph) -> list[str]:
+    source_ids = []
+    for evidence_id in evidence_ids:
+        node = graph.nodes.get(evidence_id)
+        if node is None or node.kind != "evidence":
+            continue
+        source_id = str(node.payload.get("source_id") or "").strip()
+        if source_id and source_id not in source_ids:
+            source_ids.append(source_id)
+    return source_ids
 
 
 def count_report_unsupported_paragraphs(findings: list[dict[str, Any]]) -> int:

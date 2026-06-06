@@ -30,7 +30,7 @@ INTERNAL_DIRNAME = ".paperlens"
 LIBRARY_RECORD_SCHEMA_VERSION = "paperlens.library_record.v1"
 LIBRARY_RECORD_FILENAME = "library_records.jsonl"
 SEARCH_INDEX_SCHEMA_VERSION = "paperlens_search_index.v1"
-LIBRARY_ASK_PROMPT_VERSION = "library-ask-v3"
+LIBRARY_ASK_PROMPT_VERSION = "library-ask-v4-envelope"
 
 
 SEARCH_QUERY_EXPANSIONS: dict[str, tuple[str, ...]] = {
@@ -59,24 +59,21 @@ SEARCH_QUERY_EXPANSIONS: dict[str, tuple[str, ...]] = {
 
 
 LIBRARY_ASK_SYSTEM_PROMPT = """
-You answer questions over the user's local PaperLens paper graph library.
-Use reviewed core_v2 graph_summary claims, nodes, source_ids, and evaluation term mentions first.
-Treat report paths as navigation targets, not evidence.
-Distinguish paper facts from cross-paper synthesis,
-PaperLens inferences, and background knowledge in source_attribution. If the local library does not
-contain enough evidence, say so plainly and record the limitation.
-Mention the most relevant papers by title and report path. Use recent chat history only to resolve
-follow-up references and the user's intent; do not treat earlier assistant answers as facts.
-For prerequisite/background questions, explain the general concept clearly, then connect it to the
-local papers. Label background knowledge separately from paper claims.
-Return JSON only.
+You are the PaperLens library QA node.
+Respect the runtime contract. Return JSON only.
 """.strip()
 
 
 LIBRARY_ASK_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["answer_markdown", "related_papers", "confidence", "source_attribution"],
+    "required": [
+        "answer_markdown",
+        "related_papers",
+        "cited_source_ids",
+        "confidence",
+        "source_attribution",
+    ],
     "properties": {
         "answer_markdown": {"type": "string"},
         "related_papers": {
@@ -93,6 +90,7 @@ LIBRARY_ASK_SCHEMA: dict[str, Any] = {
                 },
             },
         },
+        "cited_source_ids": {"type": "array", "items": {"type": "string"}},
         "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
         "source_attribution": {
             "type": "object",
@@ -563,9 +561,21 @@ def answer_library_question(
     records = ensure_library_records(output_dir)
     matches = search_library_records(records, query=question, limit=limit, public=False)
     if config.offline_debug or config.provider.kind == "none":
+        related = [public_search_record(hit["paper"]) for hit in matches]
+        cited_source_ids = library_result_source_ids(
+            [
+                compact_library_record_for_agent(
+                    hit["paper"],
+                    score=hit["score"],
+                    include_memory=False,
+                )
+                for hit in matches[:8]
+            ]
+        )
         return {
             "answer_markdown": render_offline_library_answer(question, matches),
-            "related_papers": [public_search_record(hit["paper"]) for hit in matches],
+            "related_papers": related,
+            "cited_source_ids": cited_source_ids[:16],
             "confidence": "low",
             "cache_hit": False,
         }
@@ -613,6 +623,7 @@ def answer_library_question(
         cache_path,
         {
             "data": result.final,
+            "artifact": result.final_envelope,
             "usage": result.usage,
             "request_ids": result.request_ids,
             "endpoint": "agent_loop",
@@ -645,8 +656,8 @@ def run_library_qa_agent(
             "before making paper-specific or cross-paper claims. Use background knowledge for teaching, "
             "but label it separately from local paper evidence."
         ),
-        final_schema_name="paperlens_library_question",
-        final_schema=LIBRARY_ASK_SCHEMA,
+        final_artifact_type="library_qa_answer",
+        final_data_schema=LIBRARY_ASK_SCHEMA,
         stage="library_qa",
         paper_id="__library__",
         trace_path=paperlens_data_dir(output_dir) / "agent_trace.jsonl",
@@ -662,6 +673,12 @@ def run_library_qa_agent(
             "paper_specific_claims": "must come from graph_summary nodes, claims, or provenance source_ids",
             "report_paths": "navigation only; not evidence",
             "cross_paper_synthesis": "must name which local paper records support it",
+            "source_attribution": {
+                "paper_claims": "claims from specific local graph records",
+                "cross_paper_synthesis": "synthesis across cited local records",
+                "background_context": "general knowledge outside local papers",
+                "evidence_limits": "missing local graph evidence or uncertainty",
+            },
         },
     )
     return loop.run(
@@ -670,7 +687,6 @@ def run_library_qa_agent(
             "recent_chat_history": normalize_chat_history(chat_history),
             "initial_library_matches": initial_matches,
             "library_record_count": len(records),
-            "prompt_snapshot": user_prompt,
         }
     )
 
@@ -705,14 +721,6 @@ def build_library_ask_prompt(
             json.dumps(normalize_chat_history(chat_history or []), ensure_ascii=False),
             "retrieved_library_records:",
             json.dumps(compact_records, ensure_ascii=False),
-            (
-                "Task: answer using the local PaperLens library. Explain which claims come from "
-                "specific papers, preferring reviewed core_v2 graph_summary node/source evidence "
-                "over rendered reports. Explain which points are cross-paper synthesis, "
-                "which context is background knowledge, and what remains "
-                "uncertain. Fill source_attribution instead of blending these categories into one "
-                "undifferentiated answer."
-            ),
         ]
     )
 
@@ -986,9 +994,11 @@ def normalize_library_answer(data: dict[str, Any]) -> dict[str, Any]:
     if confidence not in {"high", "medium", "low"}:
         confidence = "low"
     answer_markdown = string_or_empty(data.get("answer_markdown"))[:6000]
+    cited_source_ids = unique_strings(raw_list_payload(data.get("cited_source_ids")))[:16]
     return {
         "answer_markdown": answer_markdown,
         "related_papers": related[:8],
+        "cited_source_ids": cited_source_ids,
         "confidence": confidence,
         "source_attribution": normalize_library_source_attribution(
             data.get("source_attribution"),

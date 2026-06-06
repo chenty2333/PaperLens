@@ -30,17 +30,12 @@ from paperlens_core.workflow.core_v2 import (
 
 
 ASK_SYSTEM_PROMPT = """
-You are PaperLens QA.
-Answer the user's question clearly. Prefer ClaimGraph/PaperDOM source IDs for paper-specific claims.
-For prerequisite/background questions, teach the concept first, then connect it back to the paper.
-Separate paper claims, PaperLens inference, background knowledge, and evidence limits.
-If a background explanation is useful, label it as background knowledge, not a paper claim.
-Use source_attribution to record those boundaries.
-Return final matching the QA schema when done.
+You are the PaperLens QA node.
+Respect the runtime contract. Return JSON only.
 """.strip()
 
 
-ASK_PROMPT_VERSION = "qa-agent-v1"
+ASK_PROMPT_VERSION = "qa-agent-v2-envelope"
 CORE_V2_QA_CONTEXT_VERSION = "paperlens_core_v2_qa_context.v1"
 CORE_V2_CONSUMABLE_STATUSES = {"REVIEWED", "REVIEWED_WITH_LIMITS"}
 
@@ -264,6 +259,7 @@ def answer_question(
         cache_path,
         {
             "data": result.final,
+            "artifact": result.final_envelope,
             "usage": result.usage,
             "request_ids": result.request_ids,
             "endpoint": "agent_loop",
@@ -959,8 +955,8 @@ def run_paper_qa_agent(
             "Answer the current paper question. Use background knowledge freely for teaching, "
             "but use paper tools before making paper-specific claims."
         ),
-        final_schema_name="paperlens_paper_question",
-        final_schema=ASK_SCHEMA,
+        final_artifact_type="paper_qa_answer",
+        final_data_schema=ASK_SCHEMA,
         stage="qa",
         paper_id=paper_id,
         trace_path=paperlens_data_dir(output_dir) / "agent_trace.jsonl",
@@ -983,6 +979,12 @@ def run_paper_qa_agent(
             "paper_specific_claims": "must use ClaimGraph nodes or PaperDOM source_ids",
             "forbidden_dependency": "final markdown report is not evidence",
             "page_numbers": "navigation metadata only; not proof identifiers",
+            "source_attribution": {
+                "paper_claims": "claims directly supported by graph/source evidence",
+                "paperlens_inferences": "PaperLens synthesis or cautious interpretation",
+                "background_context": "general knowledge not asserted by the paper",
+                "evidence_limits": "missing evidence and uncertainty",
+            },
         },
     )
     return loop.run(
@@ -996,7 +998,6 @@ def run_paper_qa_agent(
             "paperlens_library_record": library_record,
             "initial_page_hints": page_hints,
             "context_pack": agent_context,
-            "prompt_snapshot": user_prompt,
         }
     )
 
@@ -1287,8 +1288,6 @@ def build_ask_prompt(
             f"report_path: {report_path.as_posix() if report_path else ''}",
             f"question_type: {question_type}",
             f"core_v2_context_priority: {core_v2_context_priority(core_v2_context or {})}",
-            "answer_mode:",
-            qa_answer_mode_instruction(question_type),
             "recent_chat_history:",
             json.dumps(normalize_chat_history(chat_history or []), ensure_ascii=False),
             "question:",
@@ -1304,44 +1303,7 @@ def build_ask_prompt(
             "If page images are attached, they follow the same order as the first relevant_page_excerpts that have images.",
             "relevant_page_excerpts:",
             json.dumps(page_blocks, ensure_ascii=False),
-            (
-                "Answer contract: source_attribution.paper_claims should contain only claims directly "
-                "supported by reviewed core v2 ClaimGraph nodes and PaperDOM source IDs when "
-                "available. If core v2 exists but is unavailable, use relevant page excerpts "
-                "or state the uncertainty for paper-specific claims. "
-                "Use agent_context_pack as the active tool/context trace for this question. "
-                "When core_v2_claim_graph_context has matches, treat those graph node IDs and "
-                "PaperDOM source IDs as the preferred paper evidence. "
-                "Do not use the rendered report as a source; it is only a user-facing view. "
-                "Use recent_chat_history only to resolve follow-up references and the user's intent; "
-                "do not treat previous assistant answers as facts unless supported by QA context evidence. "
-                "source_attribution.paperlens_inferences should contain PaperLens synthesis or cautious "
-                "interpretation. source_attribution.background_context should contain general field "
-                "knowledge that is not asserted by the paper. source_attribution.evidence_limits should "
-                "state missing evidence or uncertainty in user-facing wording. Do not blur these "
-                "categories. Do not mention implementation context about evidence being supplied "
-                "by the system or user."
-            ),
         ]
-    )
-
-
-def qa_answer_mode_instruction(question_type: str) -> str:
-    if question_type in {"background_explanation", "clarification"}:
-        return (
-            "Teach the prerequisite concept first in plain language, using general background knowledge "
-            "when useful. Then explain how the paper uses that concept. Keep paper claims and background "
-            "knowledge explicitly separate."
-        )
-    if question_type == "implementation":
-        return (
-            "Use readable implementation-style examples or pseudocode when the user asks for code. "
-            "The code can be an explanatory analogy, but label it as such unless the paper provides "
-            "actual implementation details."
-        )
-    return (
-        "Answer the paper question directly, using ClaimGraph/source evidence for factual claims and "
-        "background knowledge only when it helps understanding."
     )
 
 
