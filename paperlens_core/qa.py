@@ -302,10 +302,9 @@ def load_core_v2_qa_context(
 ) -> dict[str, Any]:
     resolved_question_type = question_type or classify_question(question)
     retrieval_intent = qa_graph_retrieval_intent(resolved_question_type)
-    try:
-        data_dir = paperlens_data_dir(output_dir)
-        dom, graph = load_core_v2_dom_and_graph(data_dir, paper_id)
-    except (FileNotFoundError, ValueError):
+    data_dir = paperlens_data_dir(output_dir)
+    core_root = data_dir / "core" / "v2" / paper_id
+    if not core_root.exists():
         return {}
     core_manifest = inspect_core_v2_artifact_set(data_dir, paper_id)
     if not core_manifest.get("consumable"):
@@ -318,6 +317,23 @@ def load_core_v2_qa_context(
             "retrieval_policy": core_v2_non_consumable_policy(core_manifest),
             "answer_source_policy": (
                 "Core v2 ClaimGraph is not in a reviewed publish state; do not use it as "
+                "paper-claim evidence."
+            ),
+            "quality": core_v2_quality_context(core_manifest),
+            "matches": [],
+        }
+    try:
+        dom, graph = load_core_v2_dom_and_graph(data_dir, paper_id)
+    except (FileNotFoundError, ValueError):
+        return {
+            "schema_version": CORE_V2_QA_CONTEXT_VERSION,
+            "paper_id": paper_id,
+            "question": question,
+            "question_type": resolved_question_type,
+            "retrieval_intent": retrieval_intent,
+            "retrieval_policy": "invalid_core_v2_claim_graph_artifacts",
+            "answer_source_policy": (
+                "Core v2 ClaimGraph artifacts could not be loaded; do not use them as "
                 "paper-claim evidence."
             ),
             "quality": core_v2_quality_context(core_manifest),
@@ -420,6 +436,10 @@ def core_v2_non_consumable_policy(core_manifest: dict[str, Any]) -> str:
     issues = set(str(issue) for issue in core_manifest.get("issues", []))
     if "missing:core_manifest.v1.json" in issues:
         return "missing_core_v2_manifest"
+    if "missing:paper_dom.v1.json" in issues:
+        return "missing_core_v2_paper_dom"
+    if "missing:claim_graph.v1.json" in issues:
+        return "missing_core_v2_claim_graph"
     if "missing:quality_metrics.v1.json" in issues:
         return "missing_core_v2_quality_metrics"
     artifact_publish_status = str(core_manifest.get("artifact_publish_status") or "")

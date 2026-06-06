@@ -3335,6 +3335,43 @@ def test_core_v2_qa_context_requires_quality_metrics_gate(tmp_path):
     assert context["matches"] == []
 
 
+def test_core_v2_qa_context_reports_missing_claim_graph_artifact(tmp_path):
+    output_dir = tmp_path / "out"
+    data_dir = output_dir / ".paperlens" / "data"
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    layout = {
+        "pages": [
+            {
+                "page_no": 1,
+                "text": "Abstract\n\nWe propose a block table method for serving.",
+                "section_candidates": [{"title": "Abstract", "level": 1}],
+            }
+        ]
+    }
+    write_core_v2_artifacts(data_dir=data_dir, paper=paper, layout=layout)
+    (data_dir / "core" / "v2" / "p_test" / "claim_graph.v1.json").unlink()
+
+    context = load_core_v2_qa_context(
+        output_dir=output_dir,
+        paper_id="p_test",
+        question="block table method 是什么？",
+    )
+
+    assert context["retrieval_policy"] == "missing_core_v2_claim_graph"
+    assert context["quality"]["status"] == "INCOMPLETE"
+    assert context["quality"]["publish_status"] is None
+    assert context["quality"]["consumable"] is False
+    assert "missing:claim_graph.v1.json" in context["quality"]["issues"]
+    assert context["matches"] == []
+    assert core_v2_context_priority(context) == "unavailable:missing_core_v2_claim_graph"
+
+
 def test_library_rebuild_indexes_core_v2_claim_graph_without_memory_v3(tmp_path):
     output_dir = tmp_path / "out"
     paper = PaperRecord(
