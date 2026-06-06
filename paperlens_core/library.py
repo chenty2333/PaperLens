@@ -145,14 +145,6 @@ def enrich_row_with_core_v2_graph(*, output_dir: Path, row: dict[str, Any]) -> d
     return enriched
 
 
-def core_graph_summary_is_readable(summary: dict[str, Any]) -> bool:
-    quality = dict_value(summary.get("quality"))
-    return (
-        summary.get("graph_access") == "readable"
-        and quality.get("artifact_set_consumable") is True
-    )
-
-
 def rebuild_library_from_output(output_dir: Path) -> list[Path]:
     data_dir = paperlens_data_dir(output_dir)
     seen_paper_ids: set[str] = set()
@@ -327,7 +319,7 @@ def build_library_record(row: dict[str, Any]) -> dict[str, Any]:
     report_audit = dict_value(row.get("report_audit"))
     graph_summary = dict_value(row.get("core_v2_graph_summary"))
     audit_trail = dict_value(v3_memory.get("audit_trail"))
-    core_graph_primary = core_graph_summary_is_readable(graph_summary)
+    core_graph_available = bool(graph_summary)
 
     paper_id = string_or_empty(paper.get("paper_id")) or string_or_empty(row.get("paper_id"))
     title = (
@@ -342,11 +334,7 @@ def build_library_record(row: dict[str, Any]) -> dict[str, Any]:
         or string_or_none(model_report.get("grade"))
         or "HOLD"
     )
-    graph_brief = (
-        first_graph_label(graph_summary, "problem_nodes", "claim_nodes")
-        if core_graph_primary
-        else ""
-    )
+    graph_brief = first_graph_label(graph_summary, "problem_nodes", "claim_nodes")
     legacy_brief = (
         string_or_none(model_report.get("one_line_reason"))
         or string_or_none(model_report.get("core_takeaway"))
@@ -356,11 +344,13 @@ def build_library_record(row: dict[str, Any]) -> dict[str, Any]:
         or first_graph_label(graph_summary, "problem_nodes", "claim_nodes")
         or ""
     )
-    brief = graph_brief or legacy_brief
-    graph_concepts = normalize_graph_concepts(graph_summary) if core_graph_primary else []
-    concepts = graph_concepts or normalize_concepts(v3_memory.get("concepts"))
+    brief = graph_brief if core_graph_available else legacy_brief
+    graph_concepts = normalize_graph_concepts(graph_summary) if core_graph_available else []
+    concepts = (
+        graph_concepts if core_graph_available else normalize_concepts(v3_memory.get("concepts"))
+    )
     conceptual_bridge = normalize_conceptual_bridge(v3_memory.get("conceptual_bridge"))
-    if core_graph_primary:
+    if core_graph_available:
         claims = normalize_graph_claims(graph_summary)
         mechanisms = graph_node_labels(
             graph_summary, "mechanism_nodes", "implementation_nodes"

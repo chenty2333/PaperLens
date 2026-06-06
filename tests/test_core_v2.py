@@ -3460,6 +3460,56 @@ def test_library_record_prefers_readable_core_graph_over_legacy_memory():
     assert "Legacy memory mechanism should not be indexed." not in search_text
 
 
+def test_library_record_does_not_fallback_to_legacy_facts_when_core_graph_is_blocked():
+    record = build_library_record(
+        {
+            "paper": {"paper_id": "p_test", "canonical_title": "Test Paper"},
+            "decision": {"paper_id": "p_test", "class_label": "KEEP"},
+            "paper_memory_v3": {
+                "claims": [{"claim": "Legacy blocked-core claim should not be indexed."}],
+                "mechanism": {
+                    "overview": "Legacy blocked-core mechanism should not be indexed."
+                },
+                "evaluation": {
+                    "summary": "Legacy blocked-core evaluation should not be indexed."
+                },
+                "limitations": ["Legacy blocked-core limit should not be indexed."],
+                "evidence": [
+                    {
+                        "claim": "Legacy blocked-core evidence should not be indexed.",
+                        "quote": "legacy quote",
+                        "page_no": 9,
+                    }
+                ],
+            },
+            "core_v2_graph_summary": {
+                "schema_version": "paperlens.graph_library_summary.v1",
+                "graph_access": "blocked_by_current_graph_audit",
+                "quality": {
+                    "artifact_set_consumable": False,
+                    "publish_status": PublishStatus.BLOCKED,
+                },
+                "problem_nodes": [],
+                "claim_nodes": [],
+                "mechanism_nodes": [],
+                "evaluation_nodes": [],
+                "result_nodes": [],
+                "limitation_nodes": [],
+            },
+        }
+    )
+
+    assert record["quality"]["graph_publish_status"] == PublishStatus.BLOCKED
+    assert record["memory"]["claims"] == []
+    assert record["memory"]["mechanism_steps"] == []
+    assert record["memory"]["evidence_summary"] == ""
+    assert record["memory"]["limits"] == []
+    assert record["memory"]["evidence_items"] == []
+    search_text = record["search_text"]
+    assert "Legacy blocked-core claim should not be indexed." not in search_text
+    assert "Legacy blocked-core mechanism should not be indexed." not in search_text
+
+
 def test_library_rebuild_indexes_core_v2_claim_graph_without_memory_v3(tmp_path):
     output_dir = tmp_path / "out"
     paper = PaperRecord(
