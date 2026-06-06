@@ -1759,6 +1759,53 @@ def test_model_observation_cards_reject_unknown_source_ids():
         )
 
 
+def test_model_observation_cards_reject_empty_task_output():
+    task = build_initial_reading_plan(sample_dom()).tasks[0]
+    envelope = ArtifactEnvelope(
+        artifact_type="observation_cards",
+        producer="fake",
+        data={"cards": []},
+    )
+
+    with pytest.raises(ValueError, match="returned no valid observation cards"):
+        observation_cards_from_model_envelope(
+            envelope,
+            paper_id="p_test",
+            task=task,
+            allowed_source_ids=set(task.target_source_ids),
+        )
+
+
+def test_model_observation_cards_reject_only_invalid_task_output():
+    task = build_initial_reading_plan(sample_dom()).tasks[0]
+    envelope = ArtifactEnvelope(
+        artifact_type="observation_cards",
+        producer="fake",
+        data={
+            "cards": [
+                {
+                    "observation_type": task.allowed_observation_types[0],
+                    "statement": "",
+                    "source_ids": [task.target_source_ids[0]],
+                    "confidence": "high",
+                    "provenance": "explicit",
+                    "uncertainty": None,
+                    "extracted_numbers": [],
+                    "proposed_links": [],
+                }
+            ]
+        },
+    )
+
+    with pytest.raises(ValueError, match="returned no valid observation cards"):
+        observation_cards_from_model_envelope(
+            envelope,
+            paper_id="p_test",
+            task=task,
+            allowed_source_ids=set(task.target_source_ids),
+        )
+
+
 def test_model_observation_cards_reject_disallowed_observation_type():
     task = next(
         task

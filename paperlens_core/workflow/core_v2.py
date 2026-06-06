@@ -881,6 +881,8 @@ def observation_cards_from_model_envelope(
                 ][:8],
             )
         )
+    if not result:
+        raise ValueError(f"Observation task {task.task_id} returned no valid observation cards")
     return result
 
 
