@@ -3129,7 +3129,10 @@ def test_report_memory_context_prefers_reviewed_core_memory_view(tmp_path):
 
     assert context["schema_version"] == "paperlens.report_memory_context.v1"
     assert context["source_of_truth"] == "core_v2_paper_memory_view"
+    assert "legacy_memory_v3" not in context
+    assert "Legacy PaperMemory is not part" in context["fallback_policy"]
     assert compact["source_of_truth"] == "core_v2_paper_memory_view"
+    assert "legacy_memory_v3" not in compact
     assert compact["core_memory_view"]["fact_nodes"][0]["node_id"] == "claim:obs_claim"
     assert compact["core_memory_view"]["fact_nodes"][0]["source_ids"] == [source_id]
     assert compact["core_memory_view"]["fact_nodes"][0]["pages"] == [1]

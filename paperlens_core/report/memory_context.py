@@ -43,8 +43,8 @@ def build_report_memory_context(
                 "schema_version": REPORT_MEMORY_CONTEXT_SCHEMA_VERSION,
                 "source_of_truth": "core_v2_paper_memory_view",
                 "fallback_policy": (
-                    "Use core_memory_view for paper-specific facts. legacy_memory_v3 is "
-                    "supplemental context only."
+                    "Use core_memory_view for paper-specific facts. Legacy PaperMemory is not "
+                    "part of the report fact context."
                 ),
                 "quality": {
                     "artifact_set_status": manifest.get("status"),
@@ -53,7 +53,6 @@ def build_report_memory_context(
                     "issues": manifest.get("issues", []),
                 },
                 "core_memory_view": envelope.data,
-                "legacy_memory_v3": memory_v3_prompt_view(paper_memory_v3),
             }
     if core_exists:
         return {
