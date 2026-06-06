@@ -133,6 +133,7 @@ def graph_from_observations(paper_id: str, observations: list[ObservationCard]) 
                     "confidence": card.confidence,
                     "provenance": card.provenance,
                     "uncertainty": card.uncertainty,
+                    "covered_outputs": card.covered_outputs,
                     "extracted_numbers": card.extracted_numbers,
                 },
             )

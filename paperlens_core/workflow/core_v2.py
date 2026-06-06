@@ -71,6 +71,7 @@ OBSERVATION_CARDS_SCHEMA: dict[str, Any] = {
                             "confidence",
                             "provenance",
                             "uncertainty",
+                            "covered_outputs",
                             "extracted_numbers",
                             "proposed_links",
                         ],
@@ -90,6 +91,10 @@ OBSERVATION_CARDS_SCHEMA: dict[str, Any] = {
                                 "enum": ["explicit", "inferred"],
                             },
                             "uncertainty": {"type": ["string", "null"]},
+                            "covered_outputs": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
                             "extracted_numbers": {
                                 "type": "array",
                                 "items": {
@@ -769,8 +774,9 @@ def build_observation_task_prompt(
             "artifact_type": "observation_cards",
             "rule": (
                 "Return an ArtifactEnvelope with data.cards. Each card must cite source_ids from "
-                "the evidence_pack. Do not cite page numbers as evidence. Do not write memory, "
-                "audit verdicts, or report prose."
+                "the evidence_pack and declare covered_outputs from task_spec.required_outputs. "
+                "Across cards, cover every required_output supported by the evidence. Do not cite "
+                "page numbers as evidence. Do not write memory, audit verdicts, or report prose."
             ),
         },
     }
@@ -851,6 +857,7 @@ def observation_cards_from_model_envelope(
                 f"Observation card for {task.task_id} returned disallowed observation_type="
                 f"{observation_type}; allowed={allowed_types}"
             )
+        covered_outputs = clean_model_covered_outputs(item.get("covered_outputs"), task)
         provenance = clean_model_provenance(item.get("provenance"), task.task_id)
         observation_id = make_observation_id(
             task_id=task.task_id,
@@ -869,6 +876,7 @@ def observation_cards_from_model_envelope(
                 confidence=str(item.get("confidence") or "medium"),
                 provenance=provenance,
                 uncertainty=none_if_blank(item.get("uncertainty")),
+                covered_outputs=covered_outputs,
                 extracted_numbers=[
                     number
                     for number in list_payload(item.get("extracted_numbers"))
@@ -883,7 +891,47 @@ def observation_cards_from_model_envelope(
         )
     if not result:
         raise ValueError(f"Observation task {task.task_id} returned no valid observation cards")
+    missing_outputs = missing_required_outputs(task, result)
+    if missing_outputs:
+        raise ValueError(
+            f"Observation task {task.task_id} did not cover required_outputs: "
+            + ", ".join(missing_outputs)
+        )
     return result
+
+
+def clean_model_covered_outputs(value: Any, task: ReadingTask) -> list[str]:
+    if not isinstance(value, list):
+        raise ValueError(f"Observation card for {task.task_id} must declare covered_outputs")
+    allowed = set(task.required_outputs)
+    result = []
+    invalid = []
+    for item in value:
+        output = str(item or "").strip()
+        if not output:
+            continue
+        if output not in allowed:
+            invalid.append(output)
+            continue
+        if output not in result:
+            result.append(output)
+    if invalid:
+        raise ValueError(
+            f"Observation card for {task.task_id} returned covered_outputs outside "
+            f"required_outputs: {', '.join(invalid)}"
+        )
+    if not result:
+        raise ValueError(f"Observation card for {task.task_id} did not cover required_outputs")
+    return result
+
+
+def missing_required_outputs(task: ReadingTask, cards: list[ObservationCard]) -> list[str]:
+    covered = {
+        output
+        for card in cards
+        for output in card.covered_outputs
+    }
+    return [output for output in task.required_outputs if output not in covered]
 
 
 def observation_envelope_source_ids(envelope: ArtifactEnvelope) -> list[str]:

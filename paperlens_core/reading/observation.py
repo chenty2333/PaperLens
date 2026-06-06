@@ -30,6 +30,7 @@ class ObservationCard(BaseModel):
     confidence: Literal["high", "medium", "low"] = "medium"
     provenance: Literal["explicit", "inferred"] = "explicit"
     uncertainty: str | None = None
+    covered_outputs: list[str] = Field(default_factory=list)
     extracted_numbers: list[dict[str, Any]] = Field(default_factory=list)
     proposed_links: list[dict[str, str]] = Field(default_factory=list)
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -52,6 +53,16 @@ class ObservationCard(BaseModel):
                 result.append(text)
         if not result:
             raise ValueError("observation cards must cite at least one PaperDOM source_id")
+        return result
+
+    @field_validator("covered_outputs")
+    @classmethod
+    def clean_covered_outputs(cls, value: list[str]) -> list[str]:
+        result = []
+        for item in value:
+            text = str(item or "").strip()
+            if text and text not in result:
+                result.append(text)
         return result
 
 

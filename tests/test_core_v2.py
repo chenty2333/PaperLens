@@ -1514,6 +1514,7 @@ def test_core_v2_model_observer_rewrites_observation_graph_artifacts(tmp_path):
             source_id = prompt["evidence_pack"][0]["source_id"]
             task_type = prompt["task_spec"]["task_type"]
             observation_type = prompt["task_spec"]["allowed_observation_types"][0]
+            covered_outputs = prompt["task_spec"]["required_outputs"]
             assert _kwargs["max_tokens"] == prompt["task_spec"]["max_tokens"]
             return SimpleNamespace(
                 data={
@@ -1532,6 +1533,7 @@ def test_core_v2_model_observer_rewrites_observation_graph_artifacts(tmp_path):
                                 "confidence": "high",
                                 "provenance": "explicit",
                                 "uncertainty": None,
+                                "covered_outputs": covered_outputs,
                                 "extracted_numbers": [],
                                 "proposed_links": [],
                             }
@@ -1806,6 +1808,99 @@ def test_model_observation_cards_reject_only_invalid_task_output():
         )
 
 
+def test_model_observation_cards_require_covered_outputs():
+    task = build_initial_reading_plan(sample_dom()).tasks[0]
+    envelope = ArtifactEnvelope(
+        artifact_type="observation_cards",
+        producer="fake",
+        data={
+            "cards": [
+                {
+                    "observation_type": task.allowed_observation_types[0],
+                    "statement": "A source-bound card without coverage metadata.",
+                    "source_ids": [task.target_source_ids[0]],
+                    "confidence": "high",
+                    "provenance": "explicit",
+                    "uncertainty": None,
+                    "extracted_numbers": [],
+                    "proposed_links": [],
+                }
+            ]
+        },
+    )
+
+    with pytest.raises(ValueError, match="must declare covered_outputs"):
+        observation_cards_from_model_envelope(
+            envelope,
+            paper_id="p_test",
+            task=task,
+            allowed_source_ids=set(task.target_source_ids),
+        )
+
+
+def test_model_observation_cards_reject_covered_outputs_outside_required_outputs():
+    task = build_initial_reading_plan(sample_dom()).tasks[0]
+    envelope = ArtifactEnvelope(
+        artifact_type="observation_cards",
+        producer="fake",
+        data={
+            "cards": [
+                {
+                    "observation_type": task.allowed_observation_types[0],
+                    "statement": "A card that claims to cover another task output.",
+                    "source_ids": [task.target_source_ids[0]],
+                    "confidence": "high",
+                    "provenance": "explicit",
+                    "uncertainty": None,
+                    "covered_outputs": ["claim"],
+                    "extracted_numbers": [],
+                    "proposed_links": [],
+                }
+            ]
+        },
+    )
+
+    with pytest.raises(ValueError, match="covered_outputs outside required_outputs: claim"):
+        observation_cards_from_model_envelope(
+            envelope,
+            paper_id="p_test",
+            task=task,
+            allowed_source_ids=set(task.target_source_ids),
+        )
+
+
+def test_model_observation_cards_reject_incomplete_required_output_coverage():
+    task = build_initial_reading_plan(sample_dom()).tasks[0]
+    assert set(task.required_outputs) >= {"problem", "motivation", "scope"}
+    envelope = ArtifactEnvelope(
+        artifact_type="observation_cards",
+        producer="fake",
+        data={
+            "cards": [
+                {
+                    "observation_type": task.allowed_observation_types[0],
+                    "statement": "The paper states a problem.",
+                    "source_ids": [task.target_source_ids[0]],
+                    "confidence": "high",
+                    "provenance": "explicit",
+                    "uncertainty": None,
+                    "covered_outputs": ["problem"],
+                    "extracted_numbers": [],
+                    "proposed_links": [],
+                }
+            ]
+        },
+    )
+
+    with pytest.raises(ValueError, match="did not cover required_outputs: motivation, scope"):
+        observation_cards_from_model_envelope(
+            envelope,
+            paper_id="p_test",
+            task=task,
+            allowed_source_ids=set(task.target_source_ids),
+        )
+
+
 def test_model_observation_cards_reject_disallowed_observation_type():
     task = next(
         task
@@ -1891,6 +1986,7 @@ def test_model_observation_cards_reject_background_provenance():
                     "confidence": "high",
                     "provenance": "background",
                     "uncertainty": None,
+                    "covered_outputs": task.required_outputs,
                     "extracted_numbers": [],
                     "proposed_links": [],
                 }
