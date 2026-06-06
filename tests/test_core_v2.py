@@ -3717,6 +3717,67 @@ def test_core_quality_snapshot_reaudits_stale_reviewed_graph_with_current_readin
     assert snapshot["aggregate"]["draft_weak_paper_count"] == 1
 
 
+def test_core_quality_snapshot_requires_complete_core_artifact_set(tmp_path):
+    output_dir = tmp_path / "out"
+    data_dir = output_dir / ".paperlens" / "data"
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    layout = {
+        "pages": [
+            {
+                "page_no": 1,
+                "text": "Abstract\n\nWe propose a block table method for serving.",
+                "section_candidates": [{"title": "Abstract", "level": 1}],
+            }
+        ]
+    }
+    dom = build_paper_dom_from_layout(
+        paper_id=paper.paper_id,
+        title=paper.canonical_title,
+        layout=layout,
+    )
+    claim_span = next(span for span in dom.spans if "block table method" in span.text)
+    reading_plan = reading_plan_subset(dom, ReadingTaskType.CLAIM_INVENTORY)
+    claim_task = reading_task(reading_plan, ReadingTaskType.CLAIM_INVENTORY)
+    write_core_v2_from_observation_log(
+        data_dir=data_dir,
+        paper=paper,
+        dom=dom,
+        reading_plan=reading_plan,
+        observation_log=ObservationLog(paper_id="p_test").append(
+            ObservationCard(
+                observation_id="obs_claim",
+                paper_id="p_test",
+                task_id=claim_task.task_id,
+                observation_type=ObservationType.CLAIM,
+                statement="The paper proposes a block table method.",
+                source_ids=[claim_span.source_id],
+                covered_outputs=claim_task.required_outputs,
+            )
+        ),
+        producer="unit_test",
+    )
+    (data_dir / "core" / "v2" / "p_test" / "quality_metrics.v1.json").unlink()
+
+    snapshot_path = write_core_quality_snapshot(output_dir)
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))["data"]
+    paper_snapshot = snapshot["papers"][0]
+
+    assert paper_snapshot["artifact_set_status"] == "INCOMPLETE"
+    assert paper_snapshot["artifact_set_consumable"] is False
+    assert "missing:quality_metrics.v1.json" in paper_snapshot["artifact_set_issues"]
+    assert paper_snapshot["publish_status"] is None
+    assert paper_snapshot["artifact_publish_status"] is None
+    assert paper_snapshot["current_audit_publish_status"] is None
+    assert snapshot["aggregate"]["blocked_paper_count"] == 0
+    assert snapshot["aggregate"]["draft_weak_paper_count"] == 0
+
+
 def test_stage17_manifest_includes_core_quality_snapshot(tmp_path):
     output_dir = tmp_path / "out"
     input_dir = tmp_path / "in"

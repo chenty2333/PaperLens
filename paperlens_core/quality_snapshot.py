@@ -13,6 +13,7 @@ from paperlens_core.audit import (
 from paperlens_core.audit.findings import AuditFinding
 from paperlens_core.audit.suite import FACT_NODE_KINDS
 from paperlens_core.audit.suite import reading_required_output_keys
+from paperlens_core.core_manifest import inspect_core_v2_artifact_root
 from paperlens_core.dom import PaperDOM
 from paperlens_core.events import write_json
 from paperlens_core.graph import ClaimGraph
@@ -63,6 +64,7 @@ def build_paper_quality_snapshot(
     qa_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     paper_id = paper_root.name
+    artifact_manifest = inspect_core_v2_artifact_root(paper_root, paper_id)
     dom = read_paper_dom(paper_root / "paper_dom.v1.json")
     graph = read_claim_graph(paper_root / "claim_graph.v1.json")
     reading_plan = read_reading_plan(paper_root / "reading_plan.v1.json")
@@ -106,11 +108,24 @@ def build_paper_quality_snapshot(
         if current_report_available
         else artifact_report_findings
     )
-    artifact_publish_status = core_metrics.get("publish_status")
-    current_publish_status = (
-        publish_status_from_findings(current_findings).value if current_findings_available else None
+    artifact_publish_status = artifact_manifest.get("artifact_publish_status") or core_metrics.get(
+        "publish_status"
     )
-    publish_status = current_publish_status or artifact_publish_status
+    artifact_set_is_complete = artifact_manifest.get("status") == "COMPLETE"
+    if artifact_set_is_complete:
+        current_publish_status = artifact_manifest.get("current_audit_publish_status") or (
+            publish_status_from_findings(current_findings).value
+            if current_findings_available
+            else None
+        )
+        publish_status = (
+            artifact_manifest.get("publish_status")
+            or current_publish_status
+            or artifact_publish_status
+        )
+    else:
+        current_publish_status = None
+        publish_status = None
 
     fact_node_count = count_fact_nodes(graph)
     numeric_fact_node_count = count_numeric_fact_nodes(graph)
@@ -134,6 +149,9 @@ def build_paper_quality_snapshot(
 
     return {
         "paper_id": paper_id,
+        "artifact_set_status": artifact_manifest.get("status"),
+        "artifact_set_consumable": artifact_manifest.get("consumable"),
+        "artifact_set_issues": artifact_manifest.get("issues", []),
         "publish_status": publish_status,
         "artifact_publish_status": artifact_publish_status,
         "current_audit_publish_status": current_publish_status,
