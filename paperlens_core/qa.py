@@ -461,17 +461,9 @@ def search_core_v2_graph(
 ) -> list[dict[str, Any]]:
     retrieval_intent = qa_graph_retrieval_intent(question_type)
     preferred_node_kinds = set(retrieval_intent["preferred_node_kinds"])
-    terms = tokenize(
-        " ".join(
-            [
-                question,
-                *[
-                    hint
-                    for hint in retrieval_intent["query_hints"]
-                    if isinstance(hint, str)
-                ],
-            ]
-        )
+    question_terms = tokenize(question)
+    hint_terms = tokenize(
+        " ".join(hint for hint in retrieval_intent["query_hints"] if isinstance(hint, str))
     )
     source_index = core_v2_source_index(dom)
     scored: list[tuple[int, str, dict[str, Any]]] = []
@@ -495,9 +487,13 @@ def search_core_v2_graph(
             " ".join([node.kind, node.label, *evidence_text]),
             limit=8000,
         ).lower()
-        score = sum(haystack.count(term) for term in terms) if terms else 1
+        lexical_score = sum(haystack.count(term) for term in question_terms) if question_terms else 1
+        if lexical_score <= 0:
+            continue
+        score = lexical_score
         if node.kind in preferred_node_kinds:
             score += 1
+        score += min(2, sum(haystack.count(term) for term in hint_terms))
         if score <= 0:
             continue
         scored.append(
@@ -523,31 +519,6 @@ def search_core_v2_graph(
             )
         )
     scored.sort(key=lambda item: (item[0], item[1]))
-    if not scored:
-        for node in graph.nodes.values():
-            if node.kind != "evidence":
-                scored.append(
-                    (
-                        0,
-                        node.node_id,
-                        {
-                            "node_id": node.node_id,
-                            "kind": node.kind,
-                            "label": node.label,
-                            "confidence": node.payload.get("confidence"),
-                            "provenance": node.payload.get("provenance"),
-                            "uncertainty": node.payload.get("uncertainty"),
-                            "evidence_ids": graph.evidence_ids_for(node.node_id),
-                            "source_ids": [],
-                            "evidence_spans": [],
-                            "relationships": relationships_for_node(
-                                graph=graph,
-                                node_id=node.node_id,
-                                source_index=source_index,
-                            ),
-                        },
-                    )
-                )
     return [item for _score, _node_id, item in scored[: max(1, limit)]]
 
 

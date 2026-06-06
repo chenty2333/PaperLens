@@ -2342,6 +2342,72 @@ def test_core_v2_qa_empty_reviewed_graph_match_does_not_fallback_to_legacy_memor
     assert offline["source_attribution"]["paper_claims"] == []
 
 
+def test_core_v2_qa_context_returns_no_matches_for_unrelated_question(tmp_path):
+    output_dir = tmp_path / "out"
+    data_dir = output_dir / ".paperlens" / "data"
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    layout = {
+        "pages": [
+            {
+                "page_no": 1,
+                "text": "Abstract\n\nWe propose a block table method for serving.",
+                "section_candidates": [{"title": "Abstract", "level": 1}],
+            }
+        ]
+    }
+    write_core_v2_artifacts(data_dir=data_dir, paper=paper, layout=layout)
+    dom = build_paper_dom_from_layout(
+        paper_id=paper.paper_id,
+        title=paper.canonical_title,
+        layout=layout,
+    )
+    claim_span = next(span for span in dom.spans if "block table method" in span.text)
+    write_core_v2_from_observation_log(
+        data_dir=data_dir,
+        paper=paper,
+        dom=dom,
+        reading_plan=build_initial_reading_plan(dom),
+        observation_log=ObservationLog(paper_id="p_test").append(
+            ObservationCard(
+                observation_id="obs_claim",
+                paper_id="p_test",
+                task_id="read_02_claim_inventory",
+                observation_type=ObservationType.CLAIM,
+                statement="The paper proposes a block table method.",
+                source_ids=[claim_span.source_id],
+            )
+        ),
+        producer="unit_test",
+    )
+
+    context = load_core_v2_qa_context(
+        output_dir=output_dir,
+        paper_id="p_test",
+        question="完全无关的量子猫问题",
+        question_type="orientation",
+    )
+    offline = offline_qa_answer(
+        paper_id="p_test",
+        report_path=tmp_path / "papers" / "p_test.md",
+        question_type="orientation",
+        pages=[{"page_no": 1, "text": "page text"}],
+        core_v2_context=context,
+    )
+
+    assert context["retrieval_policy"] == "claim_graph_nodes_with_paper_dom_source_ids"
+    assert context["matches"] == []
+    assert offline["cited_source_ids"] == []
+    assert offline["source_attribution"]["paper_claims"] == []
+    assert "没有为当前问题返回可引用" in offline["answer_markdown"]
+    assert "p_test.md" not in offline["answer_markdown"]
+
+
 def test_core_v2_qa_grounding_filters_unknown_source_ids_and_claims():
     core_context = {
         "retrieval_policy": "claim_graph_nodes_with_paper_dom_source_ids",
