@@ -5,7 +5,11 @@ import re
 from pathlib import Path
 from typing import Any
 
-from paperlens_core.audit import audit_claim_graph, compute_core_quality_metrics
+from paperlens_core.audit import (
+    audit_claim_graph,
+    audit_reading_required_outputs,
+    compute_core_quality_metrics,
+)
 from paperlens_core.agents.llm import JsonLlmClient, llm_call_context
 from paperlens_core.core_manifest import write_core_v2_manifest
 from paperlens_core.dom import PaperDOM, PaperSpan, build_paper_dom_from_layout
@@ -580,7 +584,10 @@ def build_core_v2_derived_views(
     reading_plan: ReadingPlan | None = None,
     metadata: dict[str, Any],
 ) -> dict[str, Any]:
-    audit_findings = audit_claim_graph(claim_graph, dom)
+    audit_findings = [
+        *audit_claim_graph(claim_graph, dom),
+        *audit_reading_required_outputs(claim_graph, reading_plan),
+    ]
     report_draft = build_report_draft_from_graph(claim_graph)
     report_audit_findings = audit_report_draft_against_graph(report_draft, claim_graph)
     all_findings = [*audit_findings, *report_audit_findings]

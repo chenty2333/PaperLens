@@ -7,7 +7,9 @@ from paperlens_core.audit.suite import (
     FACT_NODE_KINDS,
     contains_number,
     extracted_number_texts,
+    graph_covered_required_output_keys,
     publish_status_from_findings,
+    reading_required_output_keys,
 )
 from paperlens_core.dom.paper_dom import PaperDOM
 from paperlens_core.graph.claim_graph import ClaimGraph
@@ -117,31 +119,3 @@ def metric_rate(numerator: int, denominator: int, *, default: float) -> float:
     if not denominator:
         return default
     return round(numerator / denominator, 4)
-
-
-def reading_required_output_keys(reading_plan: ReadingPlan | None) -> list[str]:
-    if reading_plan is None:
-        return []
-    result = []
-    for task in reading_plan.tasks:
-        for output in task.required_outputs:
-            output_key = f"{task.task_id}:{output}"
-            if output_key not in result:
-                result.append(output_key)
-    return result
-
-
-def graph_covered_required_output_keys(graph: ClaimGraph) -> set[str]:
-    result: set[str] = set()
-    for node in graph.nodes.values():
-        task_id = str(node.payload.get("task_id") or "").strip()
-        if not task_id:
-            continue
-        covered_outputs = node.payload.get("covered_outputs")
-        if not isinstance(covered_outputs, list):
-            continue
-        for item in covered_outputs:
-            output = str(item or "").strip()
-            if output:
-                result.add(f"{task_id}:{output}")
-    return result

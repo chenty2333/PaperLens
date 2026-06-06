@@ -6,6 +6,7 @@ from paperlens_core.audit.findings import AuditFinding, AuditSeverity, PublishSt
 from paperlens_core.dom.paper_dom import PaperDOM
 from paperlens_core.grounding import text_overlaps_any_reference
 from paperlens_core.graph.claim_graph import ClaimGraph
+from paperlens_core.reading.tasks import ReadingPlan
 
 
 FACT_NODE_KINDS = {
@@ -230,10 +231,72 @@ def audit_claim_graph(graph: ClaimGraph, dom: PaperDOM) -> list[AuditFinding]:
     return findings
 
 
+def audit_reading_required_outputs(
+    graph: ClaimGraph,
+    reading_plan: ReadingPlan | None,
+) -> list[AuditFinding]:
+    findings: list[AuditFinding] = []
+    for output_key in missing_reading_required_output_keys(graph, reading_plan):
+        task_id, output = output_key.split(":", 1)
+        findings.append(
+            AuditFinding(
+                finding_id=f"missing_reading_required_output:{task_id}:{output}",
+                severity=AuditSeverity.WARNING,
+                code="missing_reading_required_output",
+                message=(
+                    f"Reading task {task_id} required output '{output}' was not covered by "
+                    "any ClaimGraph fact node."
+                ),
+            )
+        )
+    return findings
+
+
+def missing_reading_required_output_keys(
+    graph: ClaimGraph,
+    reading_plan: ReadingPlan | None,
+) -> list[str]:
+    expected_output_keys = reading_required_output_keys(reading_plan)
+    covered_output_keys = graph_covered_required_output_keys(graph)
+    return [
+        output_key for output_key in expected_output_keys if output_key not in covered_output_keys
+    ]
+
+
+def reading_required_output_keys(reading_plan: ReadingPlan | None) -> list[str]:
+    if reading_plan is None:
+        return []
+    result = []
+    for task in reading_plan.tasks:
+        for output in task.required_outputs:
+            output_key = f"{task.task_id}:{output}"
+            if output_key not in result:
+                result.append(output_key)
+    return result
+
+
+def graph_covered_required_output_keys(graph: ClaimGraph) -> set[str]:
+    result: set[str] = set()
+    for node in graph.nodes.values():
+        task_id = str(node.payload.get("task_id") or "").strip()
+        if not task_id:
+            continue
+        covered_outputs = node.payload.get("covered_outputs")
+        if not isinstance(covered_outputs, list):
+            continue
+        for item in covered_outputs:
+            output = str(item or "").strip()
+            if output:
+                result.add(f"{task_id}:{output}")
+    return result
+
+
 def publish_status_from_findings(findings: list[AuditFinding]) -> PublishStatus:
     if any(item.severity == AuditSeverity.ERROR for item in findings):
         return PublishStatus.BLOCKED
     if any(item.code == "bootstrap_observation" for item in findings):
+        return PublishStatus.DRAFT_WEAK
+    if any(item.code == "missing_reading_required_output" for item in findings):
         return PublishStatus.DRAFT_WEAK
     if any(item.severity == AuditSeverity.WARNING for item in findings):
         return PublishStatus.REVIEWED_WITH_LIMITS

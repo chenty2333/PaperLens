@@ -8,6 +8,7 @@ import pytest
 from paperlens_core.audit import (
     PublishStatus,
     audit_claim_graph,
+    audit_reading_required_outputs,
     compute_core_quality_metrics,
     publish_status_from_findings,
 )
@@ -114,6 +115,17 @@ def sample_dom():
             ]
         },
     )
+
+
+def reading_plan_subset(dom: PaperDOM, *task_types: ReadingTaskType) -> ReadingPlan:
+    full_plan = build_initial_reading_plan(dom)
+    selected = [task for task in full_plan.tasks if task.task_type in set(task_types)]
+    assert selected
+    return ReadingPlan(paper_id=dom.paper_id, tasks=selected)
+
+
+def reading_task(plan: ReadingPlan, task_type: ReadingTaskType) -> ReadingTask:
+    return next(task for task in plan.tasks if task.task_type == task_type)
 
 
 def test_paper_dom_assigns_stable_source_ids():
@@ -555,19 +567,25 @@ def test_quality_metrics_track_reading_required_output_coverage():
         extracted_numbers=[{"text": "27%"}],
     )
     graph = graph_from_observations("p_test", [observation])
+    findings = [
+        *audit_claim_graph(graph, dom),
+        *audit_reading_required_outputs(graph, reading_plan),
+    ]
 
     metrics = compute_core_quality_metrics(
         dom=dom,
         graph=graph,
-        findings=audit_claim_graph(graph, dom),
+        findings=findings,
         reading_plan=reading_plan,
     )
 
+    assert any(finding.code == "missing_reading_required_output" for finding in findings)
     assert metrics.reading_required_output_count == 14
     assert metrics.reading_required_output_covered_count == 1
     assert metrics.reading_required_output_coverage == 0.0714
     assert "read_01_orientation:problem" in metrics.missing_reading_required_outputs
     assert f"{result_task.task_id}:result" not in metrics.missing_reading_required_outputs
+    assert metrics.publish_status == PublishStatus.DRAFT_WEAK
 
 
 def test_claim_graph_keeps_valid_observation_relationship_edges():
@@ -1680,12 +1698,16 @@ def test_write_core_v2_from_observation_log_writes_complete_core_inputs(tmp_path
         producer="unit_test",
     )
     loaded_dom, loaded_plan = load_core_v2_dom_and_plan(tmp_path, "p_test")
+    metrics = json.loads(paths["quality_metrics"].read_text(encoding="utf-8"))
+    findings = json.loads(paths["audit_findings"].read_text(encoding="utf-8"))
 
     assert (tmp_path / "core" / "v2" / "p_test" / "paper_dom.v1.json").exists()
     assert (tmp_path / "core" / "v2" / "p_test" / "reading_plan.v1.json").exists()
     assert loaded_dom.paper_id == "p_test"
     assert loaded_plan.paper_id == "p_test"
     assert paths["quality_metrics"].exists()
+    assert metrics["data"]["publish_status"] == PublishStatus.DRAFT_WEAK
+    assert any(finding["code"] == "missing_reading_required_output" for finding in findings["data"])
 
 
 def test_write_core_v2_from_observation_log_rejects_inconsistent_inputs(tmp_path):
@@ -2167,30 +2189,39 @@ def test_core_v2_qa_reads_claim_graph_without_final_markdown_report(tmp_path):
     )
     claim_span = next(span for span in dom.spans if "block table method" in span.text)
     mechanism_span = next(span for span in dom.spans if "organizes serving state" in span.text)
+    reading_plan = reading_plan_subset(
+        dom,
+        ReadingTaskType.CLAIM_INVENTORY,
+        ReadingTaskType.METHOD_MECHANISM,
+    )
+    claim_task = reading_task(reading_plan, ReadingTaskType.CLAIM_INVENTORY)
+    mechanism_task = reading_task(reading_plan, ReadingTaskType.METHOD_MECHANISM)
     write_core_v2_from_observation_log(
         data_dir=output_dir / ".paperlens" / "data",
         paper=paper,
         dom=dom,
-        reading_plan=build_initial_reading_plan(dom),
+        reading_plan=reading_plan,
         observation_log=ObservationLog(paper_id="p_test")
         .append(
             ObservationCard(
                 observation_id="obs_claim",
                 paper_id="p_test",
-                task_id="read_02_claim_inventory",
+                task_id=claim_task.task_id,
                 observation_type=ObservationType.CLAIM,
                 statement="The paper proposes a block table method.",
                 source_ids=[claim_span.source_id],
+                covered_outputs=claim_task.required_outputs,
             )
         )
         .append(
             ObservationCard(
                 observation_id="obs_mechanism",
                 paper_id="p_test",
-                task_id="read_03_method_mechanism",
+                task_id=mechanism_task.task_id,
                 observation_type=ObservationType.MECHANISM,
                 statement="The block table mechanism organizes serving state.",
                 source_ids=[mechanism_span.source_id],
+                covered_outputs=mechanism_task.required_outputs,
                 proposed_links=[
                     {"source_id": "obs_mechanism", "target_id": "obs_claim", "kind": "explains"}
                 ],
@@ -2368,19 +2399,22 @@ def test_core_v2_qa_context_returns_no_matches_for_unrelated_question(tmp_path):
         layout=layout,
     )
     claim_span = next(span for span in dom.spans if "block table method" in span.text)
+    reading_plan = reading_plan_subset(dom, ReadingTaskType.CLAIM_INVENTORY)
+    claim_task = reading_task(reading_plan, ReadingTaskType.CLAIM_INVENTORY)
     write_core_v2_from_observation_log(
         data_dir=data_dir,
         paper=paper,
         dom=dom,
-        reading_plan=build_initial_reading_plan(dom),
+        reading_plan=reading_plan,
         observation_log=ObservationLog(paper_id="p_test").append(
             ObservationCard(
                 observation_id="obs_claim",
                 paper_id="p_test",
-                task_id="read_02_claim_inventory",
+                task_id=claim_task.task_id,
                 observation_type=ObservationType.CLAIM,
                 statement="The paper proposes a block table method.",
                 source_ids=[claim_span.source_id],
+                covered_outputs=claim_task.required_outputs,
             )
         ),
         producer="unit_test",
@@ -2584,19 +2618,22 @@ def test_export_writes_core_graph_report_view_for_reviewed_core_artifacts(tmp_pa
         layout=layout,
     )
     source_id = next(span.source_id for span in dom.spans if "block table method" in span.text)
+    reading_plan = reading_plan_subset(dom, ReadingTaskType.CLAIM_INVENTORY)
+    claim_task = reading_task(reading_plan, ReadingTaskType.CLAIM_INVENTORY)
     write_core_v2_from_observation_log(
         data_dir=data_dir,
         paper=paper,
         dom=dom,
-        reading_plan=build_initial_reading_plan(dom),
+        reading_plan=reading_plan,
         observation_log=ObservationLog(paper_id="p_test").append(
             ObservationCard(
                 observation_id="obs_claim",
                 paper_id="p_test",
-                task_id="read_02_claim_inventory",
+                task_id=claim_task.task_id,
                 observation_type=ObservationType.CLAIM,
                 statement="We propose a block table method for faster serving.",
                 source_ids=[source_id],
+                covered_outputs=claim_task.required_outputs,
             )
         ),
         producer="unit_test",
@@ -2656,19 +2693,22 @@ def test_report_memory_context_prefers_reviewed_core_memory_view(tmp_path):
         layout=layout,
     )
     source_id = next(span.source_id for span in dom.spans if "block table method" in span.text)
+    reading_plan = reading_plan_subset(dom, ReadingTaskType.CLAIM_INVENTORY)
+    claim_task = reading_task(reading_plan, ReadingTaskType.CLAIM_INVENTORY)
     write_core_v2_from_observation_log(
         data_dir=data_dir,
         paper=paper,
         dom=dom,
-        reading_plan=build_initial_reading_plan(dom),
+        reading_plan=reading_plan,
         observation_log=ObservationLog(paper_id="p_test").append(
             ObservationCard(
                 observation_id="obs_claim",
                 paper_id="p_test",
-                task_id="read_02_claim_inventory",
+                task_id=claim_task.task_id,
                 observation_type=ObservationType.CLAIM,
                 statement="We propose a block table method for faster serving.",
                 source_ids=[source_id],
+                covered_outputs=claim_task.required_outputs,
             )
         ),
         producer="unit_test",
@@ -2848,19 +2888,22 @@ def test_core_v2_qa_context_requires_quality_metrics_gate(tmp_path):
         layout=layout,
     )
     claim_span = next(span for span in dom.spans if "block table method" in span.text)
+    reading_plan = reading_plan_subset(dom, ReadingTaskType.CLAIM_INVENTORY)
+    claim_task = reading_task(reading_plan, ReadingTaskType.CLAIM_INVENTORY)
     write_core_v2_from_observation_log(
         data_dir=data_dir,
         paper=paper,
         dom=dom,
-        reading_plan=build_initial_reading_plan(dom),
+        reading_plan=reading_plan,
         observation_log=ObservationLog(paper_id="p_test").append(
             ObservationCard(
                 observation_id="obs_claim",
                 paper_id="p_test",
-                task_id="read_02_claim_inventory",
+                task_id=claim_task.task_id,
                 observation_type=ObservationType.CLAIM,
                 statement="The paper proposes a block table method.",
                 source_ids=[claim_span.source_id],
+                covered_outputs=claim_task.required_outputs,
             )
         ),
         producer="unit_test",
@@ -2919,30 +2962,41 @@ def test_library_rebuild_indexes_core_v2_claim_graph_without_memory_v3(tmp_path)
     claim_span = next(span for span in dom.spans if "block table method" in span.text)
     mechanism_span = next(span for span in dom.spans if "organizes serving state" in span.text)
     result_span = next(span for span in dom.spans if "27%" in span.text)
+    reading_plan = reading_plan_subset(
+        dom,
+        ReadingTaskType.CLAIM_INVENTORY,
+        ReadingTaskType.METHOD_MECHANISM,
+        ReadingTaskType.RESULT_EXTRACTION,
+    )
+    claim_task = reading_task(reading_plan, ReadingTaskType.CLAIM_INVENTORY)
+    mechanism_task = reading_task(reading_plan, ReadingTaskType.METHOD_MECHANISM)
+    result_task = reading_task(reading_plan, ReadingTaskType.RESULT_EXTRACTION)
     write_core_v2_from_observation_log(
         data_dir=output_dir / ".paperlens" / "data",
         paper=paper,
         dom=dom,
-        reading_plan=build_initial_reading_plan(dom),
+        reading_plan=reading_plan,
         observation_log=ObservationLog(paper_id="p_test")
         .append(
             ObservationCard(
                 observation_id="obs_claim",
                 paper_id="p_test",
-                task_id="read_02_claim_inventory",
+                task_id=claim_task.task_id,
                 observation_type=ObservationType.CLAIM,
                 statement="The paper proposes a block table method.",
                 source_ids=[claim_span.source_id],
+                covered_outputs=claim_task.required_outputs,
             )
         )
         .append(
             ObservationCard(
                 observation_id="obs_mechanism",
                 paper_id="p_test",
-                task_id="read_03_method_mechanism",
+                task_id=mechanism_task.task_id,
                 observation_type=ObservationType.MECHANISM,
                 statement="The block table mechanism organizes serving state.",
                 source_ids=[mechanism_span.source_id],
+                covered_outputs=mechanism_task.required_outputs,
                 proposed_links=[
                     {"source_id": "obs_mechanism", "target_id": "obs_claim", "kind": "explains"}
                 ],
@@ -2952,10 +3006,11 @@ def test_library_rebuild_indexes_core_v2_claim_graph_without_memory_v3(tmp_path)
             ObservationCard(
                 observation_id="obs_result",
                 paper_id="p_test",
-                task_id="read_06_result_extraction",
+                task_id=result_task.task_id,
                 observation_type=ObservationType.RESULT,
                 statement="The method improves latency by 27% on Dataset-A.",
                 source_ids=[result_span.source_id],
+                covered_outputs=result_task.required_outputs,
                 extracted_numbers=[{"text": "27%"}],
             )
         ),
@@ -3071,19 +3126,22 @@ def test_library_rebuild_does_not_index_stale_reviewed_graph_with_current_audit_
         layout=layout,
     )
     claim_span = next(span for span in dom.spans if "block table method" in span.text)
+    reading_plan = reading_plan_subset(dom, ReadingTaskType.CLAIM_INVENTORY)
+    claim_task = reading_task(reading_plan, ReadingTaskType.CLAIM_INVENTORY)
     write_core_v2_from_observation_log(
         data_dir=data_dir,
         paper=paper,
         dom=dom,
-        reading_plan=build_initial_reading_plan(dom),
+        reading_plan=reading_plan,
         observation_log=ObservationLog(paper_id="p_test").append(
             ObservationCard(
                 observation_id="obs_claim",
                 paper_id="p_test",
-                task_id="read_02_claim_inventory",
+                task_id=claim_task.task_id,
                 observation_type=ObservationType.CLAIM,
                 statement="The paper proposes a block table method.",
                 source_ids=[claim_span.source_id],
+                covered_outputs=claim_task.required_outputs,
             )
         ),
         producer="unit_test",
@@ -3173,19 +3231,22 @@ def test_library_rebuild_requires_quality_metrics_gate_for_core_v2_graph(tmp_pat
         layout=layout,
     )
     claim_span = next(span for span in dom.spans if "block table method" in span.text)
+    reading_plan = reading_plan_subset(dom, ReadingTaskType.CLAIM_INVENTORY)
+    claim_task = reading_task(reading_plan, ReadingTaskType.CLAIM_INVENTORY)
     write_core_v2_from_observation_log(
         data_dir=data_dir,
         paper=paper,
         dom=dom,
-        reading_plan=build_initial_reading_plan(dom),
+        reading_plan=reading_plan,
         observation_log=ObservationLog(paper_id="p_test").append(
             ObservationCard(
                 observation_id="obs_claim",
                 paper_id="p_test",
-                task_id="read_02_claim_inventory",
+                task_id=claim_task.task_id,
                 observation_type=ObservationType.CLAIM,
                 statement="The paper proposes a block table method.",
                 source_ids=[claim_span.source_id],
+                covered_outputs=claim_task.required_outputs,
             )
         ),
         producer="unit_test",
