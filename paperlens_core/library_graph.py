@@ -640,11 +640,16 @@ def compact_graph_summary_for_index(value: Any) -> dict[str, Any]:
         return {}
     return {
         "schema_version": summary.get("schema_version"),
+        "graph_access": summary.get("graph_access"),
+        "source": dict_value(summary.get("source")),
         "quality": dict_value(summary.get("quality")),
         "node_counts": dict_value(summary.get("node_counts")),
+        "problem_nodes": compact_graph_nodes(summary.get("problem_nodes"))[:4],
+        "claim_nodes": compact_graph_nodes(summary.get("claim_nodes"))[:8],
         "method_family": (summary.get("method_family") or [])[:6]
         if isinstance(summary.get("method_family"), list)
         else [],
+        "mechanism_nodes": compact_graph_nodes(summary.get("mechanism_nodes"))[:6],
         "evaluation_datasets": (summary.get("evaluation_datasets") or [])[:8]
         if isinstance(summary.get("evaluation_datasets"), list)
         else [],
@@ -657,6 +662,9 @@ def compact_graph_summary_for_index(value: Any) -> dict[str, Any]:
         "evaluation_metric_mentions": compact_term_mentions(
             summary.get("evaluation_metric_mentions")
         ),
+        "relations": summary.get("relations", [])[:8]
+        if isinstance(summary.get("relations"), list)
+        else [],
     }
 
 
