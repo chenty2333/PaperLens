@@ -90,6 +90,7 @@ from paperlens_core.workflow.core_v2 import (
     write_core_v2_artifacts,
     write_core_v2_from_observation_log,
 )
+from paperlens_core.workflow.manifest import validate_paperlens_output
 
 
 def sample_dom():
@@ -1897,6 +1898,91 @@ def test_core_v2_manifest_reaudits_current_artifacts_before_consumable(tmp_path)
     assert manifest["publish_status"] == PublishStatus.DRAFT_WEAK
     assert manifest["consumable"] is False
     assert "missing_reading_required_output" in manifest["current_audit_issue_codes"]
+
+
+def test_output_validation_rejects_stale_core_v2_manifest_data(tmp_path):
+    output_dir = tmp_path / "out"
+    data_dir = output_dir / ".paperlens" / "data"
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    layout = {
+        "pages": [
+            {
+                "page_no": 1,
+                "text": "Abstract\n\nWe propose a block table method for serving.",
+                "section_candidates": [{"title": "Abstract", "level": 1}],
+            }
+        ]
+    }
+    dom = build_paper_dom_from_layout(
+        paper_id=paper.paper_id,
+        title=paper.canonical_title,
+        layout=layout,
+    )
+    source_id = next(span.source_id for span in dom.spans if "block table method" in span.text)
+    reading_plan = reading_plan_subset(dom, ReadingTaskType.CLAIM_INVENTORY)
+    claim_task = reading_task(reading_plan, ReadingTaskType.CLAIM_INVENTORY)
+    write_core_v2_from_observation_log(
+        data_dir=data_dir,
+        paper=paper,
+        dom=dom,
+        reading_plan=reading_plan,
+        observation_log=ObservationLog(paper_id="p_test").append(
+            ObservationCard(
+                observation_id="obs_claim",
+                paper_id="p_test",
+                task_id=claim_task.task_id,
+                observation_type=ObservationType.CLAIM,
+                statement="The paper proposes a block table method.",
+                source_ids=[source_id],
+                covered_outputs=claim_task.required_outputs,
+            )
+        ),
+        producer="unit_test",
+    )
+    manifest_path = data_dir / "core" / "v2" / "p_test" / "core_manifest.v1.json"
+    manifest_envelope = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_envelope["data"]["publish_status"] = PublishStatus.BLOCKED
+    manifest_path.write_text(json.dumps(manifest_envelope, ensure_ascii=False), encoding="utf-8")
+    (output_dir / "papers").mkdir(parents=True)
+    (output_dir / ".paperlens" / "library" / "index").mkdir(parents=True)
+    (output_dir / ".paperlens" / "data" / "memory" / "v3").mkdir(parents=True)
+    (output_dir / "PaperLens.md").write_text(
+        "# PaperLens\n\n- [A] [Test Paper](./papers/p_test.md)\n",
+        encoding="utf-8",
+    )
+    (output_dir / "papers" / "p_test.md").write_text(
+        "# Test Paper\n\nA useful report.\n",
+        encoding="utf-8",
+    )
+    (output_dir / ".paperlens" / "library" / "library_records.jsonl").write_text(
+        "{}\n",
+        encoding="utf-8",
+    )
+    (output_dir / ".paperlens" / "library" / "index" / "search_index.json").write_text(
+        "[]",
+        encoding="utf-8",
+    )
+    (
+        output_dir
+        / ".paperlens"
+        / "data"
+        / "memory"
+        / "v3"
+        / "p_test.paper_memory.v3.json"
+    ).write_text("{}", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Core v2 manifest is stale"):
+        validate_paperlens_output(
+            output_dir,
+            expected_report_names={"p_test.md"},
+            expected_paper_ids={"p_test"},
+        )
 
 
 def test_refresh_core_v2_audit_artifacts_blocks_missing_dom_sources(tmp_path):

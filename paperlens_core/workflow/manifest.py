@@ -9,6 +9,22 @@ from typing import Any
 from paperlens_core.core_manifest import inspect_core_v2_artifact_root
 
 
+CORE_MANIFEST_CONSISTENCY_KEYS = [
+    "schema_version",
+    "paper_id",
+    "status",
+    "publish_status",
+    "artifact_publish_status",
+    "current_audit_publish_status",
+    "current_audit_error_count",
+    "current_audit_warning_count",
+    "current_audit_issue_codes",
+    "consumable",
+    "required_artifacts",
+    "issues",
+]
+
+
 def validate_paperlens_output(
     output_dir: Path,
     *,
@@ -146,6 +162,16 @@ def validate_paperlens_output(
         inspected_manifest = inspect_core_v2_artifact_root(paper_root, paper_id)
         if inspected_manifest.get("status") != "COMPLETE":
             issues.append(f"Core v2 artifact set is incomplete for {paper_id}")
+            continue
+        manifest_mismatches = core_manifest_data_mismatches(
+            stored=data,
+            inspected=inspected_manifest,
+        )
+        if manifest_mismatches:
+            issues.append(
+                f"Core v2 manifest is stale for {paper_id}: "
+                + ", ".join(manifest_mismatches[:3])
+            )
     result = {
         "status": "PASS" if not issues else "FAIL",
         "checked_links": checked_links,
@@ -158,6 +184,20 @@ def validate_paperlens_output(
     if issues:
         raise RuntimeError("Output validation failed: " + "; ".join(issues[:5]))
     return result
+
+
+def core_manifest_data_mismatches(
+    *,
+    stored: dict[str, Any],
+    inspected: dict[str, Any],
+) -> list[str]:
+    mismatches = []
+    for key in CORE_MANIFEST_CONSISTENCY_KEYS:
+        stored_value = stored.get(key)
+        inspected_value = inspected.get(key)
+        if stored_value != inspected_value:
+            mismatches.append(f"{key} stored={stored_value!r} current={inspected_value!r}")
+    return mismatches
 
 
 def summarize_model_calls(path: Path) -> dict[str, Any]:
