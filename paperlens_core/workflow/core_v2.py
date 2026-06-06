@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from paperlens_core.audit import (
     audit_claim_graph,
@@ -11,8 +11,11 @@ from paperlens_core.audit import (
     compute_core_quality_metrics,
 )
 from paperlens_core.agents.llm import JsonLlmClient, llm_call_context
+from paperlens_core.config import CoreConfig
+from paperlens_core.control import ControlState
 from paperlens_core.core_manifest import write_core_v2_manifest
 from paperlens_core.dom import PaperDOM, PaperSpan, build_paper_dom_from_layout
+from paperlens_core.events import EventWriter
 from paperlens_core.graph import ClaimGraph, graph_from_observations
 from paperlens_core.memory import materialize_paper_memory
 from paperlens_core.reading import (
@@ -46,6 +49,199 @@ CORE_V2_OBSERVER_SYSTEM_PROMPT = """
 You are the PaperLens observation node.
 Return JSON only.
 """.strip()
+
+
+class CoreV2WorkflowContext(Protocol):
+    data_dir: Path
+    config: CoreConfig
+    events: EventWriter
+    control: ControlState
+    papers: list[PaperRecord]
+    skim_cards: list[SkimCard]
+    classifications: list[ClassificationDecision]
+
+    def checkpoint(self, stage: str) -> None: ...
+
+    def llm_enabled(self) -> bool: ...
+
+    def new_llm_client(self) -> JsonLlmClient: ...
+
+    def mark_paper_state(
+        self,
+        paper_id: str,
+        stage: str,
+        *,
+        side_statuses: list[str] | None = None,
+        error: str | None = None,
+    ) -> None: ...
+
+    def register_file_artifact(
+        self,
+        path: Path,
+        *,
+        paper_id: str | None,
+        artifact_type: str,
+        depends_on: list[str] | None = None,
+    ) -> None: ...
+
+    def write_agent_run(self, payload: dict[str, Any]) -> None: ...
+
+    def record_llm_usage(self, stage: str, usage: dict[str, Any]) -> None: ...
+
+
+def run_core_v2_observation_stage(workflow: CoreV2WorkflowContext) -> None:
+    stage = "stage_07_normal_read"
+    workflow.checkpoint(stage)
+    llm_enabled = workflow.llm_enabled()
+    workflow.events.stage_started(
+        stage,
+        "Building core v2 ObservationLog and ClaimGraph from PaperDOM evidence"
+        if llm_enabled
+        else "Using deterministic core v2 bootstrap artifacts",
+    )
+    if llm_enabled and workflow.papers:
+        client = workflow.new_llm_client()
+        for paper in workflow.papers:
+            workflow.control.wait_if_paused()
+            workflow.control.require_not_cancelled()
+            workflow.events.emit(
+                "agent_run_started",
+                stage=stage,
+                message=f"Core v2 observation read {paper.paper_id}",
+                data={"paper_id": paper.paper_id, "read_mode": workflow.config.read_mode},
+            )
+            run_core_v2_observation_read(
+                workflow,
+                client=client,
+                stage=stage,
+                paper=paper,
+            )
+            workflow.mark_paper_state(paper.paper_id, stage)
+            workflow.events.emit(
+                "agent_run_completed",
+                stage=stage,
+                message=f"Core v2 observation read completed for {paper.paper_id}",
+                data={"paper_id": paper.paper_id},
+            )
+    else:
+        for paper in workflow.papers:
+            workflow.mark_paper_state(paper.paper_id, stage)
+    workflow.events.stage_completed(
+        stage,
+        "Core v2 observation stage completed",
+        {"papers": len(workflow.papers), "llm_enabled": llm_enabled},
+    )
+
+
+def run_core_v2_observation_read(
+    workflow: CoreV2WorkflowContext,
+    *,
+    client: JsonLlmClient,
+    stage: str,
+    paper: PaperRecord,
+) -> None:
+    try:
+        result = run_core_v2_model_observation_tasks(
+            client=client,
+            data_dir=workflow.data_dir,
+            paper=paper,
+            stage=stage,
+            record_usage=workflow.record_llm_usage,
+            record_agent_run=workflow.write_agent_run,
+        )
+        for artifact_type, path in result["paths"].items():
+            workflow.register_file_artifact(
+                path,
+                paper_id=paper.paper_id,
+                artifact_type=f"core_v2_model_{artifact_type}",
+                depends_on=[f"core_v2_reading_plan:{paper.paper_id}"],
+            )
+        workflow.events.emit(
+            "core_v2_observation_read_completed",
+            stage=stage,
+            message=f"Core v2 observation read completed for {paper.paper_id}",
+            data={
+                "paper_id": paper.paper_id,
+                "tasks": result["tasks"],
+                "cards": result["cards"],
+            },
+        )
+    except Exception as exc:
+        workflow.write_agent_run(
+            {
+                "agent_run_id": f"core_v2_observe_{paper.paper_id}_failed",
+                "paper_id": paper.paper_id,
+                "stage": stage,
+                "operation": "core_v2_observation_read",
+                "provider_kind": client.config.kind,
+                "model": client.config.model,
+                "status": "FAIL",
+                "error": str(exc),
+            }
+        )
+        raise
+
+
+def refresh_core_v2_deterministic_audits(
+    workflow: CoreV2WorkflowContext,
+    stage: str,
+) -> list[dict[str, Any]]:
+    skim_by_id = {card.paper_id: card for card in workflow.skim_cards}
+    decision_by_id = {decision.paper_id: decision for decision in workflow.classifications}
+    rows: list[dict[str, Any]] = []
+    for paper in workflow.papers:
+        try:
+            result = refresh_core_v2_audit_artifacts(
+                data_dir=workflow.data_dir,
+                paper=paper,
+                skim=skim_by_id.get(paper.paper_id),
+                decision=decision_by_id.get(paper.paper_id),
+            )
+        except FileNotFoundError:
+            if (workflow.data_dir / "core" / "v2" / paper.paper_id).exists():
+                raise
+            continue
+        for artifact_type, path in result["paths"].items():
+            workflow.register_file_artifact(
+                path,
+                paper_id=paper.paper_id,
+                artifact_type=f"core_v2_audit_{artifact_type}",
+                depends_on=[
+                    f"core_v2_paper_dom:{paper.paper_id}",
+                    f"core_v2_claim_graph:{paper.paper_id}",
+                ],
+            )
+        side_statuses = []
+        publish_status = str(result["publish_status"])
+        if publish_status != "REVIEWED":
+            side_statuses.append(f"CORE_V2_{publish_status}")
+        workflow.mark_paper_state(paper.paper_id, stage, side_statuses=side_statuses)
+        row = {
+            "paper_id": paper.paper_id,
+            "publish_status": publish_status,
+            "graph_findings": result["graph_findings"],
+            "report_findings": result["report_findings"],
+        }
+        rows.append(row)
+        workflow.events.emit(
+            "core_v2_audit_completed",
+            stage=stage,
+            message=f"Core v2 deterministic audit completed for {paper.paper_id}",
+            data=row,
+        )
+    return rows
+
+
+def run_core_v2_audit_stage(workflow: CoreV2WorkflowContext) -> None:
+    stage = "stage_08_evidence_verify"
+    workflow.checkpoint(stage)
+    workflow.events.stage_started(stage, "Running deterministic core v2 audit suite")
+    core_v2_rows = refresh_core_v2_deterministic_audits(workflow, stage)
+    workflow.events.stage_completed(
+        stage,
+        "Core v2 deterministic audit completed",
+        {"core_v2_audits": len(core_v2_rows)},
+    )
 
 OBSERVATION_CARDS_SCHEMA: dict[str, Any] = {
     "type": "object",

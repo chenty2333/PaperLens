@@ -47,8 +47,8 @@ from paperlens_core.workflow.parse import (
 )
 from paperlens_core.workflow.skim import run_skim_stage
 from paperlens_core.workflow.core_v2 import (
-    refresh_core_v2_audit_artifacts,
-    run_core_v2_model_observation_tasks,
+    run_core_v2_audit_stage,
+    run_core_v2_observation_stage,
 )
 from paperlens_core.workflow.visual import run_vlm_page_mode as run_visual_vlm_page_mode
 from paperlens_core.workflow.utils import (
@@ -368,151 +368,10 @@ class PaperLensWorkflow:
         write_llm_cache(path, payload)
 
     def stage_07_normal_read(self) -> None:
-        stage = "stage_07_normal_read"
-        self.checkpoint(stage)
-        llm_enabled = self.llm_enabled()
-        self.events.stage_started(
-            stage,
-            "Building core v2 ObservationLog and ClaimGraph from PaperDOM evidence"
-            if llm_enabled
-            else "Using deterministic core v2 bootstrap artifacts",
-        )
-        if llm_enabled and self.papers:
-            client = self.new_llm_client()
-            for paper in self.papers:
-                self.control.wait_if_paused()
-                self.control.require_not_cancelled()
-                self.events.emit(
-                    "agent_run_started",
-                    stage=stage,
-                    message=f"Core v2 observation read {paper.paper_id}",
-                    data={"paper_id": paper.paper_id, "read_mode": self.config.read_mode},
-                )
-                self.run_core_v2_observation_read(
-                    client=client,
-                    stage=stage,
-                    paper=paper,
-                )
-                self.mark_paper_state(paper.paper_id, stage)
-                self.events.emit(
-                    "agent_run_completed",
-                    stage=stage,
-                    message=f"Core v2 observation read completed for {paper.paper_id}",
-                    data={"paper_id": paper.paper_id},
-                )
-        else:
-            for paper in self.papers:
-                self.mark_paper_state(paper.paper_id, stage)
-        self.events.stage_completed(
-            stage,
-            "Core v2 observation stage completed",
-            {"papers": len(self.papers), "llm_enabled": llm_enabled},
-        )
-
-    def run_core_v2_observation_read(
-        self,
-        *,
-        client: JsonLlmClient,
-        stage: str,
-        paper: PaperRecord,
-    ) -> None:
-        try:
-            result = run_core_v2_model_observation_tasks(
-                client=client,
-                data_dir=self.data_dir,
-                paper=paper,
-                stage=stage,
-                record_usage=self.record_llm_usage,
-                record_agent_run=self.write_agent_run,
-            )
-            for artifact_type, path in result["paths"].items():
-                self.register_file_artifact(
-                    path,
-                    paper_id=paper.paper_id,
-                    artifact_type=f"core_v2_model_{artifact_type}",
-                    depends_on=[f"core_v2_reading_plan:{paper.paper_id}"],
-                )
-            self.events.emit(
-                "core_v2_observation_read_completed",
-                stage=stage,
-                message=f"Core v2 observation read completed for {paper.paper_id}",
-                data={
-                    "paper_id": paper.paper_id,
-                    "tasks": result["tasks"],
-                    "cards": result["cards"],
-                },
-            )
-        except Exception as exc:
-            self.write_agent_run(
-                {
-                    "agent_run_id": f"core_v2_observe_{paper.paper_id}_failed",
-                    "paper_id": paper.paper_id,
-                    "stage": stage,
-                    "operation": "core_v2_observation_read",
-                    "provider_kind": client.config.kind,
-                    "model": client.config.model,
-                    "status": "FAIL",
-                    "error": str(exc),
-                }
-            )
-            raise
-
-    def refresh_core_v2_deterministic_audits(self, stage: str) -> list[dict[str, Any]]:
-        skim_by_id = {card.paper_id: card for card in self.skim_cards}
-        decision_by_id = {decision.paper_id: decision for decision in self.classifications}
-        rows: list[dict[str, Any]] = []
-        for paper in self.papers:
-            try:
-                result = refresh_core_v2_audit_artifacts(
-                    data_dir=self.data_dir,
-                    paper=paper,
-                    skim=skim_by_id.get(paper.paper_id),
-                    decision=decision_by_id.get(paper.paper_id),
-                )
-            except FileNotFoundError:
-                if (self.data_dir / "core" / "v2" / paper.paper_id).exists():
-                    raise
-                continue
-            for artifact_type, path in result["paths"].items():
-                self.register_file_artifact(
-                    path,
-                    paper_id=paper.paper_id,
-                    artifact_type=f"core_v2_audit_{artifact_type}",
-                    depends_on=[
-                        f"core_v2_paper_dom:{paper.paper_id}",
-                        f"core_v2_claim_graph:{paper.paper_id}",
-                    ],
-                )
-            side_statuses = []
-            publish_status = str(result["publish_status"])
-            if publish_status != "REVIEWED":
-                side_statuses.append(f"CORE_V2_{publish_status}")
-            self.mark_paper_state(paper.paper_id, stage, side_statuses=side_statuses)
-            row = {
-                "paper_id": paper.paper_id,
-                "publish_status": publish_status,
-                "graph_findings": result["graph_findings"],
-                "report_findings": result["report_findings"],
-            }
-            rows.append(row)
-            self.events.emit(
-                "core_v2_audit_completed",
-                stage=stage,
-                message=f"Core v2 deterministic audit completed for {paper.paper_id}",
-                data=row,
-            )
-        return rows
+        run_core_v2_observation_stage(self)
 
     def stage_08_evidence_verify(self) -> None:
-        stage = "stage_08_evidence_verify"
-        self.checkpoint(stage)
-        self.events.stage_started(stage, "Running deterministic core v2 audit suite")
-        core_v2_rows = self.refresh_core_v2_deterministic_audits(stage)
-        self.events.stage_completed(
-            stage,
-            "Core v2 deterministic audit completed",
-            {"core_v2_audits": len(core_v2_rows)},
-        )
+        run_core_v2_audit_stage(self)
 
     def stage_15_export(self) -> list[Path]:
         stage = "stage_15_export"
