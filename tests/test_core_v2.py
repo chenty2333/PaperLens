@@ -4598,6 +4598,10 @@ def test_stage17_manifest_includes_core_quality_snapshot(tmp_path):
         )
         assert snapshot["artifact_type"] == "core_quality_snapshot"
         assert snapshot["data"]["paper_count"] == 1
+        assert manifest["core_quality"]["paper_count"] == 1
+        assert manifest["core_quality"]["aggregate"]["paper_count"] == 1
+        assert manifest["core_quality"]["aggregate"]["blocked_paper_count"] == 0
+        assert manifest["core_quality"]["aggregate"]["draft_weak_paper_count"] == 0
     finally:
         pipeline.db.close()
 

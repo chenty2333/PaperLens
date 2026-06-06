@@ -1825,7 +1825,11 @@ class PaperLensWorkflow:
         )
         model_call_summary = summarize_model_calls(self.data_dir / "model_calls.jsonl")
         write_json(self.data_dir / "model_call_summary.json", model_call_summary)
-        write_core_quality_snapshot(self.output_dir)
+        core_quality_snapshot_path = write_core_quality_snapshot(self.output_dir)
+        core_quality_snapshot_payload = json.loads(
+            core_quality_snapshot_path.read_text(encoding="utf-8")
+        )
+        core_quality_snapshot_data = dict_value(core_quality_snapshot_payload.get("data"))
         manifest = {
             "run_id": self.events.run_id,
             "input_dir": str(self.input_dir),
@@ -1852,6 +1856,10 @@ class PaperLensWorkflow:
                 "output_validation": output_validation,
             },
             "model_calls": model_call_summary,
+            "core_quality": {
+                "paper_count": core_quality_snapshot_data.get("paper_count"),
+                "aggregate": dict_value(core_quality_snapshot_data.get("aggregate")),
+            },
             "budget": self.budget.public_dict(),
         }
         write_json(
