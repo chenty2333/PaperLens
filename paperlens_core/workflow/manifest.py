@@ -27,6 +27,7 @@ CORE_MANIFEST_CONSISTENCY_KEYS = [
     "current_audit_issue_codes",
     "consumable",
     "required_artifacts",
+    "optional_artifacts",
     "issues",
 ]
 

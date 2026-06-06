@@ -50,16 +50,17 @@ output/
       core/
         v2/
           <paper_id>/
-            paper_dom.v1.json
-            reading_plan.v1.json
-            observation_log.v1.json
-            claim_graph.v1.json
-            audit_findings.v1.json
-            quality_metrics.v1.json
-            paper_memory_view.v1.json
-            report_draft.v1.json
-            report_audit_findings.v1.json
-            core_manifest.v1.json
+            paper_dom.v2.json
+            reading_plan.v2.json
+            observation_log.v2.json
+            claim_graph.v2.json
+            relation_candidate_log.v2.json
+            audit_findings.v2.json
+            quality_metrics.v2.json
+            paper_memory_view.v2.json
+            report_draft.v2.json
+            report_audit_findings.v2.json
+            core_manifest.v2.json
 ```
 
 如果直接看输出文件，先打开 `PaperLens.md`。桌面 App 读取同一个输出目录，并展示 library、capsule、evidence 和 chat。
