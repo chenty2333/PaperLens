@@ -189,6 +189,8 @@ def run_finite_node(
             )
         if spec.output_artifact_type and output is not None:
             output.require_type(spec.output_artifact_type)
+        if output is not None:
+            validate_output_source_ids_from_tool_trace(spec, output, context)
         return NodeResult(
             node_id=spec.node_id,
             status=NodeStatus.PASS,
@@ -250,6 +252,23 @@ def merge_numeric_usage(target: dict[str, Any], source: dict[str, Any]) -> None:
         if isinstance(value, (int, float)):
             previous = target.get(key)
             target[key] = (previous if isinstance(previous, (int, float)) else 0) + value
+
+
+def validate_output_source_ids_from_tool_trace(
+    spec: NodeSpec,
+    output: ArtifactEnvelope,
+    context: NodeContext,
+) -> None:
+    if not output.source_ids:
+        return
+    tool_source_ids = {
+        source_id for values in context.tool_source_ids.values() for source_id in values
+    }
+    unknown = [source_id for source_id in output.source_ids if source_id not in tool_source_ids]
+    if unknown:
+        raise NodeExecutionError(
+            f"{spec.node_id} output source_ids outside tool trace: {', '.join(unknown[:8])}"
+        )
 
 
 def clean_source_ids(value: list[str] | tuple[str, ...] | None) -> list[str]:

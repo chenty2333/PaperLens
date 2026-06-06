@@ -1296,6 +1296,7 @@ def test_finite_runtime_node_enforces_allowed_tools():
             artifact_type="observation_cards",
             producer="unit",
             data=[],
+            source_ids=["span:p_test:p1:1"],
         )
 
     result = run_finite_node(spec, [], handler)
@@ -1304,6 +1305,33 @@ def test_finite_runtime_node_enforces_allowed_tools():
     assert result.tool_calls_used == 1
     assert result.used_tools == ["paper_dom.read_sources"]
     assert result.tool_source_ids == {"paper_dom.read_sources": ["span:p_test:p1:1"]}
+    assert result.output is not None
+    assert result.output.source_ids == ["span:p_test:p1:1"]
+
+
+def test_finite_runtime_node_rejects_output_source_ids_outside_tool_trace():
+    spec = NodeSpec(
+        node_id="read_sources",
+        output_artifact_type="observation_cards",
+        allowed_tools=("paper_dom.read_sources",),
+    )
+
+    def handler(context):
+        context.record_tool_call(
+            "paper_dom.read_sources",
+            source_ids=["span:p_test:p1:1"],
+        )
+        return ArtifactEnvelope(
+            artifact_type="observation_cards",
+            producer="unit",
+            data=[],
+            source_ids=["span:p_test:p2:9"],
+        )
+
+    result = run_finite_node(spec, [], handler)
+
+    assert result.status == NodeStatus.FAIL
+    assert "output source_ids outside tool trace: span:p_test:p2:9" in result.issues[0]
 
 
 def test_finite_runtime_node_rejects_disallowed_tools():

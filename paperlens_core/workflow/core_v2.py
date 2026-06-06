@@ -278,7 +278,10 @@ def run_core_v2_model_observation_tasks(
                 )
             raw_results.append(raw)
             context.record_token_usage(dict(getattr(raw, "usage", {}) or {}))
-            return ArtifactEnvelope.model_validate(raw.data).require_type("observation_cards")
+            envelope = ArtifactEnvelope.model_validate(raw.data).require_type("observation_cards")
+            return envelope.model_copy(
+                update={"source_ids": observation_envelope_source_ids(envelope)}
+            )
 
         node_result = run_finite_node(spec, inputs, handler)
         raw = raw_results[0] if raw_results else None
@@ -878,6 +881,21 @@ def observation_cards_from_model_envelope(
                 ][:8],
             )
         )
+    return result
+
+
+def observation_envelope_source_ids(envelope: ArtifactEnvelope) -> list[str]:
+    data = envelope.data if isinstance(envelope.data, dict) else {}
+    cards = data.get("cards") if isinstance(data.get("cards"), list) else []
+    result: list[str] = []
+    for item in cards:
+        if not isinstance(item, dict):
+            continue
+        source_ids = item.get("source_ids") if isinstance(item.get("source_ids"), list) else []
+        for source_id in source_ids:
+            text = str(source_id or "").strip()
+            if text and text not in result:
+                result.append(text)
     return result
 
 
