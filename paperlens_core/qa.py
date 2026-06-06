@@ -41,11 +41,41 @@ ASK_PROMPT_VERSION = "qa-agent-v1"
 CORE_V2_QA_CONTEXT_VERSION = "paperlens_core_v2_qa_context.v1"
 CORE_V2_CONSUMABLE_STATUSES = {"REVIEWED", "REVIEWED_WITH_LIMITS"}
 
+QA_INTENT_NODE_KINDS: dict[str, tuple[str, ...]] = {
+    "evidence_check": ("claim", "evaluation", "result", "limitation"),
+    "comparison": ("claim", "limitation", "concept"),
+    "implementation": ("implementation", "mechanism"),
+    "reproduction": ("implementation", "limitation"),
+    "background_explanation": ("concept", "problem", "mechanism"),
+    "clarification": ("concept", "problem", "mechanism"),
+    "mechanism": ("mechanism", "implementation", "concept"),
+    "library_recall": ("claim", "mechanism", "evaluation", "result"),
+    "orientation": ("problem", "claim", "mechanism"),
+}
+
+QA_INTENT_QUERY_HINTS: dict[str, tuple[str, ...]] = {
+    "evidence_check": ("evidence", "result", "evaluation", "claim"),
+    "comparison": ("baseline", "compare", "comparison", "related", "prior"),
+    "implementation": ("implementation", "module", "training", "algorithm", "system"),
+    "reproduction": ("implementation", "code", "hardware", "repository", "reproduce"),
+    "background_explanation": ("concept", "definition", "background", "problem"),
+    "clarification": ("concept", "definition", "mechanism", "problem"),
+    "mechanism": ("mechanism", "method", "approach", "algorithm"),
+    "library_recall": ("claim", "method", "evaluation", "result"),
+    "orientation": ("problem", "motivation", "claim", "method"),
+}
+
 
 ASK_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["answer_markdown", "cited_pages", "confidence", "source_attribution"],
+    "required": [
+        "answer_markdown",
+        "cited_pages",
+        "cited_source_ids",
+        "confidence",
+        "source_attribution",
+    ],
     "properties": {
         "answer_markdown": {"type": "string"},
         "cited_pages": {"type": "array", "items": {"type": "integer", "minimum": 1}},
@@ -89,10 +119,12 @@ def answer_question(
     layout = load_layout(output_dir, resolved_paper_id)
     paper_memory_v3 = read_paper_memory_v3(output_dir, resolved_paper_id)
     library_record = load_library_record(output_dir, resolved_paper_id)
+    question_type = classify_question(question)
     core_v2_context = load_core_v2_qa_context(
         output_dir=output_dir,
         paper_id=resolved_paper_id,
         question=question,
+        question_type=question_type,
     )
     qa_memory = qa_memory_context(
         paper_id=resolved_paper_id,
@@ -102,7 +134,6 @@ def answer_question(
     augmented_query = memory_augmented_query(question, qa_memory)
     pages = select_relevant_pages(layout, augmented_query, paper_memory_v3=qa_memory)
     pages = merge_core_v2_pages(pages, layout, core_v2_context)
-    question_type = classify_question(question)
     layout_pages = [page for page in layout.get("pages", []) if isinstance(page, dict)]
     runtime = PaperLensRuntime(artifacts=layout_pages)
     agent_context = runtime.build_context_pack(
@@ -259,8 +290,11 @@ def load_core_v2_qa_context(
     output_dir: Path,
     paper_id: str,
     question: str,
+    question_type: str | None = None,
     limit: int = 8,
 ) -> dict[str, Any]:
+    resolved_question_type = question_type or classify_question(question)
+    retrieval_intent = qa_graph_retrieval_intent(resolved_question_type)
     try:
         data_dir = paperlens_data_dir(output_dir)
         dom, graph = load_core_v2_dom_and_graph(data_dir, paper_id)
@@ -272,6 +306,8 @@ def load_core_v2_qa_context(
             "schema_version": CORE_V2_QA_CONTEXT_VERSION,
             "paper_id": paper_id,
             "question": question,
+            "question_type": resolved_question_type,
+            "retrieval_intent": retrieval_intent,
             "retrieval_policy": core_v2_non_consumable_policy(core_manifest),
             "answer_source_policy": (
                 "Core v2 ClaimGraph is not in a reviewed publish state; do not use it as "
@@ -280,11 +316,19 @@ def load_core_v2_qa_context(
             "quality": core_v2_quality_context(core_manifest),
             "matches": [],
         }
-    matches = search_core_v2_graph(dom=dom, graph=graph, question=question, limit=limit)
+    matches = search_core_v2_graph(
+        dom=dom,
+        graph=graph,
+        question=question,
+        question_type=resolved_question_type,
+        limit=limit,
+    )
     return {
         "schema_version": CORE_V2_QA_CONTEXT_VERSION,
         "paper_id": paper_id,
         "question": question,
+        "question_type": resolved_question_type,
+        "retrieval_intent": retrieval_intent,
         "retrieval_policy": "claim_graph_nodes_with_paper_dom_source_ids",
         "answer_source_policy": (
             "Use graph node IDs and PaperDOM source IDs for paper claims; report Markdown is not "
@@ -412,9 +456,23 @@ def search_core_v2_graph(
     dom: PaperDOM,
     graph: ClaimGraph,
     question: str,
+    question_type: str,
     limit: int,
 ) -> list[dict[str, Any]]:
-    terms = tokenize(question)
+    retrieval_intent = qa_graph_retrieval_intent(question_type)
+    preferred_node_kinds = set(retrieval_intent["preferred_node_kinds"])
+    terms = tokenize(
+        " ".join(
+            [
+                question,
+                *[
+                    hint
+                    for hint in retrieval_intent["query_hints"]
+                    if isinstance(hint, str)
+                ],
+            ]
+        )
+    )
     source_index = core_v2_source_index(dom)
     scored: list[tuple[int, str, dict[str, Any]]] = []
     for node in graph.nodes.values():
@@ -438,6 +496,8 @@ def search_core_v2_graph(
             limit=8000,
         ).lower()
         score = sum(haystack.count(term) for term in terms) if terms else 1
+        if node.kind in preferred_node_kinds:
+            score += 1
         if score <= 0:
             continue
         scored.append(
@@ -489,6 +549,16 @@ def search_core_v2_graph(
                     )
                 )
     return [item for _score, _node_id, item in scored[: max(1, limit)]]
+
+
+def qa_graph_retrieval_intent(question_type: str) -> dict[str, Any]:
+    normalized = question_type if question_type in QA_INTENT_NODE_KINDS else "orientation"
+    return {
+        "question_type": normalized,
+        "policy": "classify_question_before_claim_graph_retrieval",
+        "preferred_node_kinds": list(QA_INTENT_NODE_KINDS[normalized]),
+        "query_hints": list(QA_INTENT_QUERY_HINTS.get(normalized, ())),
+    }
 
 
 def relationships_for_node(
@@ -844,6 +914,9 @@ def write_qa_trace(
             match.get("node_id")
             for match in list_of_dicts((core_v2_context or {}).get("matches"))[:8]
         ],
+        "core_v2_question_type": (core_v2_context or {}).get("question_type"),
+        "core_v2_retrieval_policy": (core_v2_context or {}).get("retrieval_policy"),
+        "core_v2_retrieval_intent": (core_v2_context or {}).get("retrieval_intent"),
         "source_attribution": answer.get("source_attribution"),
         "cache_hit": cache_hit,
         "agent_context": {

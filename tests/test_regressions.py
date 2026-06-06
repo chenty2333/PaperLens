@@ -1301,6 +1301,10 @@ def test_ask_prompt_requires_background_claim_separation():
     assert "supplied excerpts" not in ASK_SYSTEM_PROMPT
 
 
+def test_ask_schema_requires_paper_dom_source_ids():
+    assert "cited_source_ids" in ASK_SCHEMA["required"]
+
+
 def test_paper_qa_normalization_preserves_source_attribution():
     answer = normalize_answer(
         {

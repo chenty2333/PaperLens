@@ -2202,16 +2202,27 @@ def test_core_v2_qa_reads_claim_graph_without_final_markdown_report(tmp_path):
     context = load_core_v2_qa_context(
         output_dir=output_dir,
         paper_id="p_test",
-        question="block table method 是什么？",
+        question="什么是 block table method？",
+        question_type="clarification",
     )
     answer = answer_question(
         output_dir=output_dir,
         config=CoreConfig(offline_debug=True),
         paper_id="p_test",
-        question="block table method 是什么？",
+        question="什么是 block table method？",
     )
+    qa_trace = [
+        json.loads(line)
+        for line in (output_dir / ".paperlens" / "data" / "qa_trace.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+    ]
 
     assert context["matches"]
+    assert context["question_type"] == "clarification"
+    assert context["retrieval_intent"]["policy"] == "classify_question_before_claim_graph_retrieval"
+    assert "concept" in context["retrieval_intent"]["preferred_node_kinds"]
     assert context["matches"][0]["source_ids"][0].startswith("span:p_test:")
     assert context["matches"][0]["relationships"][0]["kind"] == "explains"
     assert context["matches"][0]["relationships"][0]["source_ids"]
@@ -2220,6 +2231,12 @@ def test_core_v2_qa_reads_claim_graph_without_final_markdown_report(tmp_path):
     assert "ClaimGraph" in answer["answer_markdown"]
     assert "relation:" in answer["answer_markdown"]
     assert answer["source_attribution"]["paper_claims"]
+    assert qa_trace[-1]["core_v2_question_type"] == "clarification"
+    assert qa_trace[-1]["core_v2_retrieval_policy"] == "claim_graph_nodes_with_paper_dom_source_ids"
+    assert (
+        qa_trace[-1]["core_v2_retrieval_intent"]["policy"]
+        == "classify_question_before_claim_graph_retrieval"
+    )
 
 
 def test_core_v2_qa_memory_view_promotes_reviewed_claim_graph_context(tmp_path):
