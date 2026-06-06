@@ -35,6 +35,7 @@ from paperlens_core.agent_loop import (
     parse_final_payload,
 )
 from paperlens_core.library import (
+    LIBRARY_ASK_SYSTEM_PROMPT,
     LIBRARY_RECORD_FILENAME,
     LIBRARY_RECORD_SCHEMA_VERSION,
     answer_library_question,
@@ -2183,6 +2184,19 @@ def test_library_ask_prompt_keeps_source_grounding():
                 "tags": ["kv", "cache"],
                 "outputs": {"briefing_md": "papers/p_vllm.md"},
                 "memory": {"core_idea": "KV cache paging"},
+                "graph_summary": {
+                    "schema_version": "paperlens.graph_library_summary.v1",
+                    "quality": {"publish_status": "REVIEWED"},
+                    "claim_nodes": [
+                        {
+                            "node_id": "claim:obs_claim",
+                            "kind": "claim",
+                            "label": "PagedAttention manages KV cache memory.",
+                            "source_ids": ["span:p_vllm:p2:1"],
+                            "pages": [2],
+                        }
+                    ],
+                },
                 "provenance": {"evidence_refs": [{"page_no": 2}]},
             },
         }
@@ -2190,8 +2204,12 @@ def test_library_ask_prompt_keeps_source_grounding():
 
     prompt = build_library_ask_prompt(question="哪些论文讲 KV cache？", matches=matches)
 
+    assert "core_v2 graph_summary" in LIBRARY_ASK_SYSTEM_PROMPT
+    assert "Use PaperMemoryV3 only as supplemental context" in LIBRARY_ASK_SYSTEM_PROMPT
     assert "retrieved_library_records" in prompt
     assert "specific papers" in prompt
+    assert "reviewed core_v2 graph_summary node/source evidence" in prompt
+    assert "span:p_vllm:p2:1" in prompt
     assert "cross-paper synthesis" in prompt
     assert "source_attribution" in prompt
 

@@ -61,7 +61,9 @@ SEARCH_QUERY_EXPANSIONS: dict[str, tuple[str, ...]] = {
 
 LIBRARY_ASK_SYSTEM_PROMPT = """
 You answer questions over the user's local PaperLens paper memory library.
-Use the supplied library records first, especially PaperMemoryV3 claim/evidence provenance when present.
+Use reviewed core_v2 graph_summary claims, nodes, source_ids, and evaluation term mentions first.
+Use PaperMemoryV3 only as supplemental context when a record has no reviewed graph evidence.
+Treat report paths as navigation targets, not evidence.
 Distinguish paper facts from cross-paper synthesis,
 PaperLens inferences, and background knowledge in source_attribution. If the local library does not
 contain enough evidence, say so plainly and record the limitation.
@@ -771,9 +773,11 @@ def build_library_ask_prompt(
             json.dumps(compact_records, ensure_ascii=False),
             (
                 "Task: answer using the local PaperLens library. Explain which claims come from "
-                "specific papers, which points are cross-paper synthesis, which context is background "
-                "knowledge, and what remains uncertain. Fill source_attribution instead of blending "
-                "these categories into one undifferentiated answer."
+                "specific papers, preferring reviewed core_v2 graph_summary node/source evidence "
+                "over legacy PaperMemoryV3 or rendered reports. Explain which points are "
+                "cross-paper synthesis, which context is background knowledge, and what remains "
+                "uncertain. Fill source_attribution instead of blending these categories into one "
+                "undifferentiated answer."
             ),
         ]
     )
