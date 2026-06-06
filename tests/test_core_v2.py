@@ -3337,6 +3337,17 @@ def test_export_writes_core_graph_report_view_for_reviewed_core_artifacts(tmp_pa
     assert f"Evidence nodes: `evidence:{source_id}`" in markdown
     assert f"PaperDOM sources: `{source_id}`" in markdown
 
+    rebuild_library_from_output(output_dir)
+    rebuilt_records = read_library_records(output_dir)
+    assert rebuilt_records[0]["outputs"]["core_graph_report_md"] == (
+        "papers/core_graph/p_test_test_paper.core_graph.md"
+    )
+    assert validate_paperlens_output(
+        output_dir,
+        expected_report_names={"p_test_test_paper.md"},
+        expected_paper_ids={"p_test"},
+    )["status"] == "PASS"
+
 
 def test_report_memory_context_prefers_reviewed_core_memory_view(tmp_path):
     data_dir = tmp_path / ".paperlens" / "data"

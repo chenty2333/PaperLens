@@ -180,6 +180,11 @@ def rebuild_library_from_output(output_dir: Path) -> list[Path]:
                 "decision": {"paper_id": paper_id, "class_label": reading_context.get("grade")},
                 "paper_memory_v3": memory,
                 "report_name": Path(report_path).name if report_path else f"{paper_id}.md",
+                "core_graph_report_name": first_existing_core_graph_report(
+                    output_dir=output_dir,
+                    paper_id=paper_id,
+                    report_path=report_path,
+                ),
                 "report_title": markdown_title(report_text)
                 or paper.get("canonical_title")
                 or paper_id,
@@ -211,6 +216,11 @@ def rebuild_library_from_output(output_dir: Path) -> list[Path]:
                 },
                 "paper_memory_v3": {},
                 "report_name": Path(report_path).name if report_path else f"{paper_id}.md",
+                "core_graph_report_name": first_existing_core_graph_report(
+                    output_dir=output_dir,
+                    paper_id=paper_id,
+                    report_path=report_path,
+                ),
                 "report_title": metadata.get("title") or paper_id,
                 "model_report": {},
                 "report_audit": {},
@@ -1123,6 +1133,24 @@ def first_existing_report(output_dir: Path, paper_id: str) -> str:
         return f"papers/{exact.name}"
     matches = sorted(papers_dir.glob(f"{paper_id}_*.md"))
     return f"papers/{matches[0].name}" if matches else ""
+
+
+def first_existing_core_graph_report(
+    *,
+    output_dir: Path,
+    paper_id: str,
+    report_path: str,
+) -> str:
+    core_graph_dir = output_dir / "papers" / "core_graph"
+    if not core_graph_dir.exists():
+        return ""
+    report_name = Path(report_path).name if report_path else ""
+    if report_name.endswith(".md"):
+        candidate = core_graph_dir / f"{report_name[:-3]}.core_graph.md"
+        if candidate.exists():
+            return f"core_graph/{candidate.name}"
+    matches = sorted(core_graph_dir.glob(f"{paper_id}*.core_graph.md"))
+    return f"core_graph/{matches[0].name}" if matches else ""
 
 
 def dump_model(value: Any) -> dict[str, Any]:
