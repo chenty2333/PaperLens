@@ -3032,6 +3032,86 @@ def test_core_v2_qa_grounding_backfills_source_ids_for_supported_paper_claims():
     assert grounded["cited_source_ids"] == ["span:p_test:p1:1"]
     assert grounded["cited_pages"] == [1]
     assert grounded["confidence"] == "high"
+
+
+def test_core_v2_qa_grounding_drops_page_only_citations():
+    core_context = {
+        "retrieval_policy": "claim_graph_nodes_with_paper_dom_source_ids",
+        "quality": {"publish_status": PublishStatus.REVIEWED},
+        "matches": [
+            {
+                "node_id": "claim:obs_claim",
+                "kind": "claim",
+                "label": "The paper proposes a block table method.",
+                "source_ids": ["span:p_test:p1:1"],
+                "evidence_spans": [
+                    {
+                        "source_id": "span:p_test:p1:1",
+                        "kind": "paragraph",
+                        "page_no": 1,
+                        "text": "We propose a block table method.",
+                    }
+                ],
+            }
+        ],
+    }
+    answer = {
+        "answer_markdown": "This is background context, not a paper claim.",
+        "cited_pages": [99],
+        "cited_source_ids": [],
+        "confidence": "medium",
+        "source_attribution": {
+            "paper_claims": [],
+            "paperlens_inferences": [],
+            "background_context": ["This is background context."],
+            "evidence_limits": [],
+        },
+    }
+
+    grounded = ground_qa_answer_in_core_v2_context(answer, core_context)
+
+    assert grounded["cited_source_ids"] == []
+    assert grounded["cited_pages"] == []
+
+
+def test_core_v2_qa_grounding_replaces_model_pages_with_source_id_pages():
+    core_context = {
+        "retrieval_policy": "claim_graph_nodes_with_paper_dom_source_ids",
+        "quality": {"publish_status": PublishStatus.REVIEWED},
+        "matches": [
+            {
+                "node_id": "claim:obs_claim",
+                "kind": "claim",
+                "label": "The paper proposes a block table method.",
+                "source_ids": ["span:p_test:p1:1"],
+                "evidence_spans": [
+                    {
+                        "source_id": "span:p_test:p1:1",
+                        "kind": "paragraph",
+                        "page_no": 1,
+                        "text": "We propose a block table method.",
+                    }
+                ],
+            }
+        ],
+    }
+    answer = {
+        "answer_markdown": "The paper proposes a block table method.",
+        "cited_pages": [99],
+        "cited_source_ids": [],
+        "confidence": "high",
+        "source_attribution": {
+            "paper_claims": ["The paper proposes a block table method."],
+            "paperlens_inferences": [],
+            "background_context": [],
+            "evidence_limits": [],
+        },
+    }
+
+    grounded = ground_qa_answer_in_core_v2_context(answer, core_context)
+
+    assert grounded["cited_source_ids"] == ["span:p_test:p1:1"]
+    assert grounded["cited_pages"] == [1]
     assert grounded["source_attribution"]["evidence_limits"] == []
 
 

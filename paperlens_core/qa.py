@@ -1499,7 +1499,8 @@ def merge_core_v2_cited_pages(
     core_v2_context: dict[str, Any],
     cited_source_ids: list[str],
 ) -> list[int]:
-    result = list(pages)
+    _ = pages
+    result: list[int] = []
     cited = set(cited_source_ids)
     for match in list_of_dicts(core_v2_context.get("matches")):
         for span in list_of_dicts(match.get("evidence_spans")):
