@@ -45,16 +45,14 @@ from paperlens_core.workflow.parse import (
     run_parse_stage,
     run_parse_verify_stage,
 )
-from paperlens_core.workflow.skim import deterministic_skim_classify
+from paperlens_core.workflow.skim import run_skim_stage
 from paperlens_core.workflow.core_v2 import (
     refresh_core_v2_audit_artifacts,
     run_core_v2_model_observation_tasks,
-    write_core_v2_artifacts,
 )
 from paperlens_core.workflow.visual import run_vlm_page_mode as run_visual_vlm_page_mode
 from paperlens_core.workflow.utils import (
     dict_value,
-    load_layout_index,
     utc_timestamp,
 )
 
@@ -324,121 +322,7 @@ class PaperLensWorkflow:
         )
 
     def stage_03_skim(self) -> None:
-        stage = "stage_03_skim"
-        self.checkpoint(stage)
-        self.events.stage_started(stage, "Building deterministic paper maps")
-        active_ids = {paper.paper_id for paper in self.papers}
-        existing_skim_by_id = {
-            card.paper_id: card
-            for card in (self.skim_cards or self.db.list_skim_cards())
-            if card.paper_id in active_ids
-        }
-        existing_decision_by_id = {
-            decision.paper_id: decision
-            for decision in (self.classifications or self.db.list_classifications())
-            if decision.paper_id in active_ids
-        }
-        self.skim_cards = list(existing_skim_by_id.values())
-        self.classifications = list(existing_decision_by_id.values())
-        pending: list[tuple[PaperRecord, SkimCard, ClassificationDecision]] = []
-        for paper in self.papers:
-            if paper.paper_id in existing_skim_by_id and paper.paper_id in existing_decision_by_id:
-                self.events.emit(
-                    "cache_hit",
-                    stage=stage,
-                    message=f"Skim/classification already exists for {paper.paper_id}",
-                    data={"paper_id": paper.paper_id},
-                )
-                self.mark_paper_state(paper.paper_id, stage)
-                continue
-            artifacts = self.db.get_page_artifacts(paper.paper_id)
-            card, decision = deterministic_skim_classify(paper, artifacts, self.config.keyword_pool)
-            pending.append((paper, card, decision))
-
-        for paper, card, decision in pending:
-            self.persist_skim_classification(stage, paper, card, decision)
-        self.order_skim_classification_state()
-        core_v2_count = self.persist_core_v2_artifacts(stage)
-        self.events.stage_completed(
-            stage,
-            "Paper maps completed",
-            {
-                "skim_cards": len(self.skim_cards),
-                "classifications": len(self.classifications),
-                "core_v2_artifacts": core_v2_count,
-            },
-        )
-
-    def persist_core_v2_artifacts(self, stage: str) -> int:
-        skim_by_id = {card.paper_id: card for card in self.skim_cards}
-        decision_by_id = {decision.paper_id: decision for decision in self.classifications}
-        written_count = 0
-        for paper in self.papers:
-            layout = load_layout_index(self.data_dir, paper.paper_id)
-            if not layout:
-                artifacts = self.db.get_page_artifacts(paper.paper_id)
-                layout = {"pages": [artifact.model_dump() for artifact in artifacts]}
-            paths = write_core_v2_artifacts(
-                data_dir=self.data_dir,
-                paper=paper,
-                layout=layout,
-                skim=skim_by_id.get(paper.paper_id),
-                decision=decision_by_id.get(paper.paper_id),
-            )
-            for artifact_type, path in paths.items():
-                self.register_file_artifact(
-                    path,
-                    paper_id=paper.paper_id,
-                    artifact_type=f"core_v2_{artifact_type}",
-                    depends_on=[f"layout_index:{paper.paper_id}"],
-                )
-            written_count += 1
-            self.events.emit(
-                "core_v2_artifacts_written",
-                stage=stage,
-                message=f"Core v2 artifacts written for {paper.paper_id}",
-                data={
-                    "paper_id": paper.paper_id,
-                    "artifacts": {key: str(path) for key, path in paths.items()},
-                },
-            )
-        return written_count
-
-    def persist_skim_classification(
-        self,
-        stage: str,
-        paper: PaperRecord,
-        card: SkimCard,
-        decision: ClassificationDecision,
-    ) -> None:
-        if any(item.paper_id == card.paper_id for item in self.skim_cards):
-            self.skim_cards = [
-                card if item.paper_id == card.paper_id else item for item in self.skim_cards
-            ]
-        else:
-            self.skim_cards.append(card)
-        if any(item.paper_id == decision.paper_id for item in self.classifications):
-            self.classifications = [
-                decision if item.paper_id == decision.paper_id else item
-                for item in self.classifications
-            ]
-        else:
-            self.classifications.append(decision)
-        self.db.upsert_skim(card)
-        self.db.upsert_classification(decision)
-        self.mark_paper_state(paper.paper_id, stage)
-
-    def order_skim_classification_state(self) -> None:
-        skim_by_id = {card.paper_id: card for card in self.skim_cards}
-        decision_by_id = {decision.paper_id: decision for decision in self.classifications}
-        self.skim_cards = [
-            skim_by_id[paper.paper_id] for paper in self.papers if paper.paper_id in skim_by_id
-        ]
-        self.classifications = [
-            decision_by_id[paper.paper_id]
-            for paper in self.papers
-            if paper.paper_id in decision_by_id
-        ]
+        run_skim_stage(self)
 
     def llm_enabled(self) -> bool:
         if self.config.offline_debug:

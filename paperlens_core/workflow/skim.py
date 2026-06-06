@@ -1,9 +1,172 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from pathlib import Path
+from typing import Any, Protocol
 
+from paperlens_core.config import CoreConfig
+from paperlens_core.db import ArtifactDb
+from paperlens_core.events import EventWriter
 from paperlens_core.schemas import ClassificationDecision, PaperRecord, SkimCard
+from paperlens_core.workflow.core_v2 import write_core_v2_artifacts
+from paperlens_core.workflow.utils import load_layout_index
+
+
+class SkimWorkflowContext(Protocol):
+    data_dir: Path
+    config: CoreConfig
+    events: EventWriter
+    db: ArtifactDb
+    papers: list[PaperRecord]
+    skim_cards: list[SkimCard]
+    classifications: list[ClassificationDecision]
+
+    def checkpoint(self, stage: str) -> None: ...
+
+    def mark_paper_state(
+        self,
+        paper_id: str,
+        stage: str,
+        *,
+        side_statuses: list[str] | None = None,
+        error: str | None = None,
+    ) -> None: ...
+
+    def register_file_artifact(
+        self,
+        path: Path,
+        *,
+        paper_id: str | None,
+        artifact_type: str,
+        depends_on: list[str] | None = None,
+    ) -> None: ...
+
+
+def run_skim_stage(workflow: SkimWorkflowContext) -> None:
+    stage = "stage_03_skim"
+    workflow.checkpoint(stage)
+    workflow.events.stage_started(stage, "Building deterministic paper maps")
+    active_ids = {paper.paper_id for paper in workflow.papers}
+    existing_skim_by_id = {
+        card.paper_id: card
+        for card in (workflow.skim_cards or workflow.db.list_skim_cards())
+        if card.paper_id in active_ids
+    }
+    existing_decision_by_id = {
+        decision.paper_id: decision
+        for decision in (workflow.classifications or workflow.db.list_classifications())
+        if decision.paper_id in active_ids
+    }
+    workflow.skim_cards = list(existing_skim_by_id.values())
+    workflow.classifications = list(existing_decision_by_id.values())
+    pending: list[tuple[PaperRecord, SkimCard, ClassificationDecision]] = []
+    for paper in workflow.papers:
+        if paper.paper_id in existing_skim_by_id and paper.paper_id in existing_decision_by_id:
+            workflow.events.emit(
+                "cache_hit",
+                stage=stage,
+                message=f"Skim/classification already exists for {paper.paper_id}",
+                data={"paper_id": paper.paper_id},
+            )
+            workflow.mark_paper_state(paper.paper_id, stage)
+            continue
+        artifacts = workflow.db.get_page_artifacts(paper.paper_id)
+        card, decision = deterministic_skim_classify(
+            paper,
+            artifacts,
+            workflow.config.keyword_pool,
+        )
+        pending.append((paper, card, decision))
+
+    for paper, card, decision in pending:
+        persist_skim_classification(workflow, stage, paper, card, decision)
+    order_skim_classification_state(workflow)
+    core_v2_count = persist_core_v2_artifacts(workflow, stage)
+    workflow.events.stage_completed(
+        stage,
+        "Paper maps completed",
+        {
+            "skim_cards": len(workflow.skim_cards),
+            "classifications": len(workflow.classifications),
+            "core_v2_artifacts": core_v2_count,
+        },
+    )
+
+
+def persist_core_v2_artifacts(workflow: SkimWorkflowContext, stage: str) -> int:
+    skim_by_id = {card.paper_id: card for card in workflow.skim_cards}
+    decision_by_id = {decision.paper_id: decision for decision in workflow.classifications}
+    written_count = 0
+    for paper in workflow.papers:
+        layout = load_layout_index(workflow.data_dir, paper.paper_id)
+        if not layout:
+            artifacts = workflow.db.get_page_artifacts(paper.paper_id)
+            layout = {"pages": [artifact.model_dump() for artifact in artifacts]}
+        paths = write_core_v2_artifacts(
+            data_dir=workflow.data_dir,
+            paper=paper,
+            layout=layout,
+            skim=skim_by_id.get(paper.paper_id),
+            decision=decision_by_id.get(paper.paper_id),
+        )
+        for artifact_type, path in paths.items():
+            workflow.register_file_artifact(
+                path,
+                paper_id=paper.paper_id,
+                artifact_type=f"core_v2_{artifact_type}",
+                depends_on=[f"layout_index:{paper.paper_id}"],
+            )
+        written_count += 1
+        workflow.events.emit(
+            "core_v2_artifacts_written",
+            stage=stage,
+            message=f"Core v2 artifacts written for {paper.paper_id}",
+            data={
+                "paper_id": paper.paper_id,
+                "artifacts": {key: str(path) for key, path in paths.items()},
+            },
+        )
+    return written_count
+
+
+def persist_skim_classification(
+    workflow: SkimWorkflowContext,
+    stage: str,
+    paper: PaperRecord,
+    card: SkimCard,
+    decision: ClassificationDecision,
+) -> None:
+    if any(item.paper_id == card.paper_id for item in workflow.skim_cards):
+        workflow.skim_cards = [
+            card if item.paper_id == card.paper_id else item for item in workflow.skim_cards
+        ]
+    else:
+        workflow.skim_cards.append(card)
+    if any(item.paper_id == decision.paper_id for item in workflow.classifications):
+        workflow.classifications = [
+            decision if item.paper_id == decision.paper_id else item
+            for item in workflow.classifications
+        ]
+    else:
+        workflow.classifications.append(decision)
+    workflow.db.upsert_skim(card)
+    workflow.db.upsert_classification(decision)
+    workflow.mark_paper_state(paper.paper_id, stage)
+
+
+def order_skim_classification_state(workflow: SkimWorkflowContext) -> None:
+    skim_by_id = {card.paper_id: card for card in workflow.skim_cards}
+    decision_by_id = {decision.paper_id: decision for decision in workflow.classifications}
+    workflow.skim_cards = [
+        skim_by_id[paper.paper_id]
+        for paper in workflow.papers
+        if paper.paper_id in skim_by_id
+    ]
+    workflow.classifications = [
+        decision_by_id[paper.paper_id]
+        for paper in workflow.papers
+        if paper.paper_id in decision_by_id
+    ]
 
 
 def deterministic_skim_classify(
