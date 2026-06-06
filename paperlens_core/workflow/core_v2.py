@@ -749,18 +749,6 @@ def load_core_v2_dom_and_graph(data_dir: Path, paper_id: str) -> tuple[PaperDOM,
     )
 
 
-def load_core_v2_quality_metrics(data_dir: Path, paper_id: str) -> dict[str, Any]:
-    root = data_dir / "core" / "v2" / paper_id
-    try:
-        envelope = read_typed_artifact(
-            root / "quality_metrics.v1.json",
-            expected_type="core_quality_metrics",
-        )
-    except (FileNotFoundError, ValueError):
-        return {}
-    return envelope.data if isinstance(envelope.data, dict) else {}
-
-
 def build_observation_task_prompt(
     *,
     paper: PaperRecord,
