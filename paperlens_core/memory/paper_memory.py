@@ -73,7 +73,7 @@ class PaperMemoryEvaluationItem(BaseModel):
 class PaperMemoryView(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = "paper_memory.view.v1"
+    schema_version: str = "paper_memory.view.v2"
     paper_id: str
     metadata: dict[str, Any] = Field(default_factory=dict)
     fact_nodes: list[PaperMemoryFactNode] = Field(default_factory=list)

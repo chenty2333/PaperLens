@@ -52,7 +52,7 @@ class GraphEdge(BaseModel):
 class ClaimGraph(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = "claim_graph.v1"
+    schema_version: str = "claim_graph.v2"
     paper_id: str
     nodes: dict[str, GraphNode] = Field(default_factory=dict)
     edges: list[GraphEdge] = Field(default_factory=list)
@@ -114,6 +114,7 @@ def graph_from_observations(paper_id: str, observations: list[ObservationCard]) 
                 payload={
                     "observation_id": card.observation_id,
                     "task_id": card.task_id,
+                    "source_ids": list(card.source_ids),
                     "confidence": card.confidence,
                     "provenance": card.provenance,
                     "uncertainty": card.uncertainty,
@@ -134,26 +135,32 @@ def graph_from_observations(paper_id: str, observations: list[ObservationCard]) 
             )
             graph.add_edge(GraphEdge(source_id=node_id, target_id=evidence_id, kind="supported_by"))
 
-    for card in observations:
-        source_node_id = obs_to_node.get(card.observation_id)
-        if source_node_id is None:
-            continue
-        for rel in card.proposed_relations:
-            target_node_id = obs_to_node.get(rel.target_observation_id)
-            if target_node_id is None:
-                continue
-            if source_node_id == target_node_id:
-                continue
-            graph.add_edge(
-                GraphEdge(
-                    source_id=source_node_id,
-                    target_id=target_node_id,
-                    kind=rel.kind,
-                    payload={"proposed_by": card.observation_id},
-                )
-            )
-
     return graph
+
+
+def materialize_relation_candidates(
+    graph: ClaimGraph,
+    candidates: list[Any],
+    obs_to_node: dict[str, str],
+) -> None:
+    for candidate in candidates:
+        source_id = getattr(candidate, "source_observation_id", None) or candidate.get("source_observation_id", "")
+        target_id = getattr(candidate, "target_observation_id", None) or candidate.get("target_observation_id", "")
+        kind = getattr(candidate, "kind", None) or candidate.get("kind", "")
+        source_node_id = obs_to_node.get(str(source_id))
+        target_node_id = obs_to_node.get(str(target_id))
+        if source_node_id is None or target_node_id is None:
+            continue
+        if source_node_id == target_node_id:
+            continue
+        graph.add_edge(
+            GraphEdge(
+                source_id=source_node_id,
+                target_id=target_node_id,
+                kind=str(kind),
+                payload={"from_relation_candidate": True},
+            )
+        )
 
 
 def graph_node_identity_payload(node: GraphNode) -> dict[str, Any]:

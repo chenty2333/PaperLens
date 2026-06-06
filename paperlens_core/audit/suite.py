@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from paperlens_core.audit.findings import AuditFinding, AuditSeverity, PublishStatus
 from paperlens_core.dom.paper_dom import PaperDOM
@@ -461,6 +462,58 @@ def graph_covered_required_output_keys(graph: ClaimGraph) -> set[str]:
             if output:
                 result.add(f"{task_id}:{output}")
     return result
+
+
+def audit_relation_candidates(
+    relation_log: Any,
+    observation_ids: set[str],
+) -> list[AuditFinding]:
+    findings: list[AuditFinding] = []
+    candidates = getattr(relation_log, "candidates", []) or []
+    for index, candidate in enumerate(candidates, start=1):
+        source_id = getattr(candidate, "source_observation_id", "")
+        target_id = getattr(candidate, "target_observation_id", "")
+        kind = getattr(candidate, "kind", "")
+        if source_id not in observation_ids:
+            findings.append(
+                AuditFinding(
+                    finding_id=f"relation_candidate_unknown_source:{index}:{source_id}",
+                    severity=AuditSeverity.ERROR,
+                    code="relation_candidate_unknown_observation",
+                    message=f"Relation candidate references unknown source observation: {source_id}",
+                )
+            )
+        if target_id not in observation_ids:
+            findings.append(
+                AuditFinding(
+                    finding_id=f"relation_candidate_unknown_target:{index}:{target_id}",
+                    severity=AuditSeverity.ERROR,
+                    code="relation_candidate_unknown_observation",
+                    message=f"Relation candidate references unknown target observation: {target_id}",
+                )
+            )
+        if source_id == target_id:
+            findings.append(
+                AuditFinding(
+                    finding_id=f"relation_candidate_self_reference:{index}",
+                    severity=AuditSeverity.ERROR,
+                    code="relation_candidate_self_reference",
+                    message="Relation candidate cannot target itself",
+                )
+            )
+        if kind not in {
+            "contradicted_by", "depends_on", "explains", "implements",
+            "evaluated_by", "limited_by", "compared_with",
+        }:
+            findings.append(
+                AuditFinding(
+                    finding_id=f"relation_candidate_invalid_kind:{index}:{kind}",
+                    severity=AuditSeverity.ERROR,
+                    code="relation_candidate_invalid_kind",
+                    message=f"Relation candidate has invalid kind: {kind}",
+                )
+            )
+    return findings
 
 
 def publish_status_from_findings(findings: list[AuditFinding]) -> PublishStatus:

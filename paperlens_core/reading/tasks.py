@@ -81,7 +81,7 @@ class ReadingTask(BaseModel):
 class ReadingPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = "reading_plan.v1"
+    schema_version: str = "reading_plan.v2"
     paper_id: str
     tasks: list[ReadingTask]
 

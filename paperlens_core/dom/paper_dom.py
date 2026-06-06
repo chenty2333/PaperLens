@@ -63,7 +63,7 @@ class PaperEquation(PaperDOMNode):
 class PaperDOM(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = "paper_dom.v1"
+    schema_version: str = "paper_dom.v2"
     paper_id: str
     title: str | None = None
     sections: list[PaperSection] = Field(default_factory=list)

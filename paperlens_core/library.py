@@ -28,9 +28,9 @@ from paperlens_core.library_relations import build_cross_paper_relations
 
 APP_NAME = "PaperLens"
 INTERNAL_DIRNAME = ".paperlens"
-LIBRARY_RECORD_SCHEMA_VERSION = "paperlens.library_record.v1"
+LIBRARY_RECORD_SCHEMA_VERSION = "paperlens.library_record.v2"
 LIBRARY_RECORD_FILENAME = "library_records.jsonl"
-SEARCH_INDEX_SCHEMA_VERSION = "paperlens_search_index.v1"
+SEARCH_INDEX_SCHEMA_VERSION = "paperlens_search_index.v2"
 LIBRARY_ASK_CACHE_VERSION = "library-ask-v5-source-only"
 
 
@@ -482,12 +482,17 @@ def search_library(
 
 
 class LibraryToolRegistry:
-    def __init__(self, records: list[dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        records: list[dict[str, Any]],
+        relations: dict[str, Any] | None = None,
+    ) -> None:
         self.records = records
+        self.relations = relations or {}
         self.title = "PaperLens Library"
 
     def tool_descriptions(self) -> list[dict[str, Any]]:
-        return [
+        tools = [
             {
                 "name": "library.search",
                 "description": "Search papers that PaperLens has already read. Returns compact records only.",
@@ -499,6 +504,13 @@ class LibraryToolRegistry:
                 "arguments": {"paper_id": "string"},
             },
         ]
+        if self.relations.get("method_families") or self.relations.get("paper_relations"):
+            tools.append({
+                "name": "library.relations",
+                "description": "Read cross-paper relations: method families, shared datasets, and concept overlaps across the local library.",
+                "arguments": {"paper_id": "optional string to filter relations for a specific paper"},
+            })
+        return tools
 
     def execute(self, request: AgentToolRequest) -> AgentToolObservation:
         try:
@@ -506,6 +518,8 @@ class LibraryToolRegistry:
                 result = self._search(request.arguments)
             elif request.tool == "library.get_record":
                 result = self._get_record(request.arguments)
+            elif request.tool == "library.relations":
+                result = self._relations(request.arguments)
             else:
                 raise ValueError(f"Unknown tool: {request.tool}")
             return AgentToolObservation(
@@ -550,6 +564,45 @@ class LibraryToolRegistry:
             "results": results,
             "source_ids": library_result_source_ids(results),
         }
+
+    def _relations(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        paper_id = string_or_empty(arguments.get("paper_id"))
+        if paper_id:
+            filtered = {
+                "method_families": [
+                    fam for fam in list_payload(self.relations.get("method_families"))
+                    if paper_id in list_payload(fam.get("paper_ids"))
+                ],
+                "dataset_groups": [
+                    grp for grp in list_payload(self.relations.get("dataset_groups"))
+                    if paper_id in list_payload(grp.get("paper_ids"))
+                ],
+                "paper_relations": [
+                    rel for rel in list_payload(self.relations.get("paper_relations"))
+                    if rel.get("source_paper_id") == paper_id or rel.get("target_paper_id") == paper_id
+                ],
+            }
+            return {
+                "tool": "library.relations",
+                "query": paper_id,
+                "relations": filtered,
+            }
+        return {
+            "tool": "library.relations",
+            "query": "all",
+            "relations": self.relations,
+        }
+
+
+def _load_library_relations(output_dir: Path) -> dict[str, Any]:
+    path = library_dir(output_dir) / "index" / "cross_paper_relations.json"
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def answer_library_question(
@@ -637,7 +690,8 @@ def run_library_qa_agent(
     question: str,
     chat_history: list[dict[str, Any]],
 ) -> Any:
-    tools = LibraryToolRegistry(records)
+    relations = _load_library_relations(output_dir)
+    tools = LibraryToolRegistry(records, relations=relations)
     initial_matches = [
         compact_library_record_for_agent(hit["paper"], score=hit["score"])
         for hit in matches[:8]
@@ -662,7 +716,11 @@ def run_library_qa_agent(
         max_tool_calls=8,
         max_tokens=14000,
         timeout_seconds=180.0,
-        allowed_tools=("library.search", "library.get_record"),
+        allowed_tools=(
+            ("library.search", "library.get_record", "library.relations")
+            if relations
+            else ("library.search", "library.get_record")
+        ),
         input_contract={
             "artifact_type": "library_qa_answer",
             "paper_specific_claims": "must come from graph_summary nodes, claims, or provenance source_ids",

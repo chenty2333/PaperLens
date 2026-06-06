@@ -21,17 +21,19 @@ from paperlens_core.events import EventWriter
 from paperlens_core.graph import ClaimGraph, build_claim_graph
 from paperlens_core.memory import materialize_paper_memory
 from paperlens_core.reading import (
-    PROPOSED_RELATION_KINDS,
+    RELATION_CANDIDATE_KINDS,
     ObservationCard,
     ObservationLog,
     ObservationType,
-    ProposedRelation,
     ReadingPlan,
     ReadingTask,
     ReadingTaskType,
+    RelationCandidate,
+    RelationCandidateLog,
     allowed_observation_types_for_task,
     build_initial_reading_plan,
     make_observation_id,
+    validate_relation_candidates,
 )
 from paperlens_core.report import audit_report_draft_against_graph, build_report_draft_from_graph
 from paperlens_core.runtime import (
@@ -305,21 +307,49 @@ OBSERVATION_CARDS_SCHEMA: dict[str, Any] = {
                                     "properties": {"text": {"type": "string"}},
                                 },
                             },
-                            "proposed_relations": {
-                                "type": "array",
-                                "maxItems": 4,
-                                "items": {
-                                    "type": "object",
-                                    "additionalProperties": False,
-                                    "required": ["target_observation_id", "kind"],
-                                    "properties": {
-                                        "target_observation_id": {"type": "string"},
-                                        "kind": {
-                                            "type": "string",
-                                            "enum": sorted(PROPOSED_RELATION_KINDS),
-                                        },
-                                    },
-                                },
+                        },
+                    },
+                }
+            },
+        },
+    },
+}
+
+
+RELATION_CANDIDATES_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["artifact_type", "artifact_version", "producer", "data"],
+    "properties": {
+        "artifact_type": {"type": "string", "enum": ["relation_candidates"]},
+        "artifact_version": {"type": "string"},
+        "producer": {"type": "string"},
+        "data": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["candidates"],
+            "properties": {
+                "candidates": {
+                    "type": "array",
+                    "maxItems": 12,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": [
+                            "source_observation_id",
+                            "target_observation_id",
+                            "kind",
+                        ],
+                        "properties": {
+                            "source_observation_id": {"type": "string"},
+                            "target_observation_id": {"type": "string"},
+                            "kind": {
+                                "type": "string",
+                                "enum": sorted(RELATION_CANDIDATE_KINDS),
+                            },
+                            "confidence": {
+                                "type": "string",
+                                "enum": ["high", "medium", "low"],
                             },
                         },
                     },
@@ -537,21 +567,126 @@ def run_core_v2_model_observation_tasks(
         log = log.append_many(cards)
         completed_tasks += 1
 
+    relation_log = _run_relation_discovery(
+        client=client,
+        paper=paper,
+        observation_log=log,
+        stage=stage,
+        record_usage=record_usage,
+        record_agent_run=record_agent_run,
+    ) if len(log.cards) >= 2 else RelationCandidateLog(paper_id=paper.paper_id)
+    if relation_log.candidates:
+        request_ids.append(f"rel_{paper.paper_id}")
+
     paths = write_core_v2_from_observation_log(
         data_dir=data_dir,
         paper=paper,
         dom=dom,
         reading_plan=reading_plan,
         observation_log=log,
+        relation_log=relation_log,
         producer="paperlens_core_v2_model_observer",
     )
     return {
         "paths": paths,
         "cards": len(log.cards),
         "tasks": completed_tasks,
+        "relation_candidates": len(relation_log.candidates),
         "usage": total_usage,
         "request_ids": request_ids,
     }
+
+
+def _run_relation_discovery(
+    *,
+    client: JsonLlmClient,
+    paper: PaperRecord,
+    observation_log: ObservationLog,
+    stage: str,
+    record_usage: Any,
+    record_agent_run: Any,
+) -> RelationCandidateLog:
+    if not observation_log.cards:
+        return RelationCandidateLog(paper_id=paper.paper_id)
+    with llm_call_context(
+        stage=stage,
+        paper_id=paper.paper_id,
+        operation="core_v2_relation_discovery",
+        schema_name="paperlens_relation_candidates",
+    ):
+        raw = client.invoke_json(
+            system_prompt=CORE_V2_OBSERVER_SYSTEM_PROMPT,
+            user_prompt=_build_relation_discovery_prompt(paper, observation_log),
+            schema_name="paperlens_relation_candidates",
+            schema=RELATION_CANDIDATES_SCHEMA,
+            max_tokens=8000,
+        )
+    record_usage(stage, dict(getattr(raw, "usage", {}) or {}))
+    record_agent_run(
+        {
+            "agent_run_id": f"core_v2_rel_{paper.paper_id}",
+            "paper_id": paper.paper_id,
+            "stage": stage,
+            "operation": "core_v2_relation_discovery",
+            "provider_kind": client.config.kind,
+            "model": client.config.model,
+            "usage": dict(getattr(raw, "usage", {}) or {}),
+            "request_id": getattr(raw, "request_id", None),
+            "status": "PASS",
+        }
+    )
+    envelope = ArtifactEnvelope.model_validate(raw.data).require_type("relation_candidates")
+    payload = envelope.data if isinstance(envelope.data, dict) else {}
+    raw_candidates = payload.get("candidates") if isinstance(payload.get("candidates"), list) else []
+    observation_ids = {card.observation_id for card in observation_log.cards}
+    candidates: list[RelationCandidate] = []
+    for item in raw_candidates:
+        if not isinstance(item, dict):
+            continue
+        candidates.append(
+            RelationCandidate(
+                source_observation_id=str(item.get("source_observation_id") or "").strip(),
+                target_observation_id=str(item.get("target_observation_id") or "").strip(),
+                kind=str(item.get("kind") or "").strip(),
+                confidence=str(item.get("confidence") or "medium"),
+            )
+        )
+    valid = validate_relation_candidates(candidates, observation_ids)
+    log = RelationCandidateLog(paper_id=paper.paper_id)
+    for candidate in valid:
+        log = log.append(candidate)
+    return log
+
+
+def _build_relation_discovery_prompt(
+    paper: PaperRecord,
+    observation_log: ObservationLog,
+) -> str:
+    import json as _json
+    card_summaries = [
+        {
+            "observation_id": card.observation_id,
+            "type": card.observation_type.value,
+            "statement": card.statement,
+            "source_ids": card.source_ids,
+        }
+        for card in observation_log.cards
+    ]
+    return _json.dumps(
+        {
+            "paper_id": paper.paper_id,
+            "title": paper.canonical_title,
+            "observations": card_summaries,
+            "task": (
+                "Review all observations above. Propose semantic relations between them "
+                "where you see clear logical connections. Each candidate must reference "
+                "existing observation_ids. Valid relation kinds: "
+                + ", ".join(sorted(RELATION_CANDIDATE_KINDS))
+                + ". Only propose relations you are confident about."
+            ),
+        },
+        ensure_ascii=False,
+    )
 
 
 def write_core_v2_from_observation_log(
@@ -561,6 +696,7 @@ def write_core_v2_from_observation_log(
     dom: PaperDOM,
     reading_plan: ReadingPlan,
     observation_log: ObservationLog,
+    relation_log: RelationCandidateLog | None = None,
     producer: str,
 ) -> dict[str, Path]:
     validate_core_v2_write_inputs(
@@ -569,7 +705,10 @@ def write_core_v2_from_observation_log(
         reading_plan=reading_plan,
         observation_log=observation_log,
     )
-    claim_graph = build_claim_graph(paper.paper_id, list(observation_log.cards))
+    candidates = list(relation_log.candidates) if relation_log else None
+    claim_graph = build_claim_graph(
+        paper.paper_id, list(observation_log.cards), relation_candidates=candidates
+    )
     derived = build_core_v2_derived_views(
         dom=dom,
         observation_log=observation_log,
@@ -1090,9 +1229,6 @@ def observation_cards_from_model_envelope(
             statement=statement,
             source_ids=source_ids,
         )
-        proposed_relations = _parse_proposed_relations(
-            item.get("proposed_relations"), task.task_id
-        )
         result.append(
             ObservationCard(
                 observation_id=observation_id,
@@ -1110,7 +1246,6 @@ def observation_cards_from_model_envelope(
                     for number in list_payload(item.get("extracted_numbers"))
                     if isinstance(number, dict)
                 ][:8],
-                proposed_relations=proposed_relations,
             )
         )
     if not result:
@@ -1123,25 +1258,6 @@ def observation_cards_from_model_envelope(
         )
     return result
 
-
-def _parse_proposed_relations(value: Any, task_id: str) -> list[ProposedRelation]:
-    if not isinstance(value, list):
-        return []
-    result: list[ProposedRelation] = []
-    seen_kinds: set[tuple[str, str]] = set()
-    for item in value[:4]:
-        if not isinstance(item, dict):
-            continue
-        target_id = str(item.get("target_observation_id") or "").strip()
-        kind = str(item.get("kind") or "").strip()
-        if not target_id or kind not in PROPOSED_RELATION_KINDS:
-            continue
-        key = (target_id, kind)
-        if key in seen_kinds:
-            continue
-        seen_kinds.add(key)
-        result.append(ProposedRelation(target_observation_id=target_id, kind=kind))
-    return result
 
 
 def clean_model_covered_outputs(value: Any, task: ReadingTask) -> list[str]:

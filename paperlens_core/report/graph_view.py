@@ -30,7 +30,7 @@ class ReportSection(BaseModel):
 class GraphReportDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = "graph_report_draft.v1"
+    schema_version: str = "graph_report_draft.v2"
     paper_id: str
     sections: list[ReportSection] = Field(default_factory=list)
 

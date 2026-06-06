@@ -22,7 +22,7 @@ from paperlens_core.report import GraphReportDraft, audit_report_draft_against_g
 from paperlens_core.runtime import ArtifactEnvelope
 
 
-CORE_QUALITY_SNAPSHOT_SCHEMA_VERSION = "paperlens.core_quality_snapshot.v1"
+CORE_QUALITY_SNAPSHOT_SCHEMA_VERSION = "paperlens.core_quality_snapshot.v2"
 CORE_QUALITY_SNAPSHOT_ARTIFACT = "core_quality_snapshot"
 
 

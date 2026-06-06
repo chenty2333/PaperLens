@@ -22,7 +22,7 @@ from paperlens_core.runtime import read_artifact_envelope, write_typed_artifact
 
 
 CORE_V2_ENVELOPE_SCHEMA_VERSION = "paperlens_core.v2.bootstrap"
-CORE_V2_MANIFEST_SCHEMA_VERSION = "core_v2_manifest.v1"
+CORE_V2_MANIFEST_SCHEMA_VERSION = "core_v2_manifest.v2"
 CORE_V2_MANIFEST_FILENAME = "core_manifest.v2.json"
 CORE_V2_CONSUMABLE_STATUSES = {"REVIEWED", "REVIEWED_WITH_LIMITS"}
 CORE_V2_REQUIRED_ARTIFACTS = {

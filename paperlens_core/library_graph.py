@@ -18,7 +18,7 @@ from paperlens_core.runtime import ArtifactEnvelope
 from paperlens_core.core_manifest import inspect_core_v2_artifact_root
 
 
-GRAPH_LIBRARY_SUMMARY_SCHEMA_VERSION = "paperlens.graph_library_summary.v1"
+GRAPH_LIBRARY_SUMMARY_SCHEMA_VERSION = "paperlens.graph_library_summary.v2"
 CONSUMABLE_GRAPH_STATUSES = {"REVIEWED", "REVIEWED_WITH_LIMITS"}
 
 GRAPH_LIBRARY_NODE_KINDS = [

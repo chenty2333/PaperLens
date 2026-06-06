@@ -19,7 +19,7 @@ from paperlens_core.reading.tasks import ReadingPlan
 class CoreQualityMetrics(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = "paperlens_core_quality.v1"
+    schema_version: str = "paperlens_core_quality.v2"
     paper_id: str
     fact_node_count: int
     supported_fact_node_count: int
