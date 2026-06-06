@@ -3,10 +3,15 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
+from paperlens_core.agents.llm import JsonLlmClient, llm_call_context
+from paperlens_core.config import CoreConfig
+from paperlens_core.events import EventWriter
 from paperlens_core.schemas import PaperRecord
+from paperlens_core.workflow.utils import hash_text
 
 
 VLM_PAGE_READER_SYSTEM_PROMPT = """
@@ -52,6 +57,116 @@ VLM_PAGE_NOTES_SCHEMA: dict[str, Any] = {
         },
     },
 }
+
+
+class VisualWorkflowContext(Protocol):
+    config: CoreConfig
+    events: EventWriter
+
+    def cache_path(self, stage: str, paper_id: str, key_payload: dict[str, Any]) -> Path: ...
+
+    def read_cache_payload(self, path: Path) -> dict[str, Any] | None: ...
+
+    def write_cache_payload(self, path: Path, payload: dict[str, Any]) -> None: ...
+
+    def write_agent_run(self, payload: dict[str, Any]) -> None: ...
+
+    def record_llm_usage(self, stage: str, usage: dict[str, Any]) -> None: ...
+
+
+def run_vlm_page_mode(
+    workflow: VisualWorkflowContext,
+    *,
+    client: JsonLlmClient,
+    paper: PaperRecord,
+    artifacts: list[Any],
+    stage: str,
+) -> dict[str, Any]:
+    pages = [artifact.page_no for artifact in artifacts]
+    image_paths = [Path(artifact.render_path) for artifact in artifacts if artifact.render_path]
+    key_payload = {
+        "version": "vlm-page-v1",
+        "model": workflow.config.provider.model,
+        "visual_detail": workflow.config.visual_detail,
+        "paper_hash": paper.file_hash,
+        "pages": pages,
+        "text_hashes": [hash_text(getattr(artifact, "text", "")) for artifact in artifacts],
+        "image_hashes": [hash_file_bytes(path) for path in image_paths],
+    }
+    cache_path = workflow.cache_path("vlm_page_notes", paper.paper_id, key_payload)
+    cached = workflow.read_cache_payload(cache_path)
+    if cached and isinstance(cached.get("data"), dict):
+        workflow.events.emit(
+            "cache_hit",
+            stage=stage,
+            message=f"VLM page cache hit for {paper.paper_id}",
+            data={"paper_id": paper.paper_id, "pages": pages, "cache": str(cache_path)},
+        )
+        data = cached["data"]
+        page_notes = data.get("page_notes") if isinstance(data.get("page_notes"), list) else []
+        return {
+            "paper_id": paper.paper_id,
+            "agent_run_id": str(cached.get("agent_run_id") or f"vlm_{paper.paper_id}_cache"),
+            "page_notes": page_notes,
+            "visual_summary": data.get("visual_summary"),
+            "risk_notes": data.get("risk_notes"),
+        }
+    agent_run_id = f"vlm_{paper.paper_id}_{uuid.uuid4().hex[:8]}"
+    workflow.events.emit(
+        "agent_run_started",
+        stage=stage,
+        message=f"VLM page read {paper.paper_id}",
+        data={"paper_id": paper.paper_id, "agent_run_id": agent_run_id},
+    )
+    with llm_call_context(
+        stage=stage,
+        paper_id=paper.paper_id,
+        operation="vlm_page_read",
+        schema_name="paperlens_vlm_page_notes",
+        pages=pages,
+    ):
+        raw = client.invoke_json_with_images(
+            system_prompt=VLM_PAGE_READER_SYSTEM_PROMPT,
+            user_prompt=build_vlm_page_prompt(paper=paper, artifacts=artifacts),
+            image_paths=image_paths,
+            schema_name="paperlens_vlm_page_notes",
+            schema=VLM_PAGE_NOTES_SCHEMA,
+            max_tokens=None,
+            detail=workflow.config.visual_detail,
+        )
+    workflow.write_agent_run(
+        {
+            "agent_run_id": agent_run_id,
+            "paper_id": paper.paper_id,
+            "stage": stage,
+            "provider_kind": workflow.config.provider.kind,
+            "model": workflow.config.provider.model,
+            "endpoint": raw.endpoint,
+            "request_id": raw.request_id,
+            "usage": raw.usage,
+            "status": "PASS",
+        }
+    )
+    workflow.record_llm_usage(stage, raw.usage)
+    workflow.write_cache_payload(
+        cache_path,
+        {
+            "key": key_payload,
+            "data": raw.data,
+            "usage": raw.usage,
+            "request_id": raw.request_id,
+            "endpoint": raw.endpoint,
+            "agent_run_id": agent_run_id,
+        },
+    )
+    page_notes = raw.data.get("page_notes") if isinstance(raw.data.get("page_notes"), list) else []
+    return {
+        "paper_id": paper.paper_id,
+        "agent_run_id": agent_run_id,
+        "page_notes": page_notes,
+        "visual_summary": raw.data.get("visual_summary"),
+        "risk_notes": raw.data.get("risk_notes"),
+    }
 
 
 def build_vlm_page_prompt(*, paper: PaperRecord, artifacts: list[Any]) -> str:

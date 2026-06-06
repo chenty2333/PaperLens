@@ -3,11 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import uuid
 from pathlib import Path
 from typing import Any
 
-from paperlens_core.agents.llm import JsonLlmClient, llm_call_context
+from paperlens_core.agents.llm import JsonLlmClient
 from paperlens_core.agents.providers import describe_provider
 from paperlens_core.budget import BudgetManager
 from paperlens_core.config import CoreConfig
@@ -52,15 +51,9 @@ from paperlens_core.workflow.core_v2 import (
     run_core_v2_model_observation_tasks,
     write_core_v2_artifacts,
 )
-from paperlens_core.workflow.visual import (
-    VLM_PAGE_NOTES_SCHEMA,
-    VLM_PAGE_READER_SYSTEM_PROMPT,
-    build_vlm_page_prompt,
-    hash_file_bytes,
-)
+from paperlens_core.workflow.visual import run_vlm_page_mode as run_visual_vlm_page_mode
 from paperlens_core.workflow.utils import (
     dict_value,
-    hash_text,
     load_layout_index,
     utc_timestamp,
 )
@@ -322,93 +315,13 @@ class PaperLensWorkflow:
         artifacts: list[Any],
         stage: str,
     ) -> dict[str, Any]:
-        pages = [artifact.page_no for artifact in artifacts]
-        image_paths = [Path(artifact.render_path) for artifact in artifacts if artifact.render_path]
-        key_payload = {
-            "version": "vlm-page-v1",
-            "model": self.config.provider.model,
-            "visual_detail": self.config.visual_detail,
-            "paper_hash": paper.file_hash,
-            "pages": pages,
-            "text_hashes": [hash_text(getattr(artifact, "text", "")) for artifact in artifacts],
-            "image_hashes": [hash_file_bytes(path) for path in image_paths],
-        }
-        cache_path = self.cache_path("vlm_page_notes", paper.paper_id, key_payload)
-        cached = self.read_cache_payload(cache_path)
-        if cached and isinstance(cached.get("data"), dict):
-            self.events.emit(
-                "cache_hit",
-                stage=stage,
-                message=f"VLM page cache hit for {paper.paper_id}",
-                data={"paper_id": paper.paper_id, "pages": pages, "cache": str(cache_path)},
-            )
-            data = cached["data"]
-            page_notes = data.get("page_notes") if isinstance(data.get("page_notes"), list) else []
-            return {
-                "paper_id": paper.paper_id,
-                "agent_run_id": str(cached.get("agent_run_id") or f"vlm_{paper.paper_id}_cache"),
-                "page_notes": page_notes,
-                "visual_summary": data.get("visual_summary"),
-                "risk_notes": data.get("risk_notes"),
-            }
-        agent_run_id = f"vlm_{paper.paper_id}_{uuid.uuid4().hex[:8]}"
-        self.events.emit(
-            "agent_run_started",
+        return run_visual_vlm_page_mode(
+            self,
+            client=client,
+            paper=paper,
+            artifacts=artifacts,
             stage=stage,
-            message=f"VLM page read {paper.paper_id}",
-            data={"paper_id": paper.paper_id, "agent_run_id": agent_run_id},
         )
-        with llm_call_context(
-            stage=stage,
-            paper_id=paper.paper_id,
-            operation="vlm_page_read",
-            schema_name="paperlens_vlm_page_notes",
-            pages=pages,
-        ):
-            raw = client.invoke_json_with_images(
-                system_prompt=VLM_PAGE_READER_SYSTEM_PROMPT,
-                user_prompt=build_vlm_page_prompt(paper=paper, artifacts=artifacts),
-                image_paths=image_paths,
-                schema_name="paperlens_vlm_page_notes",
-                schema=VLM_PAGE_NOTES_SCHEMA,
-                max_tokens=None,
-                detail=self.config.visual_detail,
-            )
-        self.write_agent_run(
-            {
-                "agent_run_id": agent_run_id,
-                "paper_id": paper.paper_id,
-                "stage": stage,
-                "provider_kind": self.config.provider.kind,
-                "model": self.config.provider.model,
-                "endpoint": raw.endpoint,
-                "request_id": raw.request_id,
-                "usage": raw.usage,
-                "status": "PASS",
-            }
-        )
-        self.record_llm_usage(stage, raw.usage)
-        self.write_cache_payload(
-            cache_path,
-            {
-                "key": key_payload,
-                "data": raw.data,
-                "usage": raw.usage,
-                "request_id": raw.request_id,
-                "endpoint": raw.endpoint,
-                "agent_run_id": agent_run_id,
-            },
-        )
-        page_notes = (
-            raw.data.get("page_notes") if isinstance(raw.data.get("page_notes"), list) else []
-        )
-        return {
-            "paper_id": paper.paper_id,
-            "agent_run_id": agent_run_id,
-            "page_notes": page_notes,
-            "visual_summary": raw.data.get("visual_summary"),
-            "risk_notes": raw.data.get("risk_notes"),
-        }
 
     def stage_03_skim(self) -> None:
         stage = "stage_03_skim"
