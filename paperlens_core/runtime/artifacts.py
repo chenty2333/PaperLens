@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 def now_iso() -> str:
@@ -11,6 +11,8 @@ def now_iso() -> str:
 
 
 class ArtifactEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     """Standard runtime envelope for every model or deterministic artifact.
 
     The envelope is intentionally flat: task nodes exchange typed artifacts,

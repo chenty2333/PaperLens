@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Literal, cast, get_args
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from paperlens_core.reading.observation import ObservationCard, ObservationType
 
@@ -30,30 +30,10 @@ EdgeKind = Literal[
     "compared_with",
 ]
 
-EDGE_KINDS = set(get_args(EdgeKind))
-EDGE_KIND_ALIASES = {
-    "contradict": "contradicted_by",
-    "contradicts": "contradicted_by",
-    "contradicted_by": "contradicted_by",
-    "depend_on": "depends_on",
-    "depends_on": "depends_on",
-    "explain": "explains",
-    "explains": "explains",
-    "implement": "implements",
-    "implements": "implements",
-    "evaluate": "evaluated_by",
-    "evaluates": "evaluated_by",
-    "evaluated_by": "evaluated_by",
-    "limit": "limited_by",
-    "limits": "limited_by",
-    "limited_by": "limited_by",
-    "compare_with": "compared_with",
-    "compares_with": "compared_with",
-    "compared_with": "compared_with",
-}
-
 
 class GraphNode(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     node_id: str
     kind: NodeKind
     label: str
@@ -61,6 +41,8 @@ class GraphNode(BaseModel):
 
 
 class GraphEdge(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     source_id: str
     target_id: str
     kind: EdgeKind
@@ -68,6 +50,8 @@ class GraphEdge(BaseModel):
 
 
 class ClaimGraph(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     schema_version: str = "claim_graph.v1"
     paper_id: str
     nodes: dict[str, GraphNode] = Field(default_factory=dict)
@@ -115,13 +99,11 @@ OBSERVATION_NODE_KIND: dict[ObservationType, NodeKind] = {
 
 def graph_from_observations(paper_id: str, observations: list[ObservationCard]) -> ClaimGraph:
     graph = ClaimGraph(paper_id=paper_id)
-    observation_node_ids: dict[str, str] = {}
     for card in observations:
         if card.paper_id != paper_id:
             raise ValueError(f"observation paper_id mismatch: {card.paper_id} != {paper_id}")
         node_kind = OBSERVATION_NODE_KIND[card.observation_type]
         node_id = observation_node_id(card)
-        observation_node_ids[card.observation_id] = node_id
         graph.add_node(
             GraphNode(
                 node_id=node_id,
@@ -149,7 +131,6 @@ def graph_from_observations(paper_id: str, observations: list[ObservationCard]) 
                 )
             )
             graph.add_edge(GraphEdge(source_id=node_id, target_id=evidence_id, kind="supported_by"))
-    add_proposed_observation_links(graph, observations, observation_node_ids)
     return graph
 
 
@@ -160,55 +141,3 @@ def graph_node_identity_payload(node: GraphNode) -> dict[str, Any]:
 def observation_node_id(card: ObservationCard) -> str:
     node_kind = OBSERVATION_NODE_KIND[card.observation_type]
     return f"{node_kind}:{card.observation_id}"
-
-
-def add_proposed_observation_links(
-    graph: ClaimGraph,
-    observations: list[ObservationCard],
-    observation_node_ids: dict[str, str],
-) -> None:
-    for card in observations:
-        for link in card.proposed_links:
-            source_id = resolve_graph_endpoint(
-                str(link.get("source_id") or ""),
-                graph=graph,
-                observation_node_ids=observation_node_ids,
-            )
-            target_id = resolve_graph_endpoint(
-                str(link.get("target_id") or ""),
-                graph=graph,
-                observation_node_ids=observation_node_ids,
-            )
-            edge_kind = normalize_edge_kind(link.get("kind"))
-            if not source_id or not target_id or not edge_kind or source_id == target_id:
-                continue
-            graph.add_edge(
-                GraphEdge(
-                    source_id=source_id,
-                    target_id=target_id,
-                    kind=cast(EdgeKind, edge_kind),
-                    payload={"proposed_by_observation_id": card.observation_id},
-                )
-            )
-
-
-def resolve_graph_endpoint(
-    value: str,
-    *,
-    graph: ClaimGraph,
-    observation_node_ids: dict[str, str],
-) -> str | None:
-    endpoint = value.strip()
-    if endpoint in graph.nodes:
-        return endpoint if graph.nodes[endpoint].kind != "evidence" else None
-    if endpoint in observation_node_ids:
-        return observation_node_ids[endpoint]
-    return None
-
-
-def normalize_edge_kind(value: Any) -> str | None:
-    key = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
-    edge_kind = EDGE_KIND_ALIASES.get(key)
-    if edge_kind in EDGE_KINDS:
-        return edge_kind
-    return None

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from paperlens_core.audit import AuditFinding, AuditSeverity
 from paperlens_core.dom import PaperDOM
@@ -11,6 +11,8 @@ from paperlens_core.graph import ClaimGraph
 
 
 class ReportParagraph(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     paragraph_id: str
     markdown: str
     used_node_ids: list[str] = Field(default_factory=list)
@@ -18,12 +20,16 @@ class ReportParagraph(BaseModel):
 
 
 class ReportSection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     section_id: str
     title: str
     paragraphs: list[ReportParagraph] = Field(default_factory=list)
 
 
 class GraphReportDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     schema_version: str = "graph_report_draft.v1"
     paper_id: str
     sections: list[ReportSection] = Field(default_factory=list)

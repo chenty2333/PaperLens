@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from paperlens_core.dom.paper_dom import PaperDOM
 
@@ -22,6 +22,8 @@ class ReadingTaskType(StrEnum):
 
 
 class ReadingTask(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     task_id: str
     task_type: ReadingTaskType
     target_source_ids: list[str] = Field(default_factory=list)
@@ -77,6 +79,8 @@ class ReadingTask(BaseModel):
 
 
 class ReadingPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     schema_version: str = "reading_plan.v1"
     paper_id: str
     tasks: list[ReadingTask]

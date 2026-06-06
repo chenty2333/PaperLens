@@ -3,13 +3,15 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 SourceKind = Literal["section", "span", "figure", "table", "equation"]
 
 
 class PaperDOMNode(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     source_id: str
     paper_id: str
     page_no: int | None = None
@@ -59,6 +61,8 @@ class PaperEquation(PaperDOMNode):
 
 
 class PaperDOM(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     schema_version: str = "paper_dom.v1"
     paper_id: str
     title: str | None = None

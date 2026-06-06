@@ -10,12 +10,14 @@ from paperlens_core.audit import (
     AuditFinding,
     AuditSeverity,
     audit_claim_graph,
+    audit_claim_graph_from_observation_log,
+    audit_observation_log,
     audit_reading_required_outputs,
     publish_status_from_findings,
 )
 from paperlens_core.dom import PaperDOM
 from paperlens_core.graph import ClaimGraph
-from paperlens_core.reading import ReadingPlan
+from paperlens_core.reading import ObservationLog, ReadingPlan
 from paperlens_core.runtime import read_artifact_envelope, write_typed_artifact
 
 
@@ -185,6 +187,13 @@ def current_core_v2_findings(root: Path) -> list[AuditFinding]:
     reading_plan = ReadingPlan.model_validate(
         read_required_artifact_data(root, "reading_plan.v1.json", expected_type="reading_plan")
     )
+    observation_log = ObservationLog.model_validate(
+        read_required_artifact_data(
+            root,
+            "observation_log.v1.json",
+            expected_type="observation_log",
+        )
+    )
     graph = ClaimGraph.model_validate(
         read_required_artifact_data(root, "claim_graph.v1.json", expected_type="claim_graph")
     )
@@ -196,6 +205,8 @@ def current_core_v2_findings(root: Path) -> list[AuditFinding]:
         )
     )
     return [
+        *audit_observation_log(observation_log, dom, reading_plan),
+        *audit_claim_graph_from_observation_log(graph, observation_log),
         *audit_claim_graph(graph, dom),
         *audit_reading_required_outputs(graph, reading_plan),
         *audit_report_draft_against_graph(report_draft, graph),

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class AuditSeverity(StrEnum):
@@ -19,6 +19,8 @@ class PublishStatus(StrEnum):
 
 
 class AuditFinding(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     finding_id: str
     severity: AuditSeverity
     code: str

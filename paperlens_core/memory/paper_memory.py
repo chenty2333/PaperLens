@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from paperlens_core.audit import AuditFinding, AuditSeverity
 from paperlens_core.dom import PaperDOM
@@ -10,6 +10,8 @@ from paperlens_core.graph.claim_graph import ClaimGraph
 
 
 class PaperMemoryRelationshipEdge(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     source_id: str
     target_id: str
     kind: str
@@ -17,6 +19,8 @@ class PaperMemoryRelationshipEdge(BaseModel):
 
 
 class PaperMemoryAuditIssue(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     finding_id: str
     severity: str
     code: str
@@ -26,6 +30,8 @@ class PaperMemoryAuditIssue(BaseModel):
 
 
 class PaperMemoryFactNode(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     node_id: str
     kind: str
     label: str
@@ -41,6 +47,8 @@ class PaperMemoryFactNode(BaseModel):
 
 
 class PaperMemoryEvidenceSource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     source_id: str
     kind: str
     page_no: int | None = None
@@ -49,6 +57,8 @@ class PaperMemoryEvidenceSource(BaseModel):
 
 
 class PaperMemoryEvaluationItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     node_id: str
     kind: str
     label: str
@@ -61,6 +71,8 @@ class PaperMemoryEvaluationItem(BaseModel):
 
 
 class PaperMemoryView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     schema_version: str = "paper_memory.view.v1"
     paper_id: str
     metadata: dict[str, Any] = Field(default_factory=dict)

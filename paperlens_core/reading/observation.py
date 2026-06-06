@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, Iterable, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ObservationType(StrEnum):
@@ -21,6 +21,8 @@ class ObservationType(StrEnum):
 
 
 class ObservationCard(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     observation_id: str
     paper_id: str
     task_id: str
@@ -32,7 +34,6 @@ class ObservationCard(BaseModel):
     uncertainty: str | None = None
     covered_outputs: list[str] = Field(default_factory=list)
     extracted_numbers: list[dict[str, Any]] = Field(default_factory=list)
-    proposed_links: list[dict[str, str]] = Field(default_factory=list)
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     @field_validator("paper_id", "task_id", "statement")
@@ -67,6 +68,8 @@ class ObservationCard(BaseModel):
 
 
 class ObservationLog(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     schema_version: str = "observation_log.v1"
     paper_id: str
     cards: tuple[ObservationCard, ...] = ()

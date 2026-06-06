@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from paperlens_core.audit.findings import AuditFinding
 from paperlens_core.audit.suite import (
@@ -17,6 +17,8 @@ from paperlens_core.reading.tasks import ReadingPlan
 
 
 class CoreQualityMetrics(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     schema_version: str = "paperlens_core_quality.v1"
     paper_id: str
     fact_node_count: int

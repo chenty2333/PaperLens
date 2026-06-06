@@ -5,7 +5,8 @@ import re
 from paperlens_core.audit.findings import AuditFinding, AuditSeverity, PublishStatus
 from paperlens_core.dom.paper_dom import PaperDOM
 from paperlens_core.grounding import text_overlaps_any_reference
-from paperlens_core.graph.claim_graph import ClaimGraph
+from paperlens_core.graph.claim_graph import ClaimGraph, graph_from_observations
+from paperlens_core.reading.observation import ObservationLog
 from paperlens_core.reading.tasks import ReadingPlan
 
 
@@ -250,6 +251,176 @@ def audit_reading_required_outputs(
             )
         )
     return findings
+
+
+def audit_observation_log(
+    log: ObservationLog,
+    dom: PaperDOM,
+    reading_plan: ReadingPlan,
+) -> list[AuditFinding]:
+    findings: list[AuditFinding] = []
+    dom_source_ids = dom.source_ids()
+    tasks_by_id = {task.task_id: task for task in reading_plan.tasks}
+    if log.paper_id != dom.paper_id:
+        findings.append(
+            AuditFinding(
+                finding_id=f"observation_log_paper_id_mismatch:{log.paper_id}:{dom.paper_id}",
+                severity=AuditSeverity.ERROR,
+                code="observation_log_paper_id_mismatch",
+                message=f"ObservationLog paper_id does not match PaperDOM: {log.paper_id} != {dom.paper_id}",
+            )
+        )
+    if reading_plan.paper_id != dom.paper_id:
+        findings.append(
+            AuditFinding(
+                finding_id=(
+                    "reading_plan_paper_id_mismatch:"
+                    f"{reading_plan.paper_id}:{dom.paper_id}"
+                ),
+                severity=AuditSeverity.ERROR,
+                code="reading_plan_paper_id_mismatch",
+                message=(
+                    "ReadingPlan paper_id does not match PaperDOM: "
+                    f"{reading_plan.paper_id} != {dom.paper_id}"
+                ),
+            )
+        )
+    seen_observation_ids: set[str] = set()
+    for card in log.cards:
+        if card.observation_id in seen_observation_ids:
+            findings.append(
+                AuditFinding(
+                    finding_id=f"duplicate_observation_id:{card.observation_id}",
+                    severity=AuditSeverity.ERROR,
+                    code="duplicate_observation_id",
+                    message=f"ObservationLog contains duplicate observation_id: {card.observation_id}",
+                )
+            )
+        seen_observation_ids.add(card.observation_id)
+        if card.paper_id != log.paper_id:
+            findings.append(
+                AuditFinding(
+                    finding_id=f"observation_card_paper_id_mismatch:{card.observation_id}",
+                    severity=AuditSeverity.ERROR,
+                    code="observation_card_paper_id_mismatch",
+                    message=(
+                        "Observation card paper_id does not match ObservationLog: "
+                        f"{card.paper_id} != {log.paper_id}"
+                    ),
+                )
+            )
+        missing_source_ids = [
+            source_id for source_id in card.source_ids if source_id not in dom_source_ids
+        ]
+        if missing_source_ids:
+            findings.append(
+                AuditFinding(
+                    finding_id=f"observation_missing_sources:{card.observation_id}",
+                    severity=AuditSeverity.ERROR,
+                    code="observation_card_missing_dom_source",
+                    message="Observation card cites PaperDOM source IDs that do not exist",
+                    source_ids=missing_source_ids,
+                )
+            )
+        task = tasks_by_id.get(card.task_id)
+        if task is None:
+            findings.append(
+                AuditFinding(
+                    finding_id=f"observation_unknown_task:{card.observation_id}:{card.task_id}",
+                    severity=AuditSeverity.ERROR,
+                    code="observation_card_unknown_task_id",
+                    message=f"Observation card references unknown ReadingTask: {card.task_id}",
+                )
+            )
+            continue
+        observation_type = card.observation_type.value
+        if observation_type not in task.allowed_observation_types:
+            findings.append(
+                AuditFinding(
+                    finding_id=(
+                        "observation_disallowed_type:"
+                        f"{card.observation_id}:{observation_type}"
+                    ),
+                    severity=AuditSeverity.ERROR,
+                    code="observation_card_disallowed_type",
+                    message=(
+                        "Observation card type is not allowed by its ReadingTask: "
+                        f"{observation_type}"
+                    ),
+                )
+            )
+        if not card.covered_outputs:
+            findings.append(
+                AuditFinding(
+                    finding_id=f"observation_missing_covered_outputs:{card.observation_id}",
+                    severity=AuditSeverity.ERROR,
+                    code="observation_card_missing_covered_outputs",
+                    message="Observation card must declare which ReadingTask outputs it covers",
+                )
+            )
+        invalid_outputs = [
+            output for output in card.covered_outputs if output not in task.required_outputs
+        ]
+        if invalid_outputs:
+            findings.append(
+                AuditFinding(
+                    finding_id=f"observation_invalid_covered_outputs:{card.observation_id}",
+                    severity=AuditSeverity.ERROR,
+                    code="observation_card_invalid_covered_outputs",
+                    message="Observation card covered_outputs are not required by its ReadingTask",
+                )
+            )
+    return findings
+
+
+def audit_claim_graph_from_observation_log(
+    graph: ClaimGraph,
+    log: ObservationLog,
+) -> list[AuditFinding]:
+    try:
+        expected = graph_from_observations(log.paper_id, list(log.cards))
+    except ValueError as exc:
+        return [
+            AuditFinding(
+                finding_id=f"claim_graph_observation_materialization_failed:{graph.paper_id}",
+                severity=AuditSeverity.ERROR,
+                code="claim_graph_observation_materialization_failed",
+                message=str(exc),
+            )
+        ]
+    if claim_graph_identity(graph) == claim_graph_identity(expected):
+        return []
+    return [
+        AuditFinding(
+            finding_id=f"claim_graph_not_derived_from_observation_log:{graph.paper_id}",
+            severity=AuditSeverity.ERROR,
+            code="claim_graph_not_derived_from_observation_log",
+            message=(
+                "ClaimGraph must be the deterministic materialization of ObservationLog; "
+                f"stored nodes/edges={len(graph.nodes)}/{len(graph.edges)}, "
+                f"expected nodes/edges={len(expected.nodes)}/{len(expected.edges)}"
+            ),
+        )
+    ]
+
+
+def claim_graph_identity(graph: ClaimGraph) -> dict[str, object]:
+    return {
+        "schema_version": graph.schema_version,
+        "paper_id": graph.paper_id,
+        "nodes": {
+            node_id: graph.nodes[node_id].model_dump(mode="json")
+            for node_id in sorted(graph.nodes)
+        },
+        "edges": sorted(
+            (edge.model_dump(mode="json") for edge in graph.edges),
+            key=lambda item: (
+                str(item.get("source_id") or ""),
+                str(item.get("target_id") or ""),
+                str(item.get("kind") or ""),
+            ),
+        ),
+    }
 
 
 def missing_reading_required_output_keys(

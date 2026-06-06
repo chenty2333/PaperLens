@@ -7,6 +7,8 @@ from typing import Any, Protocol
 
 from paperlens_core.audit import (
     audit_claim_graph,
+    audit_claim_graph_from_observation_log,
+    audit_observation_log,
     audit_reading_required_outputs,
     compute_core_quality_metrics,
 )
@@ -271,7 +273,6 @@ OBSERVATION_CARDS_SCHEMA: dict[str, Any] = {
                             "uncertainty",
                             "covered_outputs",
                             "extracted_numbers",
-                            "proposed_links",
                         ],
                         "properties": {
                             "observation_type": {
@@ -302,19 +303,6 @@ OBSERVATION_CARDS_SCHEMA: dict[str, Any] = {
                                     "properties": {"text": {"type": "string"}},
                                 },
                             },
-                            "proposed_links": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "additionalProperties": False,
-                                    "required": ["source_id", "target_id", "kind"],
-                                    "properties": {
-                                        "source_id": {"type": "string"},
-                                        "target_id": {"type": "string"},
-                                        "kind": {"type": "string"},
-                                    },
-                                },
-                            },
                         },
                     },
                 }
@@ -342,6 +330,7 @@ def write_core_v2_artifacts(
     claim_graph = graph_from_observations(paper.paper_id, list(observation_log.cards))
     derived = build_core_v2_derived_views(
         dom=dom,
+        observation_log=observation_log,
         claim_graph=claim_graph,
         reading_plan=reading_plan,
         metadata={
@@ -565,6 +554,7 @@ def write_core_v2_from_observation_log(
     claim_graph = graph_from_observations(paper.paper_id, list(observation_log.cards))
     derived = build_core_v2_derived_views(
         dom=dom,
+        observation_log=observation_log,
         claim_graph=claim_graph,
         reading_plan=reading_plan,
         metadata={
@@ -705,9 +695,11 @@ def refresh_core_v2_audit_artifacts(
     producer: str = "paperlens_core_v2_audit_suite",
 ) -> dict[str, Any]:
     dom, reading_plan = load_core_v2_dom_and_plan(data_dir, paper.paper_id)
+    observation_log = load_core_v2_observation_log(data_dir, paper.paper_id)
     _, claim_graph = load_core_v2_dom_and_graph(data_dir, paper.paper_id)
     derived = build_core_v2_derived_views(
         dom=dom,
+        observation_log=observation_log,
         claim_graph=claim_graph,
         reading_plan=reading_plan,
         metadata={
@@ -774,11 +766,19 @@ def refresh_core_v2_audit_artifacts(
 def build_core_v2_derived_views(
     *,
     dom: PaperDOM,
+    observation_log: ObservationLog,
     claim_graph: ClaimGraph,
     reading_plan: ReadingPlan | None = None,
     metadata: dict[str, Any],
 ) -> dict[str, Any]:
+    observation_findings = (
+        audit_observation_log(observation_log, dom, reading_plan)
+        if reading_plan is not None
+        else []
+    )
     audit_findings = [
+        *observation_findings,
+        *audit_claim_graph_from_observation_log(claim_graph, observation_log),
         *audit_claim_graph(claim_graph, dom),
         *audit_reading_required_outputs(claim_graph, reading_plan),
     ]
@@ -932,6 +932,17 @@ def load_core_v2_dom_and_plan(data_dir: Path, paper_id: str) -> tuple[PaperDOM, 
     )
 
 
+def load_core_v2_observation_log(data_dir: Path, paper_id: str) -> ObservationLog:
+    root = data_dir / "core" / "v2" / paper_id
+    log_envelope = read_typed_artifact(
+        root / "observation_log.v1.json",
+        expected_type="observation_log",
+    )
+    if not isinstance(log_envelope.data, dict):
+        raise ValueError(f"Core v2 observation_log artifact is invalid for {paper_id}")
+    return ObservationLog.model_validate(log_envelope.data)
+
+
 def load_core_v2_dom_and_graph(data_dir: Path, paper_id: str) -> tuple[PaperDOM, ClaimGraph]:
     root = data_dir / "core" / "v2" / paper_id
     dom_envelope = read_typed_artifact(root / "paper_dom.v1.json", expected_type="paper_dom")
@@ -1077,11 +1088,6 @@ def observation_cards_from_model_envelope(
                     number
                     for number in list_payload(item.get("extracted_numbers"))
                     if isinstance(number, dict)
-                ][:8],
-                proposed_links=[
-                    link
-                    for link in list_payload(item.get("proposed_links"))
-                    if isinstance(link, dict)
                 ][:8],
             )
         )
