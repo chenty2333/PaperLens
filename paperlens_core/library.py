@@ -446,6 +446,12 @@ def build_library_record(row: dict[str, Any]) -> dict[str, Any]:
         ),
         "graph_fact_node_count": dict_value(graph_summary.get("quality")).get("fact_node_count"),
     }
+    outputs = {
+        "briefing_md": f"papers/{report_name}",
+    }
+    core_graph_report_name = string_or_none(row.get("core_graph_report_name"))
+    if core_graph_report_name:
+        outputs["core_graph_report_md"] = f"papers/{core_graph_report_name}"
     record = {
         "schema_version": LIBRARY_RECORD_SCHEMA_VERSION,
         "paper_id": paper_id,
@@ -489,9 +495,7 @@ def build_library_record(row: dict[str, Any]) -> dict[str, Any]:
             },
             "core_v2": graph_provenance(graph_summary),
         },
-        "outputs": {
-            "briefing_md": f"papers/{report_name}",
-        },
+        "outputs": outputs,
         "search_text": build_record_search_text(
             title=title,
             brief=brief,

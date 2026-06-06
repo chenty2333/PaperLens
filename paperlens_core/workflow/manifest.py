@@ -79,6 +79,7 @@ def validate_paperlens_output(
         issues.append(".paperlens/library/library_records.jsonl is missing")
     elif not library_records_path.read_text(encoding="utf-8").strip():
         issues.append(".paperlens/library/library_records.jsonl is empty")
+    library_records_by_paper_id = read_library_records_by_paper_id(library_records_path)
     if not search_index_path.exists():
         issues.append(".paperlens/library/index/search_index.json is missing")
     papers_dir = output_dir / "papers"
@@ -178,6 +179,24 @@ def validate_paperlens_output(
                 f"Core v2 manifest is not consumable for {paper_id}: "
                 f"publish_status={inspected_manifest.get('publish_status')}"
             )
+            continue
+        library_record = library_records_by_paper_id.get(paper_id, {})
+        if not library_record:
+            issues.append(f"Library record is missing for consumable core v2 paper {paper_id}")
+            continue
+        core_graph_report = (
+            library_record.get("outputs", {}).get("core_graph_report_md")
+            if isinstance(library_record.get("outputs"), dict)
+            else None
+        )
+        if not isinstance(core_graph_report, str) or not core_graph_report.strip():
+            issues.append(f"Core graph report output is missing for {paper_id}")
+            continue
+        core_graph_path = resolve_markdown_target(output_dir, core_graph_report)
+        if core_graph_path is None or not core_graph_path.exists():
+            issues.append(f"Core graph report output target is missing for {paper_id}")
+        elif core_graph_path.is_file() and not core_graph_path.read_text(encoding="utf-8").strip():
+            issues.append(f"Core graph report output target is empty for {paper_id}")
     result = {
         "status": "PASS" if not issues else "FAIL",
         "checked_links": checked_links,
@@ -204,6 +223,25 @@ def core_manifest_data_mismatches(
         if stored_value != inspected_value:
             mismatches.append(f"{key} stored={stored_value!r} current={inspected_value!r}")
     return mismatches
+
+
+def read_library_records_by_paper_id(path: Path) -> dict[str, dict[str, Any]]:
+    if not path.exists():
+        return {}
+    records: dict[str, dict[str, Any]] = {}
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        paper_id = str(row.get("paper_id") or "").strip()
+        if paper_id:
+            records[paper_id] = row
+    return records
 
 
 def summarize_model_calls(path: Path) -> dict[str, Any]:

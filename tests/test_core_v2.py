@@ -2144,6 +2144,94 @@ def test_output_validation_rejects_non_consumable_core_v2_manifest(tmp_path):
         )
 
 
+def test_output_validation_rejects_missing_core_graph_report_output(tmp_path):
+    output_dir = tmp_path / "out"
+    data_dir = output_dir / ".paperlens" / "data"
+    paper = PaperRecord(
+        paper_id="p_test",
+        file_path="paper.pdf",
+        file_hash="hash",
+        canonical_title="Test Paper",
+        page_count=1,
+    )
+    layout = {
+        "pages": [
+            {
+                "page_no": 1,
+                "text": "Abstract\n\nWe propose a block table method for serving.",
+                "section_candidates": [{"title": "Abstract", "level": 1}],
+            }
+        ]
+    }
+    dom = build_paper_dom_from_layout(
+        paper_id=paper.paper_id,
+        title=paper.canonical_title,
+        layout=layout,
+    )
+    claim_span = next(span for span in dom.spans if "block table method" in span.text)
+    reading_plan = reading_plan_subset(dom, ReadingTaskType.CLAIM_INVENTORY)
+    claim_task = reading_task(reading_plan, ReadingTaskType.CLAIM_INVENTORY)
+    write_core_v2_from_observation_log(
+        data_dir=data_dir,
+        paper=paper,
+        dom=dom,
+        reading_plan=reading_plan,
+        observation_log=ObservationLog(paper_id="p_test").append(
+            ObservationCard(
+                observation_id="obs_claim",
+                paper_id="p_test",
+                task_id=claim_task.task_id,
+                observation_type=ObservationType.CLAIM,
+                statement="The paper proposes a block table method.",
+                source_ids=[claim_span.source_id],
+                covered_outputs=claim_task.required_outputs,
+            )
+        ),
+        producer="unit_test",
+    )
+    (output_dir / "papers").mkdir(parents=True)
+    (output_dir / ".paperlens" / "library" / "index").mkdir(parents=True)
+    (output_dir / ".paperlens" / "data" / "memory" / "v3").mkdir(parents=True)
+    (output_dir / "PaperLens.md").write_text(
+        "# PaperLens\n\n- [A] [Test Paper](./papers/p_test.md)\n",
+        encoding="utf-8",
+    )
+    (output_dir / "papers" / "p_test.md").write_text(
+        "# Test Paper\n\nA useful report.\n",
+        encoding="utf-8",
+    )
+    (output_dir / ".paperlens" / "library" / "library_records.jsonl").write_text(
+        json.dumps(
+            {
+                "paper_id": "p_test",
+                "outputs": {"briefing_md": "papers/p_test.md"},
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (output_dir / ".paperlens" / "library" / "index" / "search_index.json").write_text(
+        "[]",
+        encoding="utf-8",
+    )
+    (
+        output_dir
+        / ".paperlens"
+        / "data"
+        / "memory"
+        / "v3"
+        / "p_test.paper_memory.v3.json"
+    ).write_text("{}", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Core graph report output is missing"):
+        validate_paperlens_output(
+            output_dir,
+            expected_report_names={"p_test.md"},
+            expected_paper_ids={"p_test"},
+        )
+
+
 def test_refresh_core_v2_audit_artifacts_blocks_missing_dom_sources(tmp_path):
     paper = PaperRecord(
         paper_id="p_test",
@@ -3234,7 +3322,16 @@ def test_export_writes_core_graph_report_view_for_reviewed_core_artifacts(tmp_pa
     graph_report = output_dir / "papers" / "core_graph" / "p_test_test_paper.core_graph.md"
     index = (output_dir / "PaperLens.md").read_text(encoding="utf-8")
     markdown = graph_report.read_text(encoding="utf-8")
+    records = read_library_records(output_dir)
     assert graph_report in written
+    assert records[0]["outputs"]["core_graph_report_md"] == (
+        "papers/core_graph/p_test_test_paper.core_graph.md"
+    )
+    assert validate_paperlens_output(
+        output_dir,
+        expected_report_names={"p_test_test_paper.md"},
+        expected_paper_ids={"p_test"},
+    )["status"] == "PASS"
     assert "[事实图报告](./papers/core_graph/p_test_test_paper.core_graph.md)" in index
     assert "ClaimGraph nodes: `claim:obs_claim`" in markdown
     assert f"Evidence nodes: `evidence:{source_id}`" in markdown
@@ -4610,6 +4707,12 @@ def test_stage17_manifest_includes_core_quality_snapshot(tmp_path):
         report_name = paper_report_filename(paper)
         (output_dir / "PaperLens.md").write_text("# PaperLens\n\n索引。", encoding="utf-8")
         (output_dir / "papers" / report_name).write_text("# Test Paper\n\n报告。", encoding="utf-8")
+        core_graph_report_name = "core_graph/p_test_test_paper.core_graph.md"
+        (output_dir / "papers" / "core_graph").mkdir(parents=True, exist_ok=True)
+        (output_dir / "papers" / core_graph_report_name).write_text(
+            "# Test Paper Core Graph\n\nReviewed graph report.",
+            encoding="utf-8",
+        )
         write_paperlens_library(
             output_dir=output_dir,
             rows=[
@@ -4621,6 +4724,7 @@ def test_stage17_manifest_includes_core_quality_snapshot(tmp_path):
                         contribution_claims=["The paper proposes a block table method."],
                     ),
                     "report_name": report_name,
+                    "core_graph_report_name": core_graph_report_name,
                     "report_title": "Test Paper",
                     "paper_memory_v3": {},
                     "model_report": {"one_line_reason": "Block table method."},
