@@ -33,7 +33,14 @@ def find_single(pattern: str, artifact_dir: Path) -> Path:
 def main() -> None:
     args = parse_args()
     artifact_dir = args.artifact_dir.resolve()
-    installer = find_single("*.exe", artifact_dir)
+    installer_matches = sorted(
+        artifact_dir.glob(f"PaperLens_{args.version}_*-setup.exe")
+    )
+    installer = (
+        installer_matches[0]
+        if len(installer_matches) == 1
+        else find_single("*.exe", artifact_dir)
+    )
     signature_path = Path(f"{installer}.sig")
     if not signature_path.exists():
         signature_path = find_single("*.sig", artifact_dir)

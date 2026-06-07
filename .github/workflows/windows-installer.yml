@@ -246,9 +246,10 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
-          $installer = Get-ChildItem "src-tauri/target/release/bundle/nsis" -Filter "*.exe" | Select-Object -First 1
+          $version = (Get-Content -LiteralPath "package.json" -Raw | ConvertFrom-Json).version
+          $installer = Get-ChildItem "src-tauri/target/release/bundle/nsis" -File -Filter "PaperLens_${version}_x64-setup.exe" | Select-Object -First 1
           if (-not $installer) {
-            throw "NSIS installer was not produced."
+            throw "NSIS installer for version $version was not produced."
           }
           if (Test-Path "src-tauri/target/release/bundle/msi/*.msi") {
             throw "MSI output was produced unexpectedly; PaperLens should publish NSIS per-user only."
@@ -287,15 +288,53 @@ jobs:
             --output "$artifactDir/latest.json" `
             --notes-file RELEASE_NOTES.md
 
+      - name: Stage release artifacts
+        shell: pwsh
+        run: |
+          $releaseDir = "build/release-artifacts"
+          if (Test-Path -LiteralPath $releaseDir) {
+            Remove-Item -LiteralPath $releaseDir -Recurse -Force
+          }
+          New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
+
+          $artifactDir = "src-tauri/target/release/bundle/nsis"
+          $version = (Get-Content -LiteralPath "package.json" -Raw | ConvertFrom-Json).version
+          $installer = Get-ChildItem $artifactDir -File -Filter "PaperLens_${version}_x64-setup.exe" | Select-Object -First 1
+          if (-not $installer) {
+            throw "NSIS installer for version $version was not found while staging release artifacts."
+          }
+          Copy-Item -LiteralPath $installer.FullName -Destination $releaseDir
+
+          Get-ChildItem $artifactDir -File | Where-Object {
+            $_.Name -like "*.sig" -or $_.Name -eq "latest.json"
+          } | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination $releaseDir
+          }
+
+          $portableFiles = @(
+            "build/PaperLens-$version-windows-x64-portable.zip",
+            "build/PaperLens-$version-windows-x64-portable.zip.sha256",
+            "build/PaperLens-$version-windows-x64-portable.json"
+          )
+          foreach ($pattern in $portableFiles) {
+            $matches = @(Get-ChildItem $pattern -File -ErrorAction SilentlyContinue)
+            if ($matches.Count -eq 0) {
+              throw "Portable release artifact is missing: $pattern"
+            }
+            foreach ($match in $matches) {
+              Copy-Item -LiteralPath $match.FullName -Destination $releaseDir
+            }
+          }
+
+          Get-ChildItem $releaseDir -File | Sort-Object Name | ForEach-Object {
+            "Staged release artifact: $($_.Name) ($($_.Length) bytes)"
+          }
+
       - name: Upload Windows release artifacts
         uses: actions/upload-artifact@v6
         with:
           name: PaperLens-Windows-Release
-          path: |
-            src-tauri/target/release/bundle/nsis/*
-            build/PaperLens-*-windows-x64-portable.zip
-            build/PaperLens-*-windows-x64-portable.zip.sha256
-            build/PaperLens-*-windows-x64-portable.json
+          path: build/release-artifacts/*
           if-no-files-found: error
           retention-days: 14
 
@@ -327,8 +366,8 @@ jobs:
           set -euo pipefail
           tag="${{ needs.build-windows.outputs.release_tag }}"
           repo="${GITHUB_REPOSITORY:?}"
-          installer="$(find release -maxdepth 1 -name '*.exe' -print -quit)"
-          mapfile -t assets < <(find release -maxdepth 1 -type f \( -name '*.exe' -o -name '*.sig' -o -name 'latest.json' -o -name '*.zip' -o -name '*.sha256' -o -name '*.json' \) | sort)
+          installer="$(find release -type f -name '*.exe' -print -quit)"
+          mapfile -t assets < <(find release -type f \( -name '*.exe' -o -name '*.sig' -o -name 'latest.json' -o -name '*.zip' -o -name '*.sha256' -o -name '*.json' \) | sort)
           if [ -z "$installer" ]; then
             echo "No installer found in artifact."
             exit 1
