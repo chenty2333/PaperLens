@@ -652,7 +652,7 @@ def dedupe_reader_texts(texts: list[str], *, seen_text_keys: set[str]) -> list[s
             continue
         if key in seen_text_keys:
             continue
-        if any(reader_text_similarity(key, existing) > 0.55 for existing in seen_text_keys):
+        if any(reader_text_similarity(key, existing) > 0.9 for existing in seen_text_keys):
             continue
         seen_text_keys.add(key)
         result.append(text)

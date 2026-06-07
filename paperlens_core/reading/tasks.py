@@ -136,6 +136,14 @@ TASK_KEYWORDS: dict[ReadingTaskType, tuple[str, ...]] = {
         "loss",
         "runtime",
         "system",
+        "pytorch",
+        "optimizer",
+        "learning rate",
+        "batch size",
+        "epoch",
+        "weight decay",
+        "gpu",
+        "resized",
     ),
     ReadingTaskType.EVALUATION_SETUP: (
         "experiment",
@@ -191,6 +199,40 @@ TASK_KEYWORDS: dict[ReadingTaskType, tuple[str, ...]] = {
         "cross-validation",
     ),
 }
+
+BODY_TEXT_MARKERS = (
+    "experiment",
+    "evaluation",
+    "dataset",
+    "database",
+    "method",
+    "proposed",
+    "training",
+    "testing",
+    "loss",
+    "optimizer",
+    "learning rate",
+    "batch size",
+    "epoch",
+    "pytorch",
+    "resnet",
+    "metric",
+    "source domain",
+    "target domain",
+)
+
+REFERENCE_TEXT_MARKERS = (
+    "ieee",
+    "proc.",
+    "proceedings",
+    "conference",
+    "journal",
+    "transactions",
+    "vol.",
+    "no.",
+    "pp.",
+    "doi",
+)
 
 ALLOWED_OBSERVATION_TYPES: dict[ReadingTaskType, tuple[str, ...]] = {
     ReadingTaskType.ORIENTATION: ("problem",),
@@ -297,7 +339,9 @@ def source_limit_for_task(task_type: ReadingTaskType, default_limit: int) -> int
         ReadingTaskType.METHOD_MECHANISM,
         ReadingTaskType.IMPLEMENTATION_PATH,
     }:
-        return max(default_limit, 16)
+        return max(default_limit, 24)
+    if task_type == ReadingTaskType.REPRODUCIBILITY:
+        return max(default_limit, 24)
     if task_type in {ReadingTaskType.EVALUATION_SETUP, ReadingTaskType.RESULT_EXTRACTION}:
         return max(default_limit, 12)
     return default_limit
@@ -544,6 +588,21 @@ def source_kind_score(task_type: ReadingTaskType, kind: str, text_lower: str) ->
         for marker in ("dataset", "database", "metric", "baseline", "plcc", "srocc", "rmse")
     ):
         return 160.0
+    if task_type in {ReadingTaskType.IMPLEMENTATION_PATH, ReadingTaskType.REPRODUCIBILITY} and any(
+        marker in text_lower
+        for marker in (
+            "pytorch",
+            "optimizer",
+            "learning rate",
+            "batch size",
+            "epoch",
+            "weight decay",
+            "gpu",
+            "resized",
+            "initialized",
+        )
+    ):
+        return 720.0
     return 0.0
 
 
@@ -675,7 +734,9 @@ def is_bad_candidate_text(text: str) -> bool:
         "arxiv:",
         "university",
     )
-    return any(marker in lowered for marker in metadata_markers)
+    if any(marker in lowered for marker in metadata_markers):
+        return not any(marker in lowered for marker in BODY_TEXT_MARKERS)
+    return False
 
 
 def re_like_reference_entry(text: str) -> bool:
@@ -683,7 +744,12 @@ def re_like_reference_entry(text: str) -> bool:
     if stripped.startswith("[") and len(stripped) > 3 and stripped[1:3].strip("]").isdigit():
         return True
     citation_markers = stripped.count("[")
-    return citation_markers >= 6 and len(stripped) > 600
+    if citation_markers < 6 or len(stripped) <= 600:
+        return False
+    lowered = stripped.lower()
+    reference_marker_hits = sum(1 for marker in REFERENCE_TEXT_MARKERS if marker in lowered)
+    has_body_marker = any(marker in lowered for marker in BODY_TEXT_MARKERS)
+    return reference_marker_hits >= 3 and not has_body_marker
 
 
 def required_outputs_for_task(task_type: ReadingTaskType) -> list[str]:
@@ -731,7 +797,7 @@ def required_outputs_for_task(task_type: ReadingTaskType) -> list[str]:
         ReadingTaskType.LIMITATIONS: ["limitation"],
         ReadingTaskType.CONCEPT_BRIDGE: ["concept"],
         ReadingTaskType.RELATED_POSITIONING: ["claim"],
-        ReadingTaskType.REPRODUCIBILITY: ["implementation", "limitation"],
+        ReadingTaskType.REPRODUCIBILITY: ["implementation"],
     }[task_type]
 
 

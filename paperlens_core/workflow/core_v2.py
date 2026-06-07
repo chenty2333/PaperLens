@@ -276,7 +276,7 @@ OBSERVATION_CARDS_SCHEMA: dict[str, Any] = {
             "properties": {
                 "cards": {
                     "type": "array",
-                    "maxItems": 16,
+                    "maxItems": 24,
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
@@ -411,7 +411,7 @@ GRAPH_REPORT_DRAFT_SCHEMA: dict[str, Any] = {
                             "paragraphs": {
                                 "type": "array",
                                 "minItems": 1,
-                                "maxItems": 16,
+                                "maxItems": 24,
                                 "items": {
                                     "type": "object",
                                     "additionalProperties": False,
@@ -660,6 +660,7 @@ def run_core_v2_model_observation_tasks(
                     node_result.output,
                     paper_id=paper.paper_id,
                     task=task,
+                    dom=dom,
                     allowed_source_ids=node_result.tool_source_ids.get("paper_dom.read_sources", []),
                 )
             except ValueError as exc:
@@ -751,7 +752,7 @@ def run_core_v2_report_writer(
                 ),
                 schema_name="paperlens_core_v2_graph_report_draft",
                 schema=GRAPH_REPORT_DRAFT_SCHEMA,
-                max_tokens=16000,
+                max_tokens=24000,
             )
         usage = dict(getattr(raw, "usage", {}) or {})
         record_usage(stage, usage)
@@ -842,13 +843,33 @@ def build_graph_report_writer_prompt(
                 "results/结果与消融, limitations/局限与边界. Do not create separate sections "
                 "for core claims, related concepts, method mechanism, or implementation details; "
                 "fold all of those facts into principle_method. The principle_method section is "
-                "the main explanation and should read like a careful paper walkthrough: start "
-                "from the core bottleneck, then explain the method step by step in execution "
-                "order. For every important step, state what method is used, what it consumes, "
-                "what operation or objective it applies, why that principle helps, and what it "
-                "passes to the next step. Use implementation facts, formulas, module names, "
-                "data flow, training objectives, and inference path inside this explanation, "
-                "not as a separate list. evaluation_setup must contain only datasets, source/"
+                "the main explanation and must read like a high-quality paper explainer rather "
+                "than an abstract. Build an explanatory ladder: first give the simple mental "
+                "model, then define the core variables/distributions, then walk through the "
+                "algorithm in execution order. For every important step, state what method is "
+                "used, what it consumes, what operation/objective it applies, why that principle "
+                "helps, what failure mode it fixes, and what it passes to the next step. Avoid "
+                "under-explained labels such as 'domain adaptation', 'contrastive learning', "
+                "'disentanglement', or 'weighted loss': whenever a term is used, explain how it "
+                "is instantiated in this paper. Translate formulas into prose and keep important "
+                "symbols when they help the reader connect the derivation to implementation. Use "
+                "implementation facts, formulas, module names, data flow, training objectives, "
+                "and inference path inside this explanation, not as a separate list. The "
+                "principle_method section should be the longest section: write enough detail "
+                "that a reader can reconstruct the algorithm without opening the paper except "
+                "for verification. Cover, when evidence exists: why naive domain adaptation "
+                "fails, the theorem or decomposition that turns distortion into the bridge "
+                "variable, the role and architecture of G/D/H/R, how DWCE uses distortion "
+                "weights, how H estimates target distortion distribution, the positive/negative "
+                "sample construction for InfoNCE, what each loss term optimizes, how the overall "
+                "loss combines them, training details such as optimizer/input size/batch/epoch/"
+                "loss weights, and the exact inference path from target point cloud to quality "
+                "score. Hard formatting requirement: principle_method must contain 8-12 "
+                "paragraph objects in the JSON paragraphs array; each markdown field must be "
+                "one prose paragraph only, with no markdown heading, bullet list, or multiple "
+                "blank-line-separated paragraphs inside the same field. Each principle_method "
+                "paragraph should usually be 180-360 Chinese characters when writing in Chinese. "
+                "evaluation_setup must contain only datasets, source/"
                 "target split, metrics, baselines, and protocol; no performance claims or "
                 "ablation conclusions. results must contain performance comparisons, key "
                 "numbers, and ablations, without repeating the method walkthrough."
@@ -968,6 +989,8 @@ def report_writer_graph_pack(graph: ClaimGraph, dom: PaperDOM) -> list[dict[str,
     for node in graph.nodes.values():
         if node.kind == "evidence":
             continue
+        if is_unusable_fallback_report_node(node):
+            continue
         evidence_ids = graph.evidence_ids_for(node.node_id)
         source_ids = []
         for evidence_id in evidence_ids:
@@ -981,12 +1004,25 @@ def report_writer_graph_pack(graph: ClaimGraph, dom: PaperDOM) -> list[dict[str,
                 "kind": node.kind,
                 "label": node.label,
                 "evidence_ids": evidence_ids,
-                "sources": [report_source_summary(dom, source_id) for source_id in source_ids[:5]],
+                "sources": [report_source_summary(dom, source_id) for source_id in source_ids[:2]],
                 "confidence": node.payload.get("confidence"),
                 "uncertainty": node.payload.get("uncertainty"),
             }
         )
     return result
+
+
+def is_unusable_fallback_report_node(node: Any) -> bool:
+    payload = getattr(node, "payload", {}) or {}
+    if str(payload.get("confidence") or "").lower() != "low":
+        return False
+    uncertainty = str(payload.get("uncertainty") or "").lower()
+    if not any(marker in uncertainty for marker in ("deterministic fallback", "确定性", "模型观察输出不可用")):
+        return False
+    label = str(getattr(node, "label", "") or "")
+    if re.search(r"\bL\s*=", label) or re.search(r"\(\d+\)\s*$", label):
+        return True
+    return len(label) < 80
 
 
 def report_source_summary(dom: PaperDOM, source_id: str) -> dict[str, Any]:
@@ -996,7 +1032,7 @@ def report_source_summary(dom: PaperDOM, source_id: str) -> dict[str, Any]:
                 "source_id": source_id,
                 "kind": span.kind,
                 "page_no": span.page_no,
-                "text": compact_context_text(span.text, limit=1600),
+                "text": compact_context_text(span.text, limit=1000),
             }
     for figure in dom.figures:
         if figure.source_id == source_id:
@@ -1004,7 +1040,7 @@ def report_source_summary(dom: PaperDOM, source_id: str) -> dict[str, Any]:
                 "source_id": source_id,
                 "kind": figure.kind,
                 "page_no": figure.page_no,
-                "text": compact_context_text(figure.caption or "", limit=1100),
+                "text": compact_context_text(figure.caption or "", limit=800),
             }
     for table in dom.tables:
         if table.source_id == source_id:
@@ -1012,7 +1048,7 @@ def report_source_summary(dom: PaperDOM, source_id: str) -> dict[str, Any]:
                 "source_id": source_id,
                 "kind": table.kind,
                 "page_no": table.page_no,
-                "text": compact_context_text(table.caption or "", limit=1100),
+                "text": compact_context_text(table.caption or "", limit=800),
             }
     for equation in dom.equations:
         if equation.source_id == source_id:
@@ -1020,7 +1056,7 @@ def report_source_summary(dom: PaperDOM, source_id: str) -> dict[str, Any]:
                 "source_id": source_id,
                 "kind": equation.kind,
                 "page_no": equation.page_no,
-                "text": compact_context_text(equation.latex_or_text, limit=1100),
+                "text": compact_context_text(equation.latex_or_text, limit=800),
             }
     return {"source_id": source_id, "kind": "unknown", "page_no": None, "text": ""}
 
@@ -1078,7 +1114,8 @@ def normalize_model_report_draft(
                 for evidence_id in evidence_ids
                 if any((node_id, evidence_id) in support_edges for node_id in node_ids)
             ]
-            markdown = remove_visible_internal_ids(paragraph.markdown)
+            markdown = cleanup_model_report_markdown(paragraph.markdown, section.title)
+            markdown = remove_visible_internal_ids(markdown)
             if markdown and node_ids and evidence_ids:
                 paragraphs.append(
                     paragraph.model_copy(
@@ -1094,6 +1131,25 @@ def normalize_model_report_draft(
     if not sections:
         return build_report_draft_from_graph(graph, output_language=output_language)
     return draft.model_copy(update={"paper_id": paper_id, "sections": sections})
+
+
+def cleanup_model_report_markdown(markdown: str, section_title: str) -> str:
+    text = str(markdown or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"(\d+)\s*[xX]\s*(\d+)", r"\1 × \2", text)
+    lines = text.splitlines()
+    title = str(section_title or "").strip().lower()
+    while lines:
+        first = lines[0].strip()
+        normalized = first.lstrip("#").strip().lower()
+        if first.startswith("#") and normalized == title:
+            lines.pop(0)
+            while lines and not lines[0].strip():
+                lines.pop(0)
+            continue
+        break
+    return "\n".join(lines).strip()
 
 
 def infer_report_paragraph_node_ids(
@@ -1238,12 +1294,23 @@ def _run_relation_discovery(
         for item in raw_candidates:
             if not isinstance(item, dict):
                 continue
+            source_observation_id = str(item.get("source_observation_id") or "").strip()
+            target_observation_id = str(item.get("target_observation_id") or "").strip()
+            kind = str(item.get("kind") or "").strip()
+            if (
+                not source_observation_id
+                or not target_observation_id
+                or source_observation_id not in observation_ids
+                or target_observation_id not in observation_ids
+                or kind not in RELATION_CANDIDATE_KINDS
+            ):
+                continue
             candidates.append(
                 RelationCandidate(
-                    source_observation_id=str(item.get("source_observation_id") or "").strip(),
-                    target_observation_id=str(item.get("target_observation_id") or "").strip(),
-                    kind=str(item.get("kind") or "").strip(),
-                    confidence=str(item.get("confidence") or "medium"),
+                    source_observation_id=source_observation_id,
+                    target_observation_id=target_observation_id,
+                    kind=kind,
+                    confidence=clean_relation_confidence(item.get("confidence")),
                 )
             )
         valid = validate_relation_candidates(candidates, observation_ids)
@@ -1280,6 +1347,21 @@ def _run_relation_discovery(
     for candidate in valid:
         log = log.append(candidate)
     return log
+
+
+def clean_relation_confidence(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"high", "medium", "low"}:
+        return text
+    try:
+        numeric = float(text)
+    except ValueError:
+        return "medium"
+    if numeric >= 0.75:
+        return "high"
+    if numeric <= 0.35:
+        return "low"
+    return "medium"
 
 
 def _build_relation_discovery_prompt(
@@ -1683,6 +1765,12 @@ def bootstrap_observation_for_task(
     if not statement:
         return None
     observation_type = observation_type_for_task(task.task_type)
+    confidence = (
+        "medium"
+        if task.task_type in {ReadingTaskType.IMPLEMENTATION_PATH, ReadingTaskType.REPRODUCIBILITY}
+        and len(statement) >= 160
+        else "low"
+    )
     observation_id = make_observation_id(
         task_id=task.task_id,
         observation_type=observation_type.value,
@@ -1696,7 +1784,7 @@ def bootstrap_observation_for_task(
         observation_type=observation_type,
         statement=statement,
         source_ids=[source_id],
-        confidence="low",
+        confidence=confidence,
         provenance="explicit",
         uncertainty=(
             "Deterministic bootstrap observation; replace with task-specific model reading "
@@ -1748,10 +1836,55 @@ def observation_statement(
     *,
     output_language: str = "zh",
 ) -> str:
+    if task_type in {ReadingTaskType.IMPLEMENTATION_PATH, ReadingTaskType.REPRODUCIBILITY}:
+        implementation_statement = implementation_statement_from_text(text, output_language)
+        if implementation_statement:
+            return implementation_statement
     sentence = first_sentence(text)
     if not sentence:
         return ""
     return sentence
+
+
+def implementation_statement_from_text(text: str, output_language: str) -> str:
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not cleaned:
+        return ""
+    markers = (
+        "gpu",
+        "pytorch",
+        "resnet",
+        "optimizer",
+        "learning rate",
+        "weight decay",
+        "batch size",
+        "epoch",
+        "resized",
+        "loss",
+        "cross-validation",
+        "source domain",
+        "target domain",
+        "quality labels",
+        "training-testing",
+    )
+    sentences = [
+        sentence
+        for sentence in split_sentences(cleaned)
+        if any(marker in sentence.lower() for marker in markers)
+    ]
+    if not sentences:
+        return ""
+    statement = compact_context_text(" ".join(sentences[:10]), limit=1400)
+    if output_language == "en":
+        return statement
+    return f"实现与训练细节：{statement}"
+
+
+def split_sentences(text: str) -> list[str]:
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not cleaned:
+        return []
+    return [item.strip() for item in re.split(r"(?<=[.!?。！？])\s+", cleaned) if item.strip()]
 
 
 def first_sentence(text: str, *, limit: int = 320) -> str:
@@ -1934,15 +2067,15 @@ def observation_task_instruction(
         )
     if task_type == ReadingTaskType.METHOD_MECHANISM:
         return (
-            "完整解释方法机制链路，覆盖 mechanism_overview、theoretical_decomposition、distortion_alignment、quality_disentanglement、module_interactions、optimization_goals。必须说明每个关键模块为什么存在、输入输出是什么、解决什么冲突、与其它模块如何配合；保留定理/分解/公式背后的优化目标，不要只复述模块名。"
+            "完整解释方法机制链路，覆盖 mechanism_overview、theoretical_decomposition、distortion_alignment、quality_disentanglement、module_interactions、optimization_goals。必须把关键定理/分解/公式翻译成可读的机制说明：变量表示什么、目标分布是什么、为什么引入失真作为桥接变量、每个损失项在拉近或推开什么。每个关键模块都要说明存在原因、输入输出、解决的冲突、与其它模块如何配合；不要只复述模块名或给抽象总结。可以 10-18 张卡，优先保留能让报告从头讲清楚原理的事实。"
             if zh
-            else "Explain the mechanism chain completely, covering mechanism_overview, theoretical_decomposition, distortion_alignment, quality_disentanglement, module_interactions, and optimization_goals. State why each key module exists, its inputs/outputs, the conflict it addresses, how modules interact, and the optimization goals behind theorem/decomposition/formulas; do not only list module names."
+            else "Explain the mechanism chain completely, covering mechanism_overview, theoretical_decomposition, distortion_alignment, quality_disentanglement, module_interactions, and optimization_goals. Translate key theorem/decomposition/formulas into readable mechanism facts: what variables mean, what distributions are targeted, why distortion is used as a bridge variable, and what each loss pulls together or pushes apart. State why each key module exists, its inputs/outputs, the conflict it addresses, and how modules interact; do not only list module names or give an abstract summary. Use 10-18 cards when supported by evidence."
         )
     if task_type == ReadingTaskType.IMPLEMENTATION_PATH:
         return (
-            "把实现细节做成可复现级压缩，覆盖 preprocessing、model_components、feature_pipeline、training_objectives、loss_terms、training_protocol、inference_flow、hyperparameters_or_shapes。必须抽取点云如何转成输入、所有网络/模块 G/D/H/R 的角色、特征从哪里到哪里、损失项各自约束什么、训练顺序和源域/目标域如何参与、测试时走哪条路径、重要尺寸/超参数/公式编号；可以 8-12 张卡。"
+            "把实现细节做成可复现级压缩，覆盖 preprocessing、model_components、feature_pipeline、training_objectives、loss_terms、training_protocol、inference_flow、hyperparameters_or_shapes。必须抽取点云如何转成输入、所有网络/模块 G/D/H/R 的角色、特征从哪里到哪里、损失项各自约束什么、源域和目标域在训练中分别提供什么、测试时目标点云走哪条路径、重要尺寸/超参数/公式编号。遇到混有实验设置和实现细节的长段落，不要只抽数据集，必须保留 PyTorch、GPU、ResNet 初始化、optimizer、learning rate、weight decay、batch size、epoch、输入 resize、loss 权重、交叉验证/训练划分等事实；可以 12-18 张卡。"
             if zh
-            else "Compress implementation details to near-reproducible notes, covering preprocessing, model_components, feature_pipeline, training_objectives, loss_terms, training_protocol, inference_flow, and hyperparameters_or_shapes. Extract how point clouds become inputs, roles of G/D/H/R, feature flow, what each loss constrains, training order and source/target domain usage, test-time path, and important dimensions/hyperparameters/formula numbers; use 8-12 cards."
+            else "Compress implementation details to near-reproducible notes, covering preprocessing, model_components, feature_pipeline, training_objectives, loss_terms, training_protocol, inference_flow, and hyperparameters_or_shapes. Extract how point clouds become inputs, roles of G/D/H/R, feature flow, what each loss constrains, what source and target domains provide during training, test-time path for a target point cloud, and important dimensions/hyperparameters/formula numbers. When a long paragraph mixes evaluation setup and implementation details, do not only extract datasets; preserve PyTorch, GPUs, ResNet initialization, optimizer, learning rate, weight decay, batch size, epochs, input resize, loss weights, cross-validation, and train/test split facts too. Use 12-18 cards when supported."
         )
     if task_type == ReadingTaskType.EVALUATION_SETUP:
         return (
@@ -1975,9 +2108,9 @@ def observation_task_instruction(
             else "State positioning against prior work; do not fabricate limitations if evidence does not support them."
         )
     return (
-        "抽取复现相关事实；如果证据不足，明确哪些实现细节缺失。"
+        "抽取复现相关事实，尤其是硬件、框架、预训练、输入尺寸、优化器、学习率、weight decay、batch size、epoch、loss 权重、数据划分和是否使用目标域标签；如果证据不足，明确哪些实现细节缺失。"
         if zh
-        else "Extract reproducibility facts; state missing implementation details when evidence is insufficient."
+        else "Extract reproducibility facts, especially hardware, framework, pretraining, input size, optimizer, learning rate, weight decay, batch size, epochs, loss weights, data split, and whether target-domain labels are used; state missing implementation details when evidence is insufficient."
     )
 
 
@@ -2035,6 +2168,7 @@ def observation_cards_from_model_envelope(
     *,
     paper_id: str,
     task: ReadingTask,
+    dom: PaperDOM,
     allowed_source_ids: list[str] | set[str],
 ) -> list[ObservationCard]:
     payload = envelope.data if isinstance(envelope.data, dict) else {}
@@ -2091,6 +2225,8 @@ def observation_cards_from_model_envelope(
             )
             uncertainty = f"{uncertainty} {output_note}".strip() if uncertainty else output_note
         evidence_quotes = clean_model_evidence_quotes(item.get("evidence_quotes"))
+        if not evidence_quotes:
+            evidence_quotes = evidence_quotes_from_sources(dom, source_ids)
         observation_id = make_observation_id(
             task_id=task.task_id,
             observation_type=observation_type,
@@ -2120,6 +2256,18 @@ def observation_cards_from_model_envelope(
     if not result:
         raise ValueError(f"Observation task {task.task_id} returned no valid observation cards")
     return result
+
+
+def evidence_quotes_from_sources(dom: PaperDOM, source_ids: list[str]) -> list[str]:
+    quotes: list[str] = []
+    for source_id in source_ids:
+        summary = report_source_summary(dom, source_id)
+        quote = first_sentence(str(summary.get("text") or ""), limit=220)
+        if quote and quote not in quotes:
+            quotes.append(quote)
+        if len(quotes) >= 3:
+            break
+    return quotes
 
 
 
@@ -2216,7 +2364,24 @@ def observation_envelope_source_ids(
 
 
 def clean_model_provenance(value: Any, task_id: str) -> str:
-    provenance = str(value or "explicit").strip()
+    provenance = str(value or "explicit").strip().lower()
+    provenance = provenance.replace("-", "_").replace(" ", "_")
+    if provenance in {
+        "paper_explicit",
+        "source_explicit",
+        "evidence_explicit",
+        "direct",
+        "directly_stated",
+    }:
+        provenance = "explicit"
+    elif provenance in {
+        "paper_inferred",
+        "source_inferred",
+        "model_inferred",
+        "implicit",
+        "derived",
+    }:
+        provenance = "inferred"
     if provenance not in {"explicit", "inferred"}:
         raise ValueError(
             f"Observation card for {task_id} returned disallowed provenance={provenance}; "
