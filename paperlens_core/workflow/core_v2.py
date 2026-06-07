@@ -39,6 +39,7 @@ from paperlens_core.reading import (
 )
 from paperlens_core.report import (
     GraphReportDraft,
+    ReportSection,
     audit_report_draft_against_graph,
     build_report_draft_from_graph,
 )
@@ -66,6 +67,73 @@ CORE_V2_REPORT_WRITER_SYSTEM_PROMPT = """
 You are the PaperLens report writer node.
 Return JSON only.
 """.strip()
+
+REPORT_EXPLANATION_CUES_ZH = (
+    "指的是",
+    "意思是",
+    "可以理解为",
+    "定义为",
+    "在本文中",
+    "本文里",
+    "表示",
+    "代表",
+    "用来",
+    "用于",
+    "解决",
+    "输入",
+    "输出",
+    "下一步",
+    "衔接",
+    "拉近",
+    "推远",
+    "加权",
+    "预测",
+    "惩罚",
+    "约束",
+    "衡量",
+    "反映",
+    "为什么",
+    "直觉上",
+    "也就是",
+)
+
+REPORT_EXPLANATION_CUES_EN = (
+    "means",
+    "refers to",
+    "in this paper",
+    "used to",
+    "input",
+    "output",
+    "connects to",
+    "pulls",
+    "pushes",
+    "weights",
+    "predicts",
+    "penalizes",
+    "measures",
+    "captures",
+)
+
+REPORT_KEY_TERM_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("source_target_domain", ("源域", "目标域", "source domain", "target domain")),
+    ("domain_adaptation", ("域适应", "domain adaptation", "DA")),
+    ("feature_distribution", ("特征空间", "特征分布", "feature space", "feature distribution")),
+    ("distortion_distribution", ("失真分布", "distortion distribution")),
+    (
+        "conditional_distribution",
+        ("条件分布", "条件判别", "conditional distribution", "conditional discriminator"),
+    ),
+    ("discriminator", ("判别网络", "判别器", "discriminator")),
+    ("classifier", ("分类网络", "分类器", "classifier")),
+    ("regressor", ("回归网络", "回归器", "regressor")),
+    ("hvs", ("人类视觉系统", "HVS", "human visual system")),
+    ("mos", ("主观平均分", "MOS", "mean opinion score")),
+    ("dwce", ("分布加权交叉熵", "DWCE")),
+    ("infonce", ("InfoNCE",)),
+    ("contrastive_learning", ("对比学习", "contrastive learning")),
+    ("disentanglement", ("解纠缠", "disentanglement")),
+    ("metrics", ("PLCC", "SROCC", "KROCC", "RMSE")),
+)
 
 
 class CoreV2WorkflowContext(Protocol):
@@ -446,6 +514,58 @@ GRAPH_REPORT_DRAFT_SCHEMA: dict[str, Any] = {
 }
 
 
+REPORT_SECTION_REWRITE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": True,
+    "properties": {
+        "artifact_type": {"type": "string", "enum": ["report_section_rewrite"]},
+        "artifact_version": {"type": "string"},
+        "producer": {"type": "string"},
+        "section_id": {"type": "string"},
+        "title": {"type": "string"},
+        "paragraphs": {"type": "array"},
+        "data": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["section_id", "title", "paragraphs"],
+            "properties": {
+                "section_id": {"type": "string"},
+                "title": {"type": "string"},
+                "paragraphs": {
+                    "type": "array",
+                    "minItems": 8,
+                    "maxItems": 20,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": [
+                            "paragraph_id",
+                            "markdown",
+                            "used_node_ids",
+                            "used_evidence_ids",
+                        ],
+                        "properties": {
+                            "paragraph_id": {"type": "string"},
+                            "markdown": {"type": "string"},
+                            "used_node_ids": {
+                                "type": "array",
+                                "minItems": 1,
+                                "items": {"type": "string"},
+                            },
+                            "used_evidence_ids": {
+                                "type": "array",
+                                "minItems": 1,
+                                "items": {"type": "string"},
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+}
+
+
 def write_core_v2_artifacts(
     *,
     data_dir: Path,
@@ -732,62 +852,195 @@ def run_core_v2_report_writer(
     record_usage: Any,
     record_agent_run: Any,
 ) -> GraphReportDraft:
+    output_language = "en" if output_language == "en" else "zh"
+    best_draft: GraphReportDraft | None = None
+    best_rank: tuple[int, ...] | None = None
+    quality_feedback: dict[str, Any] | None = None
+    for attempt in range(1, 4):
+        raw: Any = None
+        usage: dict[str, Any] = {}
+        try:
+            with llm_call_context(
+                stage=stage,
+                paper_id=paper.paper_id,
+                operation="core_v2_report_writer",
+                schema_name="paperlens_core_v2_graph_report_draft",
+                attempt=attempt,
+            ):
+                raw = client.invoke_json(
+                    system_prompt=CORE_V2_REPORT_WRITER_SYSTEM_PROMPT,
+                    user_prompt=build_graph_report_writer_prompt(
+                        paper=paper,
+                        dom=dom,
+                        graph=graph,
+                        output_language=output_language,
+                        quality_feedback=quality_feedback,
+                    ),
+                    schema_name="paperlens_core_v2_graph_report_draft",
+                    schema=GRAPH_REPORT_DRAFT_SCHEMA,
+                    max_tokens=24000,
+                )
+            usage = dict(getattr(raw, "usage", {}) or {})
+            record_usage(stage, usage)
+            draft = GraphReportDraft.model_validate(
+                graph_report_draft_payload(raw.data, paper_id=paper.paper_id)
+            )
+            draft = normalize_model_report_draft(
+                draft,
+                graph=graph,
+                paper_id=paper.paper_id,
+                output_language=output_language,
+            )
+            findings = audit_report_draft_against_graph(draft, graph, dom)
+            stats = report_explainer_stats(draft, output_language=output_language)
+            rank = report_draft_rank(findings, stats)
+            if best_rank is None or rank > best_rank:
+                best_draft = draft
+                best_rank = rank
+            record_agent_run(
+                {
+                    "agent_run_id": f"core_v2_report_{paper.paper_id}_attempt_{attempt}",
+                    "paper_id": paper.paper_id,
+                    "stage": stage,
+                    "operation": "core_v2_report_writer",
+                    "provider_kind": client.config.kind,
+                    "model": client.config.model,
+                    "usage": usage,
+                    "request_id": getattr(raw, "request_id", None),
+                    "status": "PASS",
+                    "attempt": attempt,
+                    "report_audit_precheck_findings": len(findings),
+                    "principle_method_paragraphs": stats["principle_method_paragraphs"],
+                    "principle_method_chars": stats["principle_method_chars"],
+                    "explained_key_terms": stats["explained_key_terms"],
+                    "present_key_terms": stats["present_key_terms"],
+                }
+            )
+            if report_draft_meets_explainer_quality(draft, findings, output_language):
+                return draft
+            quality_feedback = report_writer_quality_feedback(
+                findings,
+                stats,
+                output_language=output_language,
+            )
+        except Exception as exc:
+            record_agent_run(
+                {
+                    "agent_run_id": f"core_v2_report_{paper.paper_id}_attempt_{attempt}",
+                    "paper_id": paper.paper_id,
+                    "stage": stage,
+                    "operation": "core_v2_report_writer",
+                    "provider_kind": client.config.kind,
+                    "model": client.config.model,
+                    "usage": usage,
+                    "request_id": getattr(raw, "request_id", None),
+                    "status": "FAIL",
+                    "attempt": attempt,
+                    "issues": [str(exc)],
+                }
+            )
+    if best_draft is not None:
+        best_findings = audit_report_draft_against_graph(best_draft, graph, dom)
+        best_stats = report_explainer_stats(best_draft, output_language=output_language)
+        expanded = run_core_v2_report_principle_expander(
+            client=client,
+            paper=paper,
+            dom=dom,
+            graph=graph,
+            draft=best_draft,
+            quality_feedback=report_writer_quality_feedback(
+                best_findings,
+                best_stats,
+                output_language=output_language,
+            ),
+            output_language=output_language,
+            stage=stage,
+            record_usage=record_usage,
+            record_agent_run=record_agent_run,
+        )
+        if expanded is not None:
+            expanded_findings = audit_report_draft_against_graph(expanded, graph, dom)
+            expanded_stats = report_explainer_stats(expanded, output_language=output_language)
+            expanded_rank = report_draft_rank(expanded_findings, expanded_stats)
+            if best_rank is None or expanded_rank > best_rank:
+                return expanded
+        return best_draft
+    return build_report_draft_from_graph(graph, output_language=output_language)
+
+
+def run_core_v2_report_principle_expander(
+    *,
+    client: JsonLlmClient,
+    paper: PaperRecord,
+    dom: PaperDOM,
+    graph: ClaimGraph,
+    draft: GraphReportDraft,
+    quality_feedback: dict[str, Any],
+    output_language: str,
+    stage: str,
+    record_usage: Any,
+    record_agent_run: Any,
+) -> GraphReportDraft | None:
     raw: Any = None
     usage: dict[str, Any] = {}
-    output_language = "en" if output_language == "en" else "zh"
     try:
         with llm_call_context(
             stage=stage,
             paper_id=paper.paper_id,
-            operation="core_v2_report_writer",
-            schema_name="paperlens_core_v2_graph_report_draft",
+            operation="core_v2_report_principle_expander",
+            schema_name="paperlens_core_v2_report_section_rewrite",
         ):
             raw = client.invoke_json(
                 system_prompt=CORE_V2_REPORT_WRITER_SYSTEM_PROMPT,
-                user_prompt=build_graph_report_writer_prompt(
+                user_prompt=build_principle_section_expander_prompt(
                     paper=paper,
                     dom=dom,
                     graph=graph,
+                    quality_feedback=quality_feedback,
                     output_language=output_language,
                 ),
-                schema_name="paperlens_core_v2_graph_report_draft",
-                schema=GRAPH_REPORT_DRAFT_SCHEMA,
-                max_tokens=24000,
+                schema_name="paperlens_core_v2_report_section_rewrite",
+                schema=REPORT_SECTION_REWRITE_SCHEMA,
+                max_tokens=18000,
             )
         usage = dict(getattr(raw, "usage", {}) or {})
         record_usage(stage, usage)
-        draft = GraphReportDraft.model_validate(
-            graph_report_draft_payload(raw.data, paper_id=paper.paper_id)
-        )
-        draft = normalize_model_report_draft(
-            draft,
+        section = report_section_rewrite_payload(raw.data)
+        expanded = merge_report_section(draft, section)
+        expanded = normalize_model_report_draft(
+            expanded,
             graph=graph,
             paper_id=paper.paper_id,
             output_language=output_language,
         )
-        findings = audit_report_draft_against_graph(draft, graph, dom)
+        findings = audit_report_draft_against_graph(expanded, graph, dom)
+        stats = report_explainer_stats(expanded, output_language=output_language)
         record_agent_run(
             {
-                "agent_run_id": f"core_v2_report_{paper.paper_id}",
+                "agent_run_id": f"core_v2_report_{paper.paper_id}_principle_expander",
                 "paper_id": paper.paper_id,
                 "stage": stage,
-                "operation": "core_v2_report_writer",
+                "operation": "core_v2_report_principle_expander",
                 "provider_kind": client.config.kind,
                 "model": client.config.model,
                 "usage": usage,
                 "request_id": getattr(raw, "request_id", None),
                 "status": "PASS",
                 "report_audit_precheck_findings": len(findings),
+                "principle_method_paragraphs": stats["principle_method_paragraphs"],
+                "principle_method_chars": stats["principle_method_chars"],
+                "explained_key_terms": stats["explained_key_terms"],
+                "present_key_terms": stats["present_key_terms"],
             }
         )
-        return draft
+        return expanded
     except Exception as exc:
         record_agent_run(
             {
-                "agent_run_id": f"core_v2_report_{paper.paper_id}",
+                "agent_run_id": f"core_v2_report_{paper.paper_id}_principle_expander",
                 "paper_id": paper.paper_id,
                 "stage": stage,
-                "operation": "core_v2_report_writer",
+                "operation": "core_v2_report_principle_expander",
                 "provider_kind": client.config.kind,
                 "model": client.config.model,
                 "usage": usage,
@@ -796,7 +1049,157 @@ def run_core_v2_report_writer(
                 "issues": [str(exc)],
             }
         )
-        return build_report_draft_from_graph(graph, output_language=output_language)
+        return None
+
+
+def report_explainer_stats(
+    draft: GraphReportDraft, *, output_language: str = "zh"
+) -> dict[str, int]:
+    principle_paragraphs = [
+        paragraph
+        for section in draft.sections
+        if section.section_id == "principle_method"
+        for paragraph in section.paragraphs
+    ]
+    evaluation_paragraphs = [
+        paragraph
+        for section in draft.sections
+        if section.section_id == "evaluation_setup"
+        for paragraph in section.paragraphs
+    ]
+    principle_text = "\n".join(paragraph.markdown for paragraph in principle_paragraphs)
+    evaluation_text = "\n".join(paragraph.markdown for paragraph in evaluation_paragraphs)
+    combined_text = "\n".join([principle_text, evaluation_text]).strip()
+    present_terms = report_present_key_terms(combined_text)
+    explained_terms = report_explained_key_terms(combined_text, output_language=output_language)
+    explanation_cues = report_explanation_cue_count(
+        principle_text,
+        output_language=output_language,
+    )
+    return {
+        "principle_method_paragraphs": len(principle_paragraphs),
+        "principle_method_chars": sum(len(paragraph.markdown) for paragraph in principle_paragraphs),
+        "present_key_terms": present_terms,
+        "explained_key_terms": explained_terms,
+        "term_explanation_ratio_percent": int((explained_terms / max(present_terms, 1)) * 100),
+        "principle_method_explanation_cues": explanation_cues,
+    }
+
+
+def report_draft_rank(findings: list[Any], stats: dict[str, int]) -> tuple[int, ...]:
+    error_count = sum(
+        1 for finding in findings if str(getattr(finding, "severity", "")).upper() == "ERROR"
+    )
+    return (
+        -error_count,
+        stats["principle_method_chars"],
+        stats["principle_method_paragraphs"],
+        stats["explained_key_terms"],
+        stats["term_explanation_ratio_percent"],
+        stats["principle_method_explanation_cues"],
+    )
+
+
+def report_draft_meets_explainer_quality(
+    draft: GraphReportDraft,
+    findings: list[Any],
+    output_language: str,
+) -> bool:
+    if any(str(getattr(finding, "severity", "")).upper() == "ERROR" for finding in findings):
+        return False
+    stats = report_explainer_stats(draft, output_language=output_language)
+    min_chars = 3600 if output_language != "en" else 2400
+    min_explained_terms = min(8, stats["present_key_terms"])
+    term_quality_ok = (
+        stats["present_key_terms"] < 4
+        or (
+            stats["explained_key_terms"] >= min_explained_terms
+            and stats["term_explanation_ratio_percent"] >= 55
+        )
+    )
+    return (
+        stats["principle_method_paragraphs"] >= 10
+        and stats["principle_method_chars"] >= min_chars
+        and stats["principle_method_explanation_cues"] >= 18
+        and term_quality_ok
+    )
+
+
+def report_present_key_terms(text: str) -> int:
+    return sum(
+        1
+        for _, terms in REPORT_KEY_TERM_GROUPS
+        if any(report_term_occurrence_spans(text, term) for term in terms)
+    )
+
+
+def report_explained_key_terms(text: str, *, output_language: str) -> int:
+    cues = REPORT_EXPLANATION_CUES_EN if output_language == "en" else REPORT_EXPLANATION_CUES_ZH
+    return sum(
+        1
+        for _, terms in REPORT_KEY_TERM_GROUPS
+        if report_term_group_has_explanation(text, terms, cues)
+    )
+
+
+def report_term_group_has_explanation(
+    text: str,
+    terms: tuple[str, ...],
+    cues: tuple[str, ...],
+) -> bool:
+    for term in terms:
+        for start, end in report_term_occurrence_spans(text, term):
+            window = text[max(0, start - 90) : min(len(text), end + 120)]
+            if any(cue.lower() in window.lower() for cue in cues):
+                return True
+    return False
+
+
+def report_term_occurrence_spans(text: str, term: str) -> list[tuple[int, int]]:
+    if not text or not term:
+        return []
+    flags = re.IGNORECASE if term.isascii() else 0
+    if term.isascii() and len(term) <= 4:
+        pattern = rf"(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])"
+    else:
+        pattern = re.escape(term)
+    return [(match.start(), match.end()) for match in re.finditer(pattern, text, flags)]
+
+
+def report_explanation_cue_count(text: str, *, output_language: str) -> int:
+    cues = REPORT_EXPLANATION_CUES_EN if output_language == "en" else REPORT_EXPLANATION_CUES_ZH
+    lowered = text.lower()
+    return sum(lowered.count(cue.lower()) for cue in cues)
+
+
+def report_writer_quality_feedback(
+    findings: list[Any],
+    stats: dict[str, int],
+    *,
+    output_language: str,
+) -> dict[str, Any]:
+    min_chars = 3600 if output_language != "en" else 2400
+    return {
+        "previous_draft_failed_quality_gate": True,
+        "observed": {
+            "report_audit_precheck_findings": len(findings),
+            "principle_method_paragraphs": stats["principle_method_paragraphs"],
+            "principle_method_chars": stats["principle_method_chars"],
+            "present_key_terms": stats["present_key_terms"],
+            "explained_key_terms": stats["explained_key_terms"],
+            "term_explanation_ratio_percent": stats["term_explanation_ratio_percent"],
+            "principle_method_explanation_cues": stats["principle_method_explanation_cues"],
+        },
+        "required_rewrite": (
+            "Write a fresh, fuller draft. The principle_method section is under-expanded. "
+            f"It must have at least 10 paragraph objects and at least {min_chars} total "
+            "characters; for Chinese reports, target 4200-6500 characters when enough method "
+            "evidence is available. Do not split one short idea into many short paragraphs; each method "
+            "paragraph should explain a full step with intuition, term definition, computation, "
+            "failure mode, and handoff to the next module. Preserve grounding: every paragraph "
+            "still needs used_node_ids and used_evidence_ids."
+        ),
+    }
 
 
 def build_graph_report_writer_prompt(
@@ -805,10 +1208,13 @@ def build_graph_report_writer_prompt(
     dom: PaperDOM,
     graph: ClaimGraph,
     output_language: str,
+    quality_feedback: dict[str, Any] | None = None,
 ) -> str:
     language_rule = (
-        "Write all reader-facing markdown in Chinese. Keep technical terms readable; include "
-        "English method names only when they are paper terms."
+        "Write all reader-facing markdown in Chinese for a technically curious reader who may "
+        "not know this paper's subfield. Use Chinese explanations first, and include English "
+        "method names or abbreviations only when they are paper terms. When an abbreviation "
+        "first appears, give the Chinese meaning and the English abbreviation together."
         if output_language != "en"
         else "Write all reader-facing markdown in English."
     )
@@ -837,6 +1243,29 @@ def build_graph_report_writer_prompt(
                 "The markdown may explain and connect facts, but must not add factual claims "
                 "beyond the labels and source summaries of the declared graph nodes."
             ),
+            "explanation_style_rule": (
+                "Write like an expert explainer blog, not like paper abstract notes. Start from "
+                "plain-language intuition, then descend into variables, modules, objectives, "
+                "training, and inference. No important technical term may appear as a bare label "
+                "the first time it is used. Define it inline in the same sentence or the next "
+                "sentence, in this form: term means X in this paper, it is used for Y, and it "
+                "affects Z. Use short concrete task-local examples when evidence supports them; "
+                "phrases like '可以这样理解' or '直觉上' are allowed for intuition, but do not "
+                "introduce new paper facts. Always explain abbreviations before relying on them. "
+                "Terms that usually need explanation include source domain, target domain, "
+                "domain adaptation, feature space, feature distribution, distortion distribution, "
+                "conditional distribution, discriminator, classifier, regressor, HVS, MOS, DWCE, "
+                "InfoNCE, contrastive learning, disentanglement, PLCC, SROCC, KROCC, and RMSE. "
+                "When a formula is mentioned, immediately translate it into what is being pulled "
+                "closer, pushed apart, weighted, predicted, or penalized. Prefer reader-facing "
+                "phrases such as '它解决的问题是...' and '这一步的输入/输出是...' over shorthand "
+                "phrases such as 'uses DA' or 'applies contrastive learning'. Do not add a "
+                "stand-alone glossary section; instead, weave definitions into the exact method "
+                "step where the term becomes necessary. A good paragraph usually answers four "
+                "questions in prose: what the reader should imagine, what the paper actually "
+                "computes, why that computation addresses the failure mode, and what object is "
+                "handed to the next module."
+            ),
             "shape_rule": (
                 "Use exactly these reader-facing sections when supported, in this order: "
                 "problem/问题与动机, principle_method/原理与方法, evaluation_setup/实验设置, "
@@ -858,25 +1287,180 @@ def build_graph_report_writer_prompt(
                 "principle_method section should be the longest section: write enough detail "
                 "that a reader can reconstruct the algorithm without opening the paper except "
                 "for verification. Cover, when evidence exists: why naive domain adaptation "
-                "fails, the theorem or decomposition that turns distortion into the bridge "
-                "variable, the role and architecture of G/D/H/R, how DWCE uses distortion "
-                "weights, how H estimates target distortion distribution, the positive/negative "
-                "sample construction for InfoNCE, what each loss term optimizes, how the overall "
-                "loss combines them, training details such as optimizer/input size/batch/epoch/"
-                "loss weights, and the exact inference path from target point cloud to quality "
-                "score. Hard formatting requirement: principle_method must contain 8-12 "
+                "fails; what source domain and target domain mean for this paper; what feature "
+                "space/distribution, distortion distribution, and conditional distribution mean; "
+                "the theorem or decomposition that turns distortion into the bridge variable; "
+                "the role and architecture of G/D/H/R; how DWCE uses distortion weights; how H "
+                "estimates target distortion distribution; how the conditional discriminator "
+                "uses those weights; the positive/negative sample construction for InfoNCE; "
+                "what contrastive learning and disentanglement mean here; what each loss term "
+                "optimizes; how the overall loss combines them; training details such as "
+                "optimizer/input size/batch/epoch/loss weights; and the exact inference path "
+                "from target point cloud to quality score. Hard formatting requirement: "
+                "principle_method must contain 12-16 "
                 "paragraph objects in the JSON paragraphs array; each markdown field must be "
                 "one prose paragraph only, with no markdown heading, bullet list, or multiple "
                 "blank-line-separated paragraphs inside the same field. Each principle_method "
-                "paragraph should usually be 180-360 Chinese characters when writing in Chinese. "
+                "paragraph should usually be 260-520 Chinese characters when writing in Chinese. "
                 "evaluation_setup must contain only datasets, source/"
                 "target split, metrics, baselines, and protocol; no performance claims or "
-                "ablation conclusions. results must contain performance comparisons, key "
+                "ablation conclusions. When metrics first appear, briefly explain what they "
+                "measure in reader language: PLCC is linear agreement with subjective scores, "
+                "SROCC/KROCC are ranking consistency, and RMSE is prediction error magnitude. "
+                "results must contain performance comparisons, key "
                 "numbers, and ablations, without repeating the method walkthrough."
             ),
         },
     }
+    if quality_feedback:
+        payload["quality_feedback"] = quality_feedback
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def build_principle_section_expander_prompt(
+    *,
+    paper: PaperRecord,
+    dom: PaperDOM,
+    graph: ClaimGraph,
+    quality_feedback: dict[str, Any],
+    output_language: str,
+) -> str:
+    language_rule = (
+        "Write all reader-facing markdown in Chinese. Explain technical terms in Chinese before "
+        "using their English abbreviation."
+        if output_language != "en"
+        else "Write all reader-facing markdown in English."
+    )
+    payload = {
+        "prompt_version": "paperlens_core.v2.principle_section_expander",
+        "paper": {
+            "paper_id": paper.paper_id,
+            "title": dom.title or paper.canonical_title,
+        },
+        "focused_graph_pack": report_writer_graph_pack(
+            graph,
+            dom,
+            allowed_kinds={"problem", "claim", "mechanism", "implementation", "concept"},
+            source_limit=1,
+            source_text_limit=420,
+            evidence_limit=6,
+        ),
+        "previous_underexpanded_stats": quality_feedback.get("observed", {}),
+        "paragraph_coverage_plan": principle_section_coverage_plan(output_language),
+        "quality_feedback": quality_feedback,
+        "output_contract": {
+            "artifact_type": "report_section_rewrite",
+            "artifact_version": "report_section_rewrite.v1",
+            "language_rule": language_rule,
+            "json_envelope_rule": (
+                "Return a typed artifact envelope with artifact_type, artifact_version, "
+                "producer, and data. data must contain section_id='principle_method', "
+                "title, and paragraphs."
+            ),
+            "reader_report_rule": (
+                "The markdown is final reader-facing prose. Do not mention ClaimGraph, "
+                "PaperDOM, source_id, evidence_id, node_id, observation_id, span, or internal IDs."
+            ),
+            "grounding_rule": (
+                "Every paragraph must declare used_node_ids and used_evidence_ids in JSON. "
+                "Use only IDs present in focused_graph_pack. The prose may connect facts but "
+                "must not add factual claims beyond labels and source summaries in the pack."
+            ),
+            "rewrite_goal": (
+                "Rewrite only the principle_method section as a full explainer from scratch. "
+                "The previous section was under-expanded; do not copy its wording or keep its "
+                "short paragraph density. Follow paragraph_coverage_plan in order. Keep it as "
+                "14-18 paragraph objects. Each markdown field must be one prose paragraph, "
+                "usually 360-620 Chinese characters when writing in Chinese, and the whole "
+                "section should exceed 4200 Chinese characters when enough evidence exists. Do not create "
+                "headings or bullets. Explain terms inline when they first appear: source/"
+                "target domain, domain adaptation, feature space/distribution, distortion "
+                "distribution, conditional distribution/discriminator, HVS, MOS, DWCE, "
+                "InfoNCE, contrastive learning, disentanglement, regressor, classifier, "
+                "PLCC/SROCC/KROCC/RMSE when relevant. For every method step, state the "
+                "intuition, the input, the computation/objective, why it fixes a failure mode, "
+                "and what it passes to the next step. Translate formulas into what is pulled "
+                "closer, pushed apart, weighted, predicted, or penalized."
+            ),
+        },
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def principle_section_coverage_plan(output_language: str) -> list[str]:
+    if output_language == "en":
+        return [
+            "Overall intuition: why image quality knowledge can transfer to point cloud quality assessment.",
+            "What source domain, target domain, HVS, and MOS mean in this paper, and why they make transfer possible.",
+            "Why naive domain adaptation fails: where feature distribution, distortion distribution, and quality-related information do not match.",
+            "The paper's theoretical decomposition or conditional-distribution idea that uses distortion as the bridge variable.",
+            "Input preprocessing and shared feature generator G: how point clouds become multi-view images and what G outputs.",
+            "Distortion classifier H: what distribution it estimates and where weight w comes from.",
+            "Conditional discriminator D and DWCE: which samples are aligned more strongly, which are suppressed, and why.",
+            "The conflict solved by quality-aware feature disentanglement: why distortion alignment can hurt quality prediction.",
+            "InfoNCE and contrastive learning: how positive/negative samples are built and what is pulled closer or pushed apart.",
+            "Regressor R and quality score: how features are mapped to predicted quality.",
+            "How the total loss combines L_DWCE, L_Cls, L_Fea, and L_Reg, and what each term constrains.",
+            "Training flow and key hyperparameters: input size, ResNet/MLP, optimizer, batch, epoch, and loss weights.",
+            "Inference flow: the complete path from a new point cloud to the final quality score.",
+            "Synthesize why DWIT-PCQA improves over direct transfer or regression-only baselines.",
+        ]
+    return [
+        "整体直觉：这篇论文为什么能把图像质量知识迁移到点云质量评估。",
+        "源域、目标域、HVS、MOS 在本文中的含义，以及为什么它们让迁移有可能。",
+        "为什么朴素域适应会失败：特征分布、失真分布、质量相关信息分别哪里不匹配。",
+        "论文把失真作为桥接变量的理论分解或条件分布思想。",
+        "输入预处理与共享特征生成器 G：点云如何变成多视角图像，G 输出什么特征。",
+        "失真分类网络 H：它估计什么分布，权重 w 从哪里来。",
+        "条件判别网络 D 与 DWCE：哪些样本被更强对齐，哪些对齐被压低，为什么。",
+        "质量感知特征解纠缠要解决的冲突：失真对齐为何可能伤害质量预测。",
+        "InfoNCE 和对比学习：正样本、负样本如何构造，拉近/推远的对象是什么。",
+        "回归网络 R 与质量分数：特征如何被映射到预测质量。",
+        "总损失如何组合 L_DWCE、L_Cls、L_Fea、L_Reg，每项分别约束什么。",
+        "训练流程与关键超参数：输入尺寸、ResNet/MLP、optimizer、batch、epoch、loss 权重。",
+        "推理流程：一个新点云从输入到最终质量分数的完整路径。",
+        "把上述步骤串起来，说明 DWIT-PCQA 相比直接迁移或只回归的核心改进在哪里。",
+    ]
+
+
+def report_section_rewrite_payload(data: Any) -> ReportSection:
+    if not isinstance(data, dict):
+        raise ValueError("report_section_rewrite response must be a JSON object")
+    if data.get("artifact_type") == "report_section_rewrite":
+        envelope = ArtifactEnvelope.model_validate(data).require_type("report_section_rewrite")
+        if not isinstance(envelope.data, dict):
+            raise ValueError("report_section_rewrite envelope data must be an object")
+        payload = dict(envelope.data)
+    elif isinstance(data.get("data"), dict) and isinstance(data["data"].get("paragraphs"), list):
+        payload = dict(data["data"])
+    elif isinstance(data.get("paragraphs"), list):
+        payload = dict(data)
+    else:
+        raise ValueError("report_section_rewrite response did not contain paragraphs")
+    payload["section_id"] = "principle_method"
+    payload["title"] = str(payload.get("title") or "原理与方法")
+    normalized = normalize_report_sections_payload([payload])
+    if not normalized:
+        raise ValueError("report_section_rewrite did not contain a usable section")
+    section = normalized[0]
+    section["section_id"] = "principle_method"
+    section["title"] = "原理与方法"
+    return ReportSection.model_validate(section)
+
+
+def merge_report_section(draft: GraphReportDraft, replacement: ReportSection) -> GraphReportDraft:
+    sections = []
+    replaced = False
+    for section in draft.sections:
+        if section.section_id == replacement.section_id:
+            sections.append(replacement)
+            replaced = True
+        else:
+            sections.append(section)
+    if not replaced:
+        insert_at = 1 if sections and sections[0].section_id == "problem" else 0
+        sections.insert(insert_at, replacement)
+    return draft.model_copy(update={"sections": sections})
 
 
 def graph_report_draft_payload(data: Any, *, paper_id: str) -> dict[str, Any]:
@@ -905,7 +1489,11 @@ def graph_report_draft_payload(data: Any, *, paper_id: str) -> dict[str, Any]:
         )
     elif isinstance(payload.get("sections"), list):
         payload["sections"] = normalize_report_sections_payload(payload["sections"])
-    return payload
+    return {
+        "schema_version": str(payload.get("schema_version") or "graph_report_draft.v2"),
+        "paper_id": str(payload.get("paper_id") or paper_id),
+        "sections": payload.get("sections") or [],
+    }
 
 
 def normalize_report_sections_payload(sections: list[Any]) -> list[dict[str, Any]]:
@@ -984,14 +1572,26 @@ def normalize_report_section_identity(raw: str, index: int) -> tuple[str, str]:
     return f"section_{index:02d}", raw or f"section_{index:02d}"
 
 
-def report_writer_graph_pack(graph: ClaimGraph, dom: PaperDOM) -> list[dict[str, Any]]:
+def report_writer_graph_pack(
+    graph: ClaimGraph,
+    dom: PaperDOM,
+    *,
+    allowed_kinds: set[str] | None = None,
+    source_limit: int = 2,
+    source_text_limit: int = 1000,
+    evidence_limit: int | None = None,
+) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for node in graph.nodes.values():
         if node.kind == "evidence":
             continue
+        if allowed_kinds is not None and node.kind not in allowed_kinds:
+            continue
         if is_unusable_fallback_report_node(node):
             continue
         evidence_ids = graph.evidence_ids_for(node.node_id)
+        if evidence_limit is not None:
+            evidence_ids = evidence_ids[:evidence_limit]
         source_ids = []
         for evidence_id in evidence_ids:
             evidence_node = graph.nodes.get(evidence_id)
@@ -1004,7 +1604,10 @@ def report_writer_graph_pack(graph: ClaimGraph, dom: PaperDOM) -> list[dict[str,
                 "kind": node.kind,
                 "label": node.label,
                 "evidence_ids": evidence_ids,
-                "sources": [report_source_summary(dom, source_id) for source_id in source_ids[:2]],
+                "sources": [
+                    report_source_summary(dom, source_id, text_limit=source_text_limit)
+                    for source_id in source_ids[:source_limit]
+                ],
                 "confidence": node.payload.get("confidence"),
                 "uncertainty": node.payload.get("uncertainty"),
             }
@@ -1025,14 +1628,17 @@ def is_unusable_fallback_report_node(node: Any) -> bool:
     return len(label) < 80
 
 
-def report_source_summary(dom: PaperDOM, source_id: str) -> dict[str, Any]:
+def report_source_summary(
+    dom: PaperDOM, source_id: str, *, text_limit: int = 1000
+) -> dict[str, Any]:
+    visual_text_limit = min(text_limit, 800)
     for span in dom.spans:
         if span.source_id == source_id:
             return {
                 "source_id": source_id,
                 "kind": span.kind,
                 "page_no": span.page_no,
-                "text": compact_context_text(span.text, limit=1000),
+                "text": compact_context_text(span.text, limit=text_limit),
             }
     for figure in dom.figures:
         if figure.source_id == source_id:
@@ -1040,7 +1646,7 @@ def report_source_summary(dom: PaperDOM, source_id: str) -> dict[str, Any]:
                 "source_id": source_id,
                 "kind": figure.kind,
                 "page_no": figure.page_no,
-                "text": compact_context_text(figure.caption or "", limit=800),
+                "text": compact_context_text(figure.caption or "", limit=visual_text_limit),
             }
     for table in dom.tables:
         if table.source_id == source_id:
@@ -1048,7 +1654,7 @@ def report_source_summary(dom: PaperDOM, source_id: str) -> dict[str, Any]:
                 "source_id": source_id,
                 "kind": table.kind,
                 "page_no": table.page_no,
-                "text": compact_context_text(table.caption or "", limit=800),
+                "text": compact_context_text(table.caption or "", limit=visual_text_limit),
             }
     for equation in dom.equations:
         if equation.source_id == source_id:
@@ -1056,7 +1662,7 @@ def report_source_summary(dom: PaperDOM, source_id: str) -> dict[str, Any]:
                 "source_id": source_id,
                 "kind": equation.kind,
                 "page_no": equation.page_no,
-                "text": compact_context_text(equation.latex_or_text, limit=800),
+                "text": compact_context_text(equation.latex_or_text, limit=visual_text_limit),
             }
     return {"source_id": source_id, "kind": "unknown", "page_no": None, "text": ""}
 
@@ -1138,6 +1744,7 @@ def cleanup_model_report_markdown(markdown: str, section_title: str) -> str:
     if not text:
         return ""
     text = re.sub(r"(\d+)\s*[xX]\s*(\d+)", r"\1 × \2", text)
+    text = normalize_loss_symbol_spacing(text)
     lines = text.splitlines()
     title = str(section_title or "").strip().lower()
     while lines:
@@ -1150,6 +1757,20 @@ def cleanup_model_report_markdown(markdown: str, section_title: str) -> str:
             continue
         break
     return "\n".join(lines).strip()
+
+
+def normalize_loss_symbol_spacing(text: str) -> str:
+    replacements = (
+        (r"(?<![A-Za-z0-9_])L\s*[_\-\s]*DW\s*CE(?![A-Za-z0-9_])", "L_DWCE"),
+        (r"(?<![A-Za-z0-9_])L\s*[_\-\s]*DWCE(?![A-Za-z0-9_])", "L_DWCE"),
+        (r"(?<![A-Za-z0-9_])L\s*[_\-\s]*Cls(?![A-Za-z0-9_])", "L_Cls"),
+        (r"(?<![A-Za-z0-9_])L\s*[_\-\s]*Fea(?![A-Za-z0-9_])", "L_Fea"),
+        (r"(?<![A-Za-z0-9_])L\s*[_\-\s]*Reg(?![A-Za-z0-9_])", "L_Reg"),
+    )
+    normalized = text
+    for pattern, replacement in replacements:
+        normalized = re.sub(pattern, replacement, normalized, flags=re.IGNORECASE)
+    return normalized
 
 
 def infer_report_paragraph_node_ids(
@@ -2067,9 +2688,9 @@ def observation_task_instruction(
         )
     if task_type == ReadingTaskType.METHOD_MECHANISM:
         return (
-            "完整解释方法机制链路，覆盖 mechanism_overview、theoretical_decomposition、distortion_alignment、quality_disentanglement、module_interactions、optimization_goals。必须把关键定理/分解/公式翻译成可读的机制说明：变量表示什么、目标分布是什么、为什么引入失真作为桥接变量、每个损失项在拉近或推开什么。每个关键模块都要说明存在原因、输入输出、解决的冲突、与其它模块如何配合；不要只复述模块名或给抽象总结。可以 10-18 张卡，优先保留能让报告从头讲清楚原理的事实。"
+            "完整解释方法机制链路，覆盖 mechanism_overview、theoretical_decomposition、distortion_alignment、quality_disentanglement、module_interactions、optimization_goals。必须把关键定理/分解/公式翻译成可读的机制说明：变量表示什么、目标分布是什么、为什么引入失真作为桥接变量、每个损失项在拉近、推远、加权、预测或惩罚什么。遇到专业名词不能只记录名词，必须记录“它是什么、在本文中解决什么问题、输入输出是什么、和下一步怎么衔接”。重点解释 domain adaptation、source/target domain、feature space/distribution、distortion distribution、conditional distribution/discriminator、DWCE、InfoNCE、contrastive learning、disentanglement、regression 这些术语在本文中的具体含义；如果涉及正负样本、权重 w、模块 G/D/H/R 或总损失，也要说明它们从哪里来、作用到哪里去。不要只复述模块名或给抽象总结。可以 12-20 张卡，优先保留能让报告从头讲清楚原理的事实。"
             if zh
-            else "Explain the mechanism chain completely, covering mechanism_overview, theoretical_decomposition, distortion_alignment, quality_disentanglement, module_interactions, and optimization_goals. Translate key theorem/decomposition/formulas into readable mechanism facts: what variables mean, what distributions are targeted, why distortion is used as a bridge variable, and what each loss pulls together or pushes apart. State why each key module exists, its inputs/outputs, the conflict it addresses, and how modules interact; do not only list module names or give an abstract summary. Use 10-18 cards when supported by evidence."
+            else "Explain the mechanism chain completely, covering mechanism_overview, theoretical_decomposition, distortion_alignment, quality_disentanglement, module_interactions, and optimization_goals. Translate key theorem/decomposition/formulas into readable mechanism facts: what variables mean, what distributions are targeted, why distortion is used as a bridge variable, and what each loss pulls together, pushes apart, weights, predicts, or penalizes. For technical terms, record what the term means, what problem it solves in this paper, its inputs/outputs, and how it connects to the next step. Explain domain adaptation, source/target domain, feature space/distribution, distortion distribution, conditional distribution/discriminator, DWCE, InfoNCE, contrastive learning, disentanglement, and regression in the paper's concrete setting; when positive/negative samples, weight w, modules G/D/H/R, or the total loss are involved, state where they come from and where they act. Do not only list module names or give an abstract summary. Use 12-20 cards when supported by evidence."
         )
     if task_type == ReadingTaskType.IMPLEMENTATION_PATH:
         return (
@@ -2097,9 +2718,9 @@ def observation_task_instruction(
         )
     if task_type == ReadingTaskType.CONCEPT_BRIDGE:
         return (
-            "解释读懂论文必须掌握的概念关系，只保留能帮助理解方法或评估的概念。"
+            "解释读懂论文必须掌握的概念关系，只保留能帮助理解方法或评估的概念。每张卡按“术语是什么、本文为什么需要它、它接到哪一步、读者可以怎样直觉理解”来写；优先覆盖源域/目标域、域适应、特征空间/特征分布、失真分布、条件分布、HVS、MOS、PLCC/SROCC/KROCC/RMSE、对比学习、解纠缠、回归这些会让读者卡住的词。不要写百科式空泛定义，必须绑定本文任务、模块或实验指标。"
             if zh
-            else "Explain only concepts needed to understand the method or evaluation."
+            else "Explain only concepts needed to understand the method or evaluation. Each card should say what the term means, why this paper needs it, which step it connects to, and how a reader can intuit it. Prioritize source/target domain, domain adaptation, feature space/distribution, distortion distribution, conditional distribution, HVS, MOS, PLCC/SROCC/KROCC/RMSE, contrastive learning, disentanglement, and regression. Avoid generic encyclopedia definitions; bind every concept to this paper's task, modules, or metrics."
         )
     if task_type == ReadingTaskType.RELATED_POSITIONING:
         return (

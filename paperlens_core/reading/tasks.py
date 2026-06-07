@@ -183,7 +183,31 @@ TASK_KEYWORDS: dict[ReadingTaskType, tuple[str, ...]] = {
         "rmse",
     ),
     ReadingTaskType.LIMITATIONS: ("limitation", "discussion", "failure", "future work"),
-    ReadingTaskType.CONCEPT_BRIDGE: ("background", "preliminary", "definition"),
+    ReadingTaskType.CONCEPT_BRIDGE: (
+        "background",
+        "preliminary",
+        "definition",
+        "domain",
+        "distribution",
+        "feature space",
+        "feature distribution",
+        "distortion",
+        "perception",
+        "quality score",
+        "human visual system",
+        "hvs",
+        "mos",
+        "domain adaptation",
+        "contrastive",
+        "disentangle",
+        "regression",
+        "plcc",
+        "srocc",
+        "krocc",
+        "rmse",
+        "theorem",
+        "loss",
+    ),
     ReadingTaskType.RELATED_POSITIONING: ("related work", "prior", "compare", "comparison"),
     ReadingTaskType.REPRODUCIBILITY: (
         "code",
@@ -340,6 +364,8 @@ def source_limit_for_task(task_type: ReadingTaskType, default_limit: int) -> int
         ReadingTaskType.IMPLEMENTATION_PATH,
     }:
         return max(default_limit, 24)
+    if task_type == ReadingTaskType.CONCEPT_BRIDGE:
+        return max(default_limit, 16)
     if task_type == ReadingTaskType.REPRODUCIBILITY:
         return max(default_limit, 24)
     if task_type in {ReadingTaskType.EVALUATION_SETUP, ReadingTaskType.RESULT_EXTRACTION}:
@@ -588,6 +614,28 @@ def source_kind_score(task_type: ReadingTaskType, kind: str, text_lower: str) ->
         for marker in ("dataset", "database", "metric", "baseline", "plcc", "srocc", "rmse")
     ):
         return 160.0
+    if task_type == ReadingTaskType.CONCEPT_BRIDGE and any(
+        marker in text_lower
+        for marker in (
+            "domain adaptation",
+            "feature distribution",
+            "distortion distribution",
+            "conditional distribution",
+            "human visual system",
+            "hvs",
+            "mos",
+            "contrastive",
+            "disentangle",
+            "regression",
+            "plcc",
+            "srocc",
+            "krocc",
+            "rmse",
+            "theorem",
+            "loss",
+        )
+    ):
+        return 220.0
     if task_type in {ReadingTaskType.IMPLEMENTATION_PATH, ReadingTaskType.REPRODUCIBILITY} and any(
         marker in text_lower
         for marker in (

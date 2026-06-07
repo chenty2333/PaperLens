@@ -637,11 +637,26 @@ def reader_markdown(markdown: str, *, output_language: str = "zh") -> str:
         if is_internal_report_line(line):
             continue
         cleaned = clean_internal_markers(line)
+        cleaned = normalize_reader_loss_symbols(cleaned)
         cleaned = strip_observation_prefix(cleaned)
         if output_language == "zh" and is_english_mechanical_evidence(cleaned):
             continue
         cleaned_lines.append(cleaned)
     return "\n".join(line for line in cleaned_lines if line.strip()).strip()
+
+
+def normalize_reader_loss_symbols(text: str) -> str:
+    replacements = (
+        (r"(?<![A-Za-z0-9_])L\s*[_\-\s]*DW\s*CE(?![A-Za-z0-9_])", "L_DWCE"),
+        (r"(?<![A-Za-z0-9_])L\s*[_\-\s]*DWCE(?![A-Za-z0-9_])", "L_DWCE"),
+        (r"(?<![A-Za-z0-9_])L\s*[_\-\s]*Cls(?![A-Za-z0-9_])", "L_Cls"),
+        (r"(?<![A-Za-z0-9_])L\s*[_\-\s]*Fea(?![A-Za-z0-9_])", "L_Fea"),
+        (r"(?<![A-Za-z0-9_])L\s*[_\-\s]*Reg(?![A-Za-z0-9_])", "L_Reg"),
+    )
+    normalized = text
+    for pattern, replacement in replacements:
+        normalized = re.sub(pattern, replacement, normalized, flags=re.IGNORECASE)
+    return normalized
 
 
 def dedupe_reader_texts(texts: list[str], *, seen_text_keys: set[str]) -> list[str]:
