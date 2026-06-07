@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
 from paperlens_core.runtime.artifacts import ArtifactEnvelope
+from paperlens_core.storage import atomic_write_json
 
 
 def make_artifact_envelope(
@@ -49,11 +49,7 @@ def write_typed_artifact(
 
 
 def write_artifact_envelope(path: Path, envelope: ArtifactEnvelope) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(envelope.model_dump(mode="json"), ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_json(path, envelope.model_dump(mode="json"))
 
 
 def read_typed_artifact(path: Path, *, expected_type: str) -> ArtifactEnvelope:

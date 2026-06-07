@@ -6,6 +6,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from paperlens_core.storage import atomic_write_json
+
 
 def hash_json_payload(payload: Any) -> str:
     return hashlib.sha256(_canonical_json(payload)).hexdigest()[:16]
@@ -35,11 +37,7 @@ def read_llm_cache(path: Path | None) -> dict[str, Any] | None:
 def write_llm_cache(path: Path | None, payload: dict[str, Any]) -> None:
     if path is None:
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, default=str),
-        encoding="utf-8",
-    )
+    atomic_write_json(path, payload)
 
 
 def safe_cache_segment(value: str) -> str:

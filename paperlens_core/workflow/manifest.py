@@ -12,6 +12,7 @@ from paperlens_core.events import EventWriter, write_json
 from paperlens_core.quality_snapshot import write_core_quality_snapshot
 from paperlens_core.report import classification_counts, paper_report_filename
 from paperlens_core.schemas import ClassificationDecision, PaperRecord
+from paperlens_core.storage import WorkspaceStore
 from paperlens_core.workflow.utils import dict_value
 
 
@@ -54,6 +55,7 @@ def run_manifest_stage(workflow: ManifestWorkflowContext) -> dict[str, Any]:
         expected_report_names={paper_report_filename(paper) for paper in workflow.papers},
         expected_paper_ids={paper.paper_id for paper in workflow.papers},
     )
+    storage_health = WorkspaceStore(workflow.output_dir).doctor(repair=False)
     model_call_summary = summarize_model_calls(workflow.data_dir / "model_calls.jsonl")
     write_json(workflow.data_dir / "model_call_summary.json", model_call_summary)
     core_quality_snapshot_path = write_core_quality_snapshot(workflow.output_dir)
@@ -74,6 +76,7 @@ def run_manifest_stage(workflow: ManifestWorkflowContext) -> dict[str, Any]:
         "artifacts": {
             "main_report": "PaperLens.md",
             "paper_reports": "papers/",
+            "workspace_manifest": ".paperlens/workspace.json",
             "internal_state": ".paperlens/state.sqlite",
             "page_images": ".paperlens/pages/",
             "figure_crops": ".paperlens/figures/",
@@ -84,6 +87,7 @@ def run_manifest_stage(workflow: ManifestWorkflowContext) -> dict[str, Any]:
             "data": ".paperlens/data/",
             "model_call_summary": ".paperlens/data/model_call_summary.json",
             "output_validation": output_validation,
+            "storage_health": storage_health,
         },
         "model_calls": model_call_summary,
         "core_quality": {
@@ -111,6 +115,7 @@ def validate_paperlens_output(
     expected_paper_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     main_report = output_dir / "PaperLens.md"
+    workspace_manifest_path = output_dir / ".paperlens" / "workspace.json"
     library_records_path = output_dir / ".paperlens" / "library" / "library_records.jsonl"
     search_index_path = output_dir / ".paperlens" / "library" / "index" / "search_index.json"
     issues = []
@@ -168,6 +173,16 @@ def validate_paperlens_output(
                 issues.append(f"Missing link target: {target}")
             elif target_path.is_file() and not target_path.read_text(encoding="utf-8").strip():
                 issues.append(f"Empty link target: {target}")
+    if not workspace_manifest_path.exists():
+        issues.append(".paperlens/workspace.json is missing")
+    else:
+        try:
+            workspace_manifest = json.loads(workspace_manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            issues.append(".paperlens/workspace.json is invalid JSON")
+        else:
+            if workspace_manifest.get("schema_version") != "paperlens.workspace.v1":
+                issues.append(".paperlens/workspace.json has unsupported schema_version")
     if not library_records_path.exists():
         issues.append(".paperlens/library/library_records.jsonl is missing")
     elif not library_records_path.read_text(encoding="utf-8").strip():

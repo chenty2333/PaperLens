@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from paperlens_core.config import ProviderConfig
+from paperlens_core.storage import append_jsonl
 
 
 class LlmError(RuntimeError):
@@ -766,10 +767,8 @@ def write_llm_ledger(
     if error:
         record["error"] = error[:500]
     path = Path(resolved_ledger_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
     with _LEDGER_LOCK:
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+        append_jsonl(path, record)
 
 
 def extract_openai_response_text(response: dict[str, Any]) -> str:

@@ -24,8 +24,14 @@ from paperlens_core.protocol import (
     PaperQuestionRequest,
     RunRequest,
     RunResult,
+    WorkspaceCleanupCacheRequest,
+    WorkspaceExportRequest,
+    WorkspaceImportRequest,
+    WorkspaceRequest,
 )
 from paperlens_core.qa import answer_question
+from paperlens_core.storage import WorkspaceStore
+from paperlens_core.version import display_version
 
 
 class PaperLensEngine:
@@ -50,6 +56,7 @@ class PaperLensEngine:
         input_dir = request.input_dir.expanduser().resolve()
         output_dir = request.output_dir.expanduser().resolve()
         output_dir.mkdir(parents=True, exist_ok=True)
+        WorkspaceStore(output_dir).bootstrap(app_version=display_version())
         run_id = request.run_id or f"run_{uuid.uuid4().hex[:12]}"
         events = EventWriter(
             run_id,
@@ -88,6 +95,9 @@ class PaperLensEngine:
         return RunResult(status="ok" if manifest else "error", data={"manifest": manifest or {}})
 
     def answer_paper_question(self, request: PaperQuestionRequest) -> dict[str, Any]:
+        WorkspaceStore(request.output_dir.expanduser().resolve()).bootstrap(
+            app_version=display_version()
+        )
         config = self.load_core_config(
             config_path=request.config_path,
             overrides=request.config_overrides,
@@ -101,14 +111,23 @@ class PaperLensEngine:
         )
 
     def build_library(self, request: LibraryBuildRequest) -> dict[str, Any]:
+        WorkspaceStore(request.output_dir.expanduser().resolve()).bootstrap(
+            app_version=display_version()
+        )
         paths = rebuild_library_from_output(request.output_dir.expanduser().resolve())
         return {"written": [str(path) for path in paths]}
 
     def rebuild_library_index(self, request: LibraryRebuildIndexRequest) -> dict[str, Any]:
+        WorkspaceStore(request.output_dir.expanduser().resolve()).bootstrap(
+            app_version=display_version()
+        )
         path = rebuild_library_index(request.output_dir.expanduser().resolve())
         return {"written": str(path)}
 
     def doctor_library(self, request: LibraryDoctorRequest) -> dict[str, Any]:
+        WorkspaceStore(request.output_dir.expanduser().resolve()).bootstrap(
+            app_version=display_version()
+        )
         return doctor_library(request.output_dir.expanduser().resolve())
 
     def search_library(self, request: LibrarySearchRequest) -> dict[str, Any]:
@@ -119,6 +138,9 @@ class PaperLensEngine:
         )
 
     def answer_library_question(self, request: LibraryQuestionRequest) -> dict[str, Any]:
+        WorkspaceStore(request.output_dir.expanduser().resolve()).bootstrap(
+            app_version=display_version()
+        )
         config = self.load_core_config(
             config_path=request.config_path,
             overrides=request.config_overrides,
@@ -131,3 +153,28 @@ class PaperLensEngine:
             chat_history=request.chat_history,
         )
 
+    def migrate_workspace(self, request: WorkspaceRequest) -> dict[str, Any]:
+        return WorkspaceStore(request.output_dir.expanduser().resolve()).bootstrap(
+            app_version=display_version()
+        )
+
+    def doctor_workspace(self, request: WorkspaceRequest, *, repair: bool = False) -> dict[str, Any]:
+        return WorkspaceStore(request.output_dir.expanduser().resolve()).doctor(repair=repair)
+
+    def cleanup_workspace_cache(self, request: WorkspaceCleanupCacheRequest) -> dict[str, Any]:
+        return WorkspaceStore(request.output_dir.expanduser().resolve()).cleanup_cache(
+            max_age_days=request.max_age_days,
+            dry_run=request.dry_run,
+        )
+
+    def export_workspace(self, request: WorkspaceExportRequest) -> dict[str, Any]:
+        return WorkspaceStore(request.output_dir.expanduser().resolve()).export_archive(
+            request.archive_path,
+            include_cache=request.include_cache,
+        )
+
+    def import_workspace(self, request: WorkspaceImportRequest) -> dict[str, Any]:
+        return WorkspaceStore(request.output_dir.expanduser().resolve()).import_archive(
+            request.archive_path,
+            replace=request.replace,
+        )

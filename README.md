@@ -37,7 +37,10 @@ output/
   papers/
     <paper_id>_<short_title>.md
   .paperlens/
+    workspace.json
     state.sqlite
+    cache/
+    recovery/
     library/
       library_records.jsonl
       index/
@@ -47,6 +50,7 @@ output/
     data/
       run.json
       events.jsonl
+      migrations.jsonl
       core/
         v2/
           <paper_id>/
@@ -64,6 +68,27 @@ output/
 
 Open `PaperLens.md` first when using raw output files. The desktop app reads the same output directory and presents the library, capsule, evidence, and chat surfaces.
 
+## Local Workspace Storage
+
+The output directory is a versioned PaperLens workspace. `.paperlens/workspace.json`
+declares the storage schema and layout. PaperLens bootstraps or migrates the workspace
+before reading papers, rebuilding the library, or answering questions.
+
+Product-level maintenance commands:
+
+```powershell
+uv run python -m paperlens_core.main workspace doctor --output-dir output
+uv run python -m paperlens_core.main workspace doctor --output-dir output --repair
+uv run python -m paperlens_core.main workspace export --output-dir output --archive PaperLens-backup.zip
+uv run python -m paperlens_core.main workspace import --output-dir output --archive PaperLens-backup.zip
+uv run python -m paperlens_core.main workspace cleanup-cache --output-dir output --max-age-days 30
+```
+
+Critical JSON artifacts, reports, library indexes, QA cache files, and typed core
+artifacts are written through atomic replacement. If a critical JSON file is corrupt
+during repair, PaperLens moves it to `.paperlens/recovery/` instead of silently
+overwriting it.
+
 ## Install And Run
 
 For releases, download the Windows NSIS installer from GitHub Actions artifacts or tagged GitHub Releases.
@@ -76,6 +101,11 @@ The installer is configured as a per-user install:
 - asks during uninstall whether local settings and WebView cache should also be removed.
 
 The app does not ship with a model key, model name, or provider URL. Enter those in the UI for each session. API keys are not persisted in local settings.
+
+Before major upgrades, export important workspaces with `paperlens-core workspace export`.
+On startup or workspace open, PaperLens migrates the selected workspace in place. If a
+replace import is needed, the old managed workspace files are moved to a timestamped
+backup directory next to the workspace.
 
 ## Development
 
@@ -160,6 +190,9 @@ Automatic in-app updates are enabled only for signed release builds. Configure t
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: optional signing key password.
 
 The workflow publishes the NSIS installer, portable zip, portable hash/metadata, installer signature, and `latest.json` to the GitHub Release. By default the app checks `https://github.com/<owner>/<repo>/releases/latest/download/latest.json`; override that with the `PAPERLENS_UPDATER_ENDPOINT` repository variable if needed.
+
+Release notes come from [RELEASE_NOTES.md](RELEASE_NOTES.md) and are reused by the
+GitHub Release and signed updater manifest.
 
 ## Security And Privacy Defaults
 

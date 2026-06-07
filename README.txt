@@ -15,17 +15,26 @@ Human-facing output:
 Internal memory:
   output/
     .paperlens/
+      workspace.json
       library/
         library_records.jsonl
         index/
           search_index.json
       data/
+        migrations.jsonl
       cache/
+      recovery/
       pages/
       figures/
 
 Open PaperLens.md first when using raw files. The desktop app reads the same
 output directory and presents the library, capsule, evidence, and chat views.
+
+Workspace maintenance:
+  paperlens-core workspace doctor --output-dir <output>
+  paperlens-core workspace doctor --output-dir <output> --repair
+  paperlens-core workspace export --output-dir <output> --archive <backup.zip>
+  paperlens-core workspace cleanup-cache --output-dir <output> --max-age-days 30
 
 Security defaults:
   - API keys are accepted at runtime and redacted from run config snapshots.

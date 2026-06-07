@@ -89,6 +89,7 @@ New-Item -ItemType Directory -Force -Path (Join-Path $PortableRoot "config") | O
 Copy-Item -LiteralPath $appExe -Destination (Join-Path $PortableRoot "PaperLens.exe")
 Copy-Item -LiteralPath $Sidecar -Destination (Join-Path $PortableRoot "sidecars\paperlens-core-x86_64-pc-windows-msvc.exe")
 Copy-RequiredPath -Source (Join-Path $Root "README.txt") -Destination (Join-Path $PortableRoot "README.txt")
+Copy-RequiredPath -Source (Join-Path $Root "RELEASE_NOTES.md") -Destination (Join-Path $PortableRoot "RELEASE_NOTES.md")
 Copy-RequiredPath -Source (Join-Path $Root "config\default_config.json") -Destination (Join-Path $PortableRoot "config\default_config.json")
 Copy-RequiredPath -Source (Join-Path $Root "resources\prompts") -Destination (Join-Path $PortableRoot "resources\prompts")
 Copy-RequiredPath -Source (Join-Path $Root "resources\schemas") -Destination (Join-Path $PortableRoot "resources\schemas")

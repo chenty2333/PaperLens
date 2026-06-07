@@ -37,7 +37,10 @@ output/
   papers/
     <paper_id>_<short_title>.md
   .paperlens/
+    workspace.json
     state.sqlite
+    cache/
+    recovery/
     library/
       library_records.jsonl
       index/
@@ -47,6 +50,7 @@ output/
     data/
       run.json
       events.jsonl
+      migrations.jsonl
       core/
         v2/
           <paper_id>/
@@ -65,6 +69,26 @@ output/
 
 如果直接看输出文件，先打开 `PaperLens.md`。桌面 App 读取同一个输出目录，并展示 library、capsule、evidence 和 chat。
 
+## 本地 Workspace 存储
+
+输出目录现在是带版本的 PaperLens workspace。`.paperlens/workspace.json` 声明
+storage schema 和目录布局。PaperLens 在读论文、重建 library、回答问题前，会先
+bootstrap 或迁移当前 workspace。
+
+产品级维护命令：
+
+```powershell
+uv run python -m paperlens_core.main workspace doctor --output-dir output
+uv run python -m paperlens_core.main workspace doctor --output-dir output --repair
+uv run python -m paperlens_core.main workspace export --output-dir output --archive PaperLens-backup.zip
+uv run python -m paperlens_core.main workspace import --output-dir output --archive PaperLens-backup.zip
+uv run python -m paperlens_core.main workspace cleanup-cache --output-dir output --max-age-days 30
+```
+
+关键 JSON 产物、报告、library index、QA cache 和 typed core artifacts 都会通过
+原子替换写入。修复时如果发现关键 JSON 损坏，PaperLens 会把它移到
+`.paperlens/recovery/`，而不是静默覆盖。
+
 ## 安装和使用
 
 发布版本从 GitHub Actions artifacts 或带 `v*` tag 的 GitHub Releases 下载 Windows NSIS 安装包。
@@ -77,6 +101,10 @@ output/
 - 卸载时会询问是否同时删除本机设置和 WebView 缓存。
 
 App 不会内置模型 key、模型名称或 provider URL。你需要在 UI 里输入会话所需配置。API key 不会持久化保存到本机设置。
+
+大版本升级前，建议用 `paperlens-core workspace export` 导出重要 workspace。
+启动或打开 workspace 时，PaperLens 会原地迁移所选 workspace。如果需要覆盖式导入，
+旧的受管理 workspace 文件会先移动到 workspace 旁边的带时间戳备份目录。
 
 ## 开发
 
@@ -161,6 +189,9 @@ CI 不需要模型 API key。
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`：可选的私钥密码。
 
 workflow 会把 NSIS 安装包、绿色版 zip、绿色版 hash/metadata、签名文件和 `latest.json` 一起上传到 GitHub Release。默认检查地址是 `https://github.com/<owner>/<repo>/releases/latest/download/latest.json`；如需使用自己的更新源，可以设置 repository variable `PAPERLENS_UPDATER_ENDPOINT`。
+
+Release notes 来自 [RELEASE_NOTES.md](RELEASE_NOTES.md)，并复用于 GitHub Release
+和签名 updater manifest。
 
 ## 安全和隐私默认值
 

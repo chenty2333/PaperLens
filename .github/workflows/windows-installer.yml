@@ -285,7 +285,7 @@ jobs:
             --repo "$env:GITHUB_REPOSITORY" `
             --artifact-dir $artifactDir `
             --output "$artifactDir/latest.json" `
-            --notes "PaperLens ${{ steps.release-meta.outputs.release_tag }}"
+            --notes-file RELEASE_NOTES.md
 
       - name: Upload Windows release artifacts
         uses: actions/upload-artifact@v6
@@ -341,8 +341,13 @@ jobs:
             echo "No release tag was resolved."
             exit 1
           fi
+          notes_args=(--notes "PaperLens $tag")
+          if [ -f RELEASE_NOTES.md ]; then
+            notes_args=(--notes-file RELEASE_NOTES.md)
+          fi
           if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
             gh release upload "$tag" "${assets[@]}" --repo "$repo" --clobber
+            gh release edit "$tag" --repo "$repo" "${notes_args[@]}"
           else
-            gh release create "$tag" "${assets[@]}" --repo "$repo" --target "$GITHUB_SHA" --title "$tag" --notes "PaperLens $tag"
+            gh release create "$tag" "${assets[@]}" --repo "$repo" --target "$GITHUB_SHA" --title "$tag" "${notes_args[@]}"
           fi

@@ -20,6 +20,7 @@ from paperlens_core.dom import PaperDOM
 from paperlens_core.grounding import text_overlaps_any_reference
 from paperlens_core.graph import ClaimGraph
 from paperlens_core.library import compact_library_record_for_agent, read_library_records
+from paperlens_core.storage import append_jsonl, atomic_write_json
 from paperlens_core.workflow.core_v2 import (
     load_core_v2_dom_and_graph,
     load_core_v2_dom_and_plan,
@@ -916,8 +917,7 @@ def read_ask_cache(path: Path) -> dict[str, Any] | None:
 
 
 def write_ask_cache(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_write_json(path, payload)
 
 
 def write_qa_trace(
@@ -930,8 +930,6 @@ def write_qa_trace(
     agent_context: dict[str, Any] | None = None,
     core_v2_context: dict[str, Any] | None = None,
 ) -> None:
-    trace_path = paperlens_data_dir(output_dir) / "qa_trace.jsonl"
-    trace_path.parent.mkdir(parents=True, exist_ok=True)
     row = {
         "paper_id": answer.get("paper_id"),
         "question": question,
@@ -957,8 +955,7 @@ def write_qa_trace(
             "tool_count": len((agent_context or {}).get("tool_trace") or []),
         },
     }
-    with trace_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+    append_jsonl(paperlens_data_dir(output_dir) / "qa_trace.jsonl", row)
 
 
 def hash_text(text: str) -> str:

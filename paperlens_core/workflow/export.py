@@ -15,6 +15,7 @@ from paperlens_core.report import (
     render_paperlens_report,
 )
 from paperlens_core.schemas import ClassificationDecision, PaperRecord, ReviewItem, SkimCard
+from paperlens_core.storage import atomic_write_text
 
 
 class ExportWorkflowContext(Protocol):
@@ -99,8 +100,7 @@ def write_final_report_bundle(
                 f"Core v2 report is required for {paper.paper_id}; export only publishes "
                 "reviewed ClaimGraph reports"
             )
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(report_markdown, encoding="utf-8")
+        atomic_write_text(report_path, report_markdown, encoding="utf-8")
         written.append(report_path)
         graph_summary = read_core_v2_graph_summary(output_dir, paper.paper_id)
         paper_report_rows.append(
@@ -126,7 +126,7 @@ def write_final_report_bundle(
         output_language=output_language,
     )
     main_path = output_dir / "PaperLens.md"
-    main_path.write_text(paperlens_report, encoding="utf-8")
+    atomic_write_text(main_path, paperlens_report, encoding="utf-8")
     written.append(main_path)
     written.extend(
         write_paperlens_library(

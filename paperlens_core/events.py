@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from paperlens_core.storage import atomic_write_json, atomic_write_jsonl
+
 
 EventCallback = Callable[[dict[str, Any]], None]
 
@@ -74,15 +76,11 @@ class EventWriter:
 
 
 def write_json(path: Path, payload: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    atomic_write_json(path, payload)
 
 
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+    atomic_write_jsonl(path, rows)
 
 
 def emit_fatal(message: str) -> None:

@@ -63,3 +63,21 @@ class LibraryQuestionRequest(CoreRequest):
     limit: int = 8
     chat_history: list[JsonObject] = Field(default_factory=list)
 
+
+class WorkspaceRequest(BaseModel):
+    output_dir: Path
+
+
+class WorkspaceCleanupCacheRequest(WorkspaceRequest):
+    max_age_days: int = 30
+    dry_run: bool = False
+
+
+class WorkspaceExportRequest(WorkspaceRequest):
+    archive_path: Path
+    include_cache: bool = False
+
+
+class WorkspaceImportRequest(WorkspaceRequest):
+    archive_path: Path
+    replace: bool = False

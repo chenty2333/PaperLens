@@ -77,6 +77,8 @@ CREATE TABLE IF NOT EXISTS review_items (
 );
 """
 
+DB_SCHEMA_VERSION = 1
+
 
 class ArtifactDb:
     def __init__(self, path: Path) -> None:
@@ -86,6 +88,7 @@ class ArtifactDb:
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
         self._ensure_paper_columns()
+        self._ensure_schema_version()
         self.conn.commit()
 
     def close(self) -> None:
@@ -105,6 +108,11 @@ class ArtifactDb:
         for column, statement in migrations.items():
             if column not in existing:
                 self.conn.execute(statement)
+
+    def _ensure_schema_version(self) -> None:
+        current = self.conn.execute("PRAGMA user_version").fetchone()[0]
+        if int(current or 0) < DB_SCHEMA_VERSION:
+            self.conn.execute(f"PRAGMA user_version = {DB_SCHEMA_VERSION}")
 
     def upsert_paper(self, paper: PaperRecord) -> None:
         self.conn.execute(

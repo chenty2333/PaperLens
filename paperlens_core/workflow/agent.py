@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 from pathlib import Path
 from typing import Any
@@ -26,6 +25,8 @@ from paperlens_core.schemas import (
 )
 from paperlens_core.workflow.export import run_export_stage
 from paperlens_core.state import transition_state
+from paperlens_core.storage import WorkspaceStore, append_jsonl
+from paperlens_core.version import display_version
 from paperlens_core.workflow.manifest import run_manifest_stage
 from paperlens_core.workflow.stages import (
     WORKFLOW_STAGE_ORDER,
@@ -61,11 +62,13 @@ class PaperLensWorkflow:
         self.config = config
         self.events = events
         self.control = control
-        self.internal_dir = output_dir / ".paperlens"
-        self.data_dir = self.internal_dir / "data"
-        self.cache_dir = Path(os.getenv("PAPERLENS_CACHE_DIR", str(self.internal_dir / "cache")))
+        self.store = WorkspaceStore(output_dir)
+        self.store.bootstrap(app_version=display_version())
+        self.internal_dir = self.store.internal_dir
+        self.data_dir = self.store.data_dir
+        self.cache_dir = Path(os.getenv("PAPERLENS_CACHE_DIR", str(self.store.cache_dir)))
         self.evidence_dir = self.internal_dir
-        self.db = ArtifactDb(self.internal_dir / "state.sqlite")
+        self.db = ArtifactDb(self.store.state_db_path)
         self.papers: list[PaperRecord] = []
         self.skim_cards: list[SkimCard] = []
         self.classifications: list[ClassificationDecision] = []
@@ -212,18 +215,7 @@ class PaperLensWorkflow:
             )
 
     def prepare_output(self) -> None:
-        for relative in [
-            ".paperlens",
-            ".paperlens/pages",
-            ".paperlens/figures",
-            ".paperlens/data",
-            ".paperlens/data/artifacts/layout",
-            ".paperlens/library",
-            ".paperlens/library/index",
-            ".paperlens/cache",
-            "papers",
-        ]:
-            (self.output_dir / relative).mkdir(parents=True, exist_ok=True)
+        self.store.bootstrap(app_version=display_version())
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         write_json(
             self.data_dir / "run.json",
@@ -325,10 +317,7 @@ class PaperLensWorkflow:
             "run_id": self.events.run_id,
             **payload,
         }
-        path = self.data_dir / "agent_runs.jsonl"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True, default=str) + "\n")
+        append_jsonl(self.data_dir / "agent_runs.jsonl", row)
 
     def record_llm_usage(self, stage: str, usage: dict[str, Any]) -> None:
         snapshot = self.budget.record_usage(usage)

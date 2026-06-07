@@ -16,6 +16,10 @@ from paperlens_core.protocol import (
     LibrarySearchRequest,
     PaperQuestionRequest,
     RunRequest,
+    WorkspaceCleanupCacheRequest,
+    WorkspaceExportRequest,
+    WorkspaceImportRequest,
+    WorkspaceRequest,
 )
 from paperlens_core.service import serve
 from paperlens_core.version import display_version
@@ -105,6 +109,41 @@ def build_parser() -> argparse.ArgumentParser:
     library_ask.add_argument("--timeout-seconds", type=int)
     library_ask.add_argument("--api-key-env", default="PAPERLENS_API_KEY")
     library_ask.add_argument("--offline-debug", action="store_true")
+
+    workspace = subparsers.add_parser("workspace", help="Manage a PaperLens local workspace")
+    workspace_subparsers = workspace.add_subparsers(dest="workspace_command", required=True)
+
+    workspace_migrate = workspace_subparsers.add_parser(
+        "migrate", help="Create or upgrade the workspace storage manifest"
+    )
+    workspace_migrate.add_argument("--output-dir", required=True)
+
+    workspace_doctor = workspace_subparsers.add_parser(
+        "doctor", help="Check the whole PaperLens workspace for storage issues"
+    )
+    workspace_doctor.add_argument("--output-dir", required=True)
+    workspace_doctor.add_argument("--repair", action="store_true")
+
+    workspace_cleanup = workspace_subparsers.add_parser(
+        "cleanup-cache", help="Remove old cache files from a PaperLens workspace"
+    )
+    workspace_cleanup.add_argument("--output-dir", required=True)
+    workspace_cleanup.add_argument("--max-age-days", type=int, default=30)
+    workspace_cleanup.add_argument("--dry-run", action="store_true")
+
+    workspace_export = workspace_subparsers.add_parser(
+        "export", help="Export a PaperLens workspace archive"
+    )
+    workspace_export.add_argument("--output-dir", required=True)
+    workspace_export.add_argument("--archive", required=True)
+    workspace_export.add_argument("--include-cache", action="store_true")
+
+    workspace_import = workspace_subparsers.add_parser(
+        "import", help="Import a PaperLens workspace archive"
+    )
+    workspace_import.add_argument("--output-dir", required=True)
+    workspace_import.add_argument("--archive", required=True)
+    workspace_import.add_argument("--replace", action="store_true")
 
     subparsers.add_parser("version", help="Print PaperLens Core version")
 
@@ -221,6 +260,46 @@ def library_command(args: argparse.Namespace) -> int:
     raise ValueError(f"Unknown library command: {args.library_command}")
 
 
+def workspace_command(args: argparse.Namespace) -> int:
+    engine = PaperLensEngine()
+    output_dir = Path(args.output_dir)
+    if args.workspace_command == "migrate":
+        result = engine.migrate_workspace(WorkspaceRequest(output_dir=output_dir))
+    elif args.workspace_command == "doctor":
+        result = engine.doctor_workspace(
+            WorkspaceRequest(output_dir=output_dir),
+            repair=args.repair,
+        )
+    elif args.workspace_command == "cleanup-cache":
+        result = engine.cleanup_workspace_cache(
+            WorkspaceCleanupCacheRequest(
+                output_dir=output_dir,
+                max_age_days=args.max_age_days,
+                dry_run=args.dry_run,
+            )
+        )
+    elif args.workspace_command == "export":
+        result = engine.export_workspace(
+            WorkspaceExportRequest(
+                output_dir=output_dir,
+                archive_path=Path(args.archive),
+                include_cache=args.include_cache,
+            )
+        )
+    elif args.workspace_command == "import":
+        result = engine.import_workspace(
+            WorkspaceImportRequest(
+                output_dir=output_dir,
+                archive_path=Path(args.archive),
+                replace=args.replace,
+            )
+        )
+    else:
+        raise ValueError(f"Unknown workspace command: {args.workspace_command}")
+    print(json.dumps(result, ensure_ascii=False, default=str), flush=True)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     configure_utf8_stdio()
     parser = build_parser()
@@ -231,6 +310,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "library":
             return library_command(args)
+        if args.command == "workspace":
+            return workspace_command(args)
         if args.command == "serve":
             return serve(
                 host=args.host,

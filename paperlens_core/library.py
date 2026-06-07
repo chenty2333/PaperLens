@@ -24,6 +24,7 @@ from paperlens_core.library_graph import (
     read_core_v2_graph_summary,
 )
 from paperlens_core.library_relations import build_cross_paper_relations
+from paperlens_core.storage import atomic_write_json, atomic_write_text
 
 
 APP_NAME = "PaperLens"
@@ -195,19 +196,15 @@ def write_library_records(
     records_text = "".join(
         json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n" for record in records
     )
-    records_path.write_text(records_text, encoding="utf-8")
+    atomic_write_text(records_path, records_text, encoding="utf-8")
 
     search_index = build_search_index(records)
     index_path = index_root / "search_index.json"
-    index_path.write_text(
-        json.dumps(search_index, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+    atomic_write_json(index_path, search_index)
 
     relations = build_cross_paper_relations(records)
     relations_path = index_root / "cross_paper_relations.json"
-    relations_path.write_text(
-        json.dumps(relations, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+    atomic_write_json(relations_path, relations)
 
     return [records_path, index_path, relations_path]
 
@@ -1227,8 +1224,7 @@ def read_json(path: Path) -> dict[str, Any]:
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_write_json(path, payload)
 
 
 def hash_text(text: str) -> str:

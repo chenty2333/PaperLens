@@ -20,6 +20,7 @@ from paperlens_core.engine import PaperLensEngine
 from paperlens_core.library import read_library_records, search_library
 from paperlens_core.protocol import LibraryQuestionRequest, PaperQuestionRequest, RunRequest
 from paperlens_core.runtime import read_typed_artifact
+from paperlens_core.storage import WorkspaceStore
 from paperlens_core.version import display_version
 from paperlens_core.workflow.stages import normalize_workflow_stage
 
@@ -308,6 +309,9 @@ def public_paper_record(output_dir: Path, record: dict[str, Any], qa_map: dict[s
 
 def load_public_workspace(output_dir: Path) -> dict[str, Any]:
     output_dir = output_dir.expanduser().resolve()
+    store = WorkspaceStore(output_dir)
+    store.bootstrap(app_version=display_version())
+    storage_health = store.doctor(repair=False)
     run = read_json_file(output_dir / INTERNAL_DIR / "data" / "run.json", {}) or {}
     try:
         records = read_library_records(output_dir)
@@ -319,6 +323,7 @@ def load_public_workspace(output_dir: Path) -> dict[str, Any]:
         "output_dir": str(output_dir),
         "status": (run.get("status") if isinstance(run, dict) else None) or "unknown",
         "manifest": run.get("manifest") if isinstance(run, dict) else {},
+        "storage": storage_health,
         "papers": papers,
         "paper_count": len(papers),
     }
@@ -935,6 +940,9 @@ class PaperLensRequestHandler(BaseHTTPRequestHandler):
         if parts == ["workspaces", "current"]:
             output_dir = output_dir_from_query(query)
             return load_public_workspace(output_dir)
+        if parts == ["workspaces", "doctor"]:
+            output_dir = output_dir_from_query(query)
+            return WorkspaceStore(output_dir).doctor(repair=False)
         if parts == ["library"]:
             output_dir = output_dir_from_query(query)
             return {"workspace": load_public_workspace(output_dir)}
@@ -990,6 +998,32 @@ class PaperLensRequestHandler(BaseHTTPRequestHandler):
         if parts == ["workspaces", "open"]:
             output_dir = path_from_payload(payload, "output_dir")
             return load_public_workspace(output_dir)
+        if parts == ["workspaces", "migrate"]:
+            output_dir = path_from_payload(payload, "output_dir")
+            return WorkspaceStore(output_dir).bootstrap(app_version=display_version())
+        if parts == ["workspaces", "doctor"]:
+            output_dir = path_from_payload(payload, "output_dir")
+            return WorkspaceStore(output_dir).doctor(repair=bool(payload.get("repair", False)))
+        if parts == ["workspaces", "cleanup-cache"]:
+            output_dir = path_from_payload(payload, "output_dir")
+            return WorkspaceStore(output_dir).cleanup_cache(
+                max_age_days=int_or_default(payload.get("max_age_days"), 30),
+                dry_run=bool(payload.get("dry_run", False)),
+            )
+        if parts == ["workspaces", "export"]:
+            output_dir = path_from_payload(payload, "output_dir")
+            archive_path = path_from_payload(payload, "archive_path")
+            return WorkspaceStore(output_dir).export_archive(
+                archive_path,
+                include_cache=bool(payload.get("include_cache", False)),
+            )
+        if parts == ["workspaces", "import"]:
+            output_dir = path_from_payload(payload, "output_dir")
+            archive_path = path_from_payload(payload, "archive_path")
+            return WorkspaceStore(output_dir).import_archive(
+                archive_path,
+                replace=bool(payload.get("replace", False)),
+            )
         if parts == ["jobs", "read"]:
             return self.state.start_read_job(payload)
         if len(parts) == 3 and parts[0] == "jobs" and parts[2] in {"cancel", "pause", "resume"}:

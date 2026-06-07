@@ -16,6 +16,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--artifact-dir", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--notes", default="")
+    parser.add_argument("--notes-file", type=Path)
     return parser.parse_args()
 
 
@@ -44,9 +45,12 @@ def main() -> None:
         "signature": signature_path.read_text(encoding="utf-8").strip(),
         "url": download_url,
     }
+    notes = args.notes
+    if args.notes_file and args.notes_file.exists():
+        notes = args.notes_file.read_text(encoding="utf-8").strip()
     manifest = {
         "version": args.version,
-        "notes": args.notes or f"PaperLens {args.tag}",
+        "notes": notes or f"PaperLens {args.tag}",
         "pub_date": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "platforms": {
             "windows-x86_64": windows_asset,
