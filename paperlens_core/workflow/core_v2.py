@@ -382,12 +382,14 @@ RELATION_CANDIDATES_SCHEMA: dict[str, Any] = {
 
 GRAPH_REPORT_DRAFT_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "additionalProperties": False,
-    "required": ["artifact_type", "artifact_version", "producer", "data"],
+    "additionalProperties": True,
     "properties": {
         "artifact_type": {"type": "string", "enum": ["graph_report_draft"]},
         "artifact_version": {"type": "string"},
         "producer": {"type": "string"},
+        "schema_version": {"type": "string"},
+        "paper_id": {"type": "string"},
+        "sections": {"type": "array"},
         "data": {
             "type": "object",
             "additionalProperties": False,
@@ -753,17 +755,16 @@ def run_core_v2_report_writer(
             )
         usage = dict(getattr(raw, "usage", {}) or {})
         record_usage(stage, usage)
-        envelope = ArtifactEnvelope.model_validate(raw.data).require_type("graph_report_draft")
-        if not isinstance(envelope.data, dict):
-            raise ValueError("graph_report_draft envelope data must be an object")
-        draft = GraphReportDraft.model_validate(envelope.data)
+        draft = GraphReportDraft.model_validate(
+            graph_report_draft_payload(raw.data, paper_id=paper.paper_id)
+        )
         draft = normalize_model_report_draft(
             draft,
             graph=graph,
             paper_id=paper.paper_id,
             output_language=output_language,
         )
-        findings = audit_report_draft_against_graph(draft, graph)
+        findings = audit_report_draft_against_graph(draft, graph, dom)
         record_agent_run(
             {
                 "agent_run_id": f"core_v2_report_{paper.paper_id}",
@@ -821,6 +822,10 @@ def build_graph_report_writer_prompt(
             "artifact_type": "graph_report_draft",
             "paper_id": paper.paper_id,
             "language_rule": language_rule,
+            "json_envelope_rule": (
+                "Return the full typed artifact envelope at the top level: artifact_type, "
+                "artifact_version, producer, and data. data must contain paper_id and sections."
+            ),
             "reader_report_rule": (
                 "The markdown is the final report text for a human reader. Do not mention "
                 "ClaimGraph, PaperDOM, source_id, evidence_id, node_id, observation_id, span, "
@@ -829,23 +834,133 @@ def build_graph_report_writer_prompt(
             "grounding_rule": (
                 "Every paragraph must declare used_node_ids and used_evidence_ids in JSON. "
                 "The markdown may explain and connect facts, but must not add factual claims "
-                "beyond the labels of the declared graph nodes."
+                "beyond the labels and source summaries of the declared graph nodes."
             ),
             "shape_rule": (
-                "Use a readable paper-report structure: takeaway, problem, core claims and "
-                "contributions, method mechanism, implementation and training flow, evaluation "
-                "setup, results, and limitations when present. Core claims must explain the "
-                "problem claim, method claim, mechanism claim, novelty over prior work, and "
-                "result/application claim. Implementation must be written as near-reproducible "
-                "notes: preprocessing, module roles, feature path, losses/objectives, training "
-                "protocol, inference path, dimensions/hyperparameters/formulas when present. "
-                "Do not collapse claim, mechanism, or implementation sections into one brief "
-                "paragraph. Preserve all non-duplicative graph facts that a reader would need "
-                "to avoid opening the original paper except for quick verification."
+                "Use exactly these reader-facing sections when supported, in this order: "
+                "problem/问题与动机, principle_method/原理与方法, evaluation_setup/实验设置, "
+                "results/结果与消融, limitations/局限与边界. Do not create separate sections "
+                "for core claims, related concepts, method mechanism, or implementation details; "
+                "fold all of those facts into principle_method. The principle_method section is "
+                "the main explanation and should read like a careful paper walkthrough: start "
+                "from the core bottleneck, then explain the method step by step in execution "
+                "order. For every important step, state what method is used, what it consumes, "
+                "what operation or objective it applies, why that principle helps, and what it "
+                "passes to the next step. Use implementation facts, formulas, module names, "
+                "data flow, training objectives, and inference path inside this explanation, "
+                "not as a separate list. evaluation_setup must contain only datasets, source/"
+                "target split, metrics, baselines, and protocol; no performance claims or "
+                "ablation conclusions. results must contain performance comparisons, key "
+                "numbers, and ablations, without repeating the method walkthrough."
             ),
         },
     }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def graph_report_draft_payload(data: Any, *, paper_id: str) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        raise ValueError("graph_report_draft response must be a JSON object")
+    payload: dict[str, Any]
+    if data.get("artifact_type") == "graph_report_draft":
+        envelope = ArtifactEnvelope.model_validate(data).require_type("graph_report_draft")
+        if not isinstance(envelope.data, dict):
+            raise ValueError("graph_report_draft envelope data must be an object")
+        payload = dict(envelope.data)
+    elif isinstance(data.get("data"), dict) and isinstance(data["data"].get("sections"), list):
+        payload = dict(data["data"])
+    elif isinstance(data.get("sections"), list):
+        payload = dict(data)
+    else:
+        raise ValueError("graph_report_draft response did not contain sections")
+    payload["paper_id"] = str(payload.get("paper_id") or paper_id)
+    payload["schema_version"] = str(payload.get("schema_version") or "graph_report_draft.v2")
+    if isinstance(payload.get("sections"), dict):
+        payload["sections"] = normalize_report_sections_payload(
+            [
+                {"section_type": key, **(value if isinstance(value, dict) else {"markdown": value})}
+                for key, value in payload["sections"].items()
+            ]
+        )
+    elif isinstance(payload.get("sections"), list):
+        payload["sections"] = normalize_report_sections_payload(payload["sections"])
+    return payload
+
+
+def normalize_report_sections_payload(sections: list[Any]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for index, item in enumerate(sections, start=1):
+        if not isinstance(item, dict):
+            continue
+        raw_section_text = str(
+            item.get("section_id")
+            or item.get("section_type")
+            or item.get("title")
+            or f"section_{index:02d}"
+        )
+        section_id, title = normalize_report_section_identity(raw_section_text, index)
+        raw_paragraphs = item.get("paragraphs")
+        paragraphs: list[dict[str, Any]] = []
+        if isinstance(raw_paragraphs, list):
+            for paragraph_index, paragraph in enumerate(raw_paragraphs, start=1):
+                if not isinstance(paragraph, dict):
+                    continue
+                paragraphs.append(
+                    {
+                        "paragraph_id": str(
+                            paragraph.get("paragraph_id")
+                            or f"{section_id}_{paragraph_index:02d}"
+                        ),
+                        "markdown": str(paragraph.get("markdown") or "").strip(),
+                        "used_node_ids": list(paragraph.get("used_node_ids") or []),
+                        "used_evidence_ids": list(paragraph.get("used_evidence_ids") or []),
+                    }
+                )
+        elif item.get("markdown"):
+            paragraphs.append(
+                {
+                    "paragraph_id": f"{section_id}_01",
+                    "markdown": str(item.get("markdown") or "").strip(),
+                    "used_node_ids": list(item.get("used_node_ids") or []),
+                    "used_evidence_ids": list(item.get("used_evidence_ids") or []),
+                }
+            )
+        paragraphs = [paragraph for paragraph in paragraphs if paragraph["markdown"]]
+        if paragraphs:
+            normalized.append(
+                {
+                    "section_id": section_id,
+                    "title": title,
+                    "paragraphs": paragraphs,
+                }
+            )
+    return normalized
+
+
+def normalize_report_section_identity(raw: str, index: int) -> tuple[str, str]:
+    lowered = raw.lower()
+    if "problem" in lowered or "问题" in raw or "动机" in raw:
+        return "problem", "问题与动机"
+    if "principle" in lowered or "method" in lowered or "原理" in raw or "方法" in raw:
+        return "principle_method", "原理与方法"
+    if "evaluation_setup" in lowered or "实验设置" in raw or "评估设置" in raw:
+        return "evaluation_setup", "实验设置"
+    if "results" in lowered or "result" in lowered or "结果" in raw or "消融" in raw:
+        return "results", "结果与消融"
+    if "limitations" in lowered or "limitation" in lowered or "局限" in raw or "边界" in raw:
+        return "limitations", "局限与边界"
+    if 1 <= index <= 5:
+        section_id = ["problem", "principle_method", "evaluation_setup", "results", "limitations"][
+            index - 1
+        ]
+        return section_id, {
+            "problem": "问题与动机",
+            "principle_method": "原理与方法",
+            "evaluation_setup": "实验设置",
+            "results": "结果与消融",
+            "limitations": "局限与边界",
+        }[section_id]
+    return f"section_{index:02d}", raw or f"section_{index:02d}"
 
 
 def report_writer_graph_pack(graph: ClaimGraph, dom: PaperDOM) -> list[dict[str, Any]]:
@@ -881,7 +996,7 @@ def report_source_summary(dom: PaperDOM, source_id: str) -> dict[str, Any]:
                 "source_id": source_id,
                 "kind": span.kind,
                 "page_no": span.page_no,
-                "text": first_sentence(span.text, limit=1200),
+                "text": compact_context_text(span.text, limit=1600),
             }
     for figure in dom.figures:
         if figure.source_id == source_id:
@@ -889,7 +1004,7 @@ def report_source_summary(dom: PaperDOM, source_id: str) -> dict[str, Any]:
                 "source_id": source_id,
                 "kind": figure.kind,
                 "page_no": figure.page_no,
-                "text": first_sentence(figure.caption or "", limit=900),
+                "text": compact_context_text(figure.caption or "", limit=1100),
             }
     for table in dom.tables:
         if table.source_id == source_id:
@@ -897,7 +1012,7 @@ def report_source_summary(dom: PaperDOM, source_id: str) -> dict[str, Any]:
                 "source_id": source_id,
                 "kind": table.kind,
                 "page_no": table.page_no,
-                "text": first_sentence(table.caption or "", limit=900),
+                "text": compact_context_text(table.caption or "", limit=1100),
             }
     for equation in dom.equations:
         if equation.source_id == source_id:
@@ -905,9 +1020,16 @@ def report_source_summary(dom: PaperDOM, source_id: str) -> dict[str, Any]:
                 "source_id": source_id,
                 "kind": equation.kind,
                 "page_no": equation.page_no,
-                "text": first_sentence(equation.latex_or_text, limit=900),
+                "text": compact_context_text(equation.latex_or_text, limit=1100),
             }
     return {"source_id": source_id, "kind": "unknown", "page_no": None, "text": ""}
+
+
+def compact_context_text(text: str, *, limit: int) -> str:
+    cleaned = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[:limit].rstrip() + "..."
 
 
 def normalize_model_report_draft(
@@ -923,6 +1045,9 @@ def normalize_model_report_draft(
     known_evidence_nodes = {
         node_id for node_id, node in graph.nodes.items() if node.kind == "evidence"
     }
+    support_edges = {
+        (edge.source_id, edge.target_id) for edge in graph.edges if edge.kind == "supported_by"
+    }
     sections = []
     for section in draft.sections:
         paragraphs = []
@@ -936,6 +1061,9 @@ def normalize_model_report_draft(
                     section=section,
                     graph=graph,
                 )
+            for inferred_node_id in infer_matching_report_node_ids(paragraph.markdown, graph):
+                if inferred_node_id not in node_ids:
+                    node_ids.append(inferred_node_id)
             evidence_ids = [
                 evidence_id
                 for evidence_id in paragraph.used_evidence_ids
@@ -945,6 +1073,11 @@ def normalize_model_report_draft(
                 for evidence_id in graph.evidence_ids_for(node_id):
                     if evidence_id in known_evidence_nodes and evidence_id not in evidence_ids:
                         evidence_ids.append(evidence_id)
+            evidence_ids = [
+                evidence_id
+                for evidence_id in evidence_ids
+                if any((node_id, evidence_id) in support_edges for node_id in node_ids)
+            ]
             markdown = remove_visible_internal_ids(paragraph.markdown)
             if markdown and node_ids and evidence_ids:
                 paragraphs.append(
@@ -983,6 +1116,18 @@ def infer_report_paragraph_node_ids(
     return [node.node_id for node in candidates[:1]]
 
 
+def infer_matching_report_node_ids(markdown: str, graph: ClaimGraph) -> list[str]:
+    matched: list[str] = []
+    for node in graph.nodes.values():
+        if node.kind == "evidence":
+            continue
+        if text_overlaps_any_reference(markdown, [node.label]):
+            matched.append(node.node_id)
+        if len(matched) >= 40:
+            break
+    return matched
+
+
 def report_section_fact_kind(section: Any) -> str | None:
     section_id = str(getattr(section, "section_id", "") or "").lower()
     title = str(getattr(section, "title", "") or "").lower()
@@ -993,9 +1138,11 @@ def report_section_fact_kind(section: Any) -> str | None:
         "claims": "claim",
         "takeaway": "claim",
         "summary": "claim",
+        "principle_method": "mechanism",
         "method": "mechanism",
         "mechanism": "mechanism",
         "implementation": "implementation",
+        "evaluation_setup": "evaluation",
         "evaluation": "evaluation",
         "experiment": "evaluation",
         "results": "result",
@@ -1012,6 +1159,7 @@ def report_section_fact_kind(section: Any) -> str | None:
         ("动机", "problem"),
         ("主张", "claim"),
         ("贡献", "claim"),
+        ("原理", "mechanism"),
         ("方法", "mechanism"),
         ("机制", "mechanism"),
         ("实现", "implementation"),
@@ -1460,7 +1608,7 @@ def build_core_v2_derived_views(
             paper_id=claim_graph.paper_id,
             output_language=output_language,
         )
-    report_audit_findings = audit_report_draft_against_graph(report_draft, claim_graph)
+    report_audit_findings = audit_report_draft_against_graph(report_draft, claim_graph, dom)
     all_findings = [*audit_findings, *report_audit_findings]
     quality_metrics = compute_core_quality_metrics(
         dom=dom,
@@ -1572,6 +1720,8 @@ def bootstrap_covered_outputs(
         ReadingTaskType.CLAIM_INVENTORY,
         ReadingTaskType.METHOD_MECHANISM,
         ReadingTaskType.IMPLEMENTATION_PATH,
+        ReadingTaskType.EVALUATION_SETUP,
+        ReadingTaskType.RESULT_EXTRACTION,
     }:
         return list(task.required_outputs)
     return [observation_type.value] if observation_type.value in task.required_outputs else []
@@ -1796,15 +1946,15 @@ def observation_task_instruction(
         )
     if task_type == ReadingTaskType.EVALUATION_SETUP:
         return (
-            "只写实验设置事实：数据集、源域/目标域、指标、基线、训练/测试协议；不要写泛泛方法摘要。"
+            "只写实验设置事实，覆盖 datasets、source_target_protocol、metrics、baselines、training_testing_protocol：数据集、源域/目标域划分、指标、基线、训练/测试协议。禁止写性能提升、结果数值、消融结论或泛泛方法摘要；如果证据句混合了设置和结果，只抽取设置部分。"
             if zh
-            else "Only write evaluation setup facts: datasets, source/target domains, metrics, baselines, and protocol; do not summarize the method."
+            else "Only write evaluation setup facts, covering datasets, source_target_protocol, metrics, baselines, and training_testing_protocol. Include datasets, source/target split, metrics, baselines, and train/test protocol. Do not write performance improvements, result numbers, ablation conclusions, or generic method summaries; if a source sentence mixes setup and results, extract only the setup."
         )
     if task_type == ReadingTaskType.RESULT_EXTRACTION:
         return (
-            "只写实验结果、表格结论、消融结论或关键数值；不要把方法动机、模块列表、摘要内容当成结果。"
+            "只写实验结果，覆盖 main_results、comparisons、ablations、numeric_findings：主结果、与基线的比较、消融结论、关键数值。不要重复实验设置，不要把方法动机、模块列表、摘要内容当成结果。"
             if zh
-            else "Only write experimental results, table conclusions, ablations, or key numbers; do not restate method motivation or module lists."
+            else "Only write experimental results, covering main_results, comparisons, ablations, and numeric_findings. Include main results, baseline comparisons, ablation conclusions, and key numbers. Do not repeat evaluation setup, and do not treat method motivation, module lists, or abstract text as results."
         )
     if task_type == ReadingTaskType.LIMITATIONS:
         return (
@@ -1995,6 +2145,10 @@ def infer_covered_outputs_from_type(observation_type: str, task: ReadingTask) ->
     if task.task_type == ReadingTaskType.METHOD_MECHANISM and observation_type == "mechanism":
         return list(task.required_outputs)
     if task.task_type == ReadingTaskType.IMPLEMENTATION_PATH and observation_type == "implementation":
+        return list(task.required_outputs)
+    if task.task_type == ReadingTaskType.EVALUATION_SETUP and observation_type == "evaluation":
+        return list(task.required_outputs)
+    if task.task_type == ReadingTaskType.RESULT_EXTRACTION and observation_type == "result":
         return list(task.required_outputs)
     return [observation_type] if observation_type in task.required_outputs else []
 

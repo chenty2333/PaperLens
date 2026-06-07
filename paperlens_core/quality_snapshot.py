@@ -95,7 +95,7 @@ def build_paper_quality_snapshot(
     current_report_available = graph is not None and report_draft_model is not None
     current_report_findings: list[AuditFinding] = []
     if current_report_available:
-        current_report_findings = audit_report_draft_against_graph(report_draft_model, graph)
+        current_report_findings = audit_report_draft_against_graph(report_draft_model, graph, dom)
     current_findings_available = current_audit_available or current_report_available
     current_findings = [*current_audit_findings, *current_report_findings]
     current_audit_rows = (

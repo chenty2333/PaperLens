@@ -37,14 +37,27 @@ class GraphReportDraft(BaseModel):
 
 SECTION_TITLES = {
     "problem": {"zh": "问题与动机", "en": "Problem"},
+    "principle_method": {"zh": "原理与方法", "en": "Principle and Method"},
+    "evaluation_setup": {"zh": "实验设置", "en": "Evaluation Setup"},
+    "results": {"zh": "结果与消融", "en": "Results and Ablations"},
+    "limitations": {"zh": "局限与边界", "en": "Limitations"},
+    # Legacy section ids are accepted so older drafts can still be rendered safely.
     "claim": {"zh": "核心主张与贡献", "en": "Claims and Contributions"},
     "mechanism": {"zh": "方法机制", "en": "Mechanism"},
     "implementation": {"zh": "实现细节与训练流程", "en": "Implementation and Training"},
     "evaluation": {"zh": "实验设置", "en": "Evaluation Setup"},
     "result": {"zh": "结果与结论", "en": "Results"},
-    "limitation": {"zh": "限制与边界", "en": "Limitations"},
+    "limitation": {"zh": "局限与边界", "en": "Limitations"},
     "concept": {"zh": "相关概念", "en": "Concept Bridge"},
 }
+READER_SECTION_ORDER = (
+    "problem",
+    "principle_method",
+    "evaluation_setup",
+    "results",
+    "limitations",
+)
+PRINCIPLE_METHOD_KINDS = {"claim", "mechanism", "implementation", "concept"}
 
 NUMBER_TEXT_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_])[-+]?(?:\d[\d,]*(?:\.\d+)?|\.\d+)(?:\s?%|[A-Za-z]{1,6})?"
@@ -67,12 +80,57 @@ READER_HOSTILE_PHRASES = (
 )
 
 
+def fallback_node_belongs_to_results(section_id: str, text: str) -> bool:
+    return section_id == "evaluation_setup" and looks_like_result_or_ablation(text)
+
+
+def looks_like_result_or_ablation(text: str) -> bool:
+    lowered = str(text or "").lower()
+    if re.search(r"(?:srocc|plcc|rmse|krocc).{0,16}(?:为|达到|=|\d)", lowered):
+        return True
+    return any(
+        marker in lowered
+        for marker in (
+            "ablation",
+            "outperform",
+            "improvement",
+            "srocc 为",
+            "plcc 为",
+            "rmse 为",
+            "krocc 为",
+            "提升",
+            "优于",
+            "超过",
+            "下降",
+            "消融",
+        )
+    )
+
+
 def build_report_draft_from_graph(
     graph: ClaimGraph, *, max_nodes_per_kind: int = 12, output_language: str = "zh"
 ) -> GraphReportDraft:
     sections: list[ReportSection] = []
-    for kind, titles in SECTION_TITLES.items():
-        nodes = [node for node in graph.nodes.values() if node.kind == kind][:max_nodes_per_kind]
+    for section_id, kinds in {
+        "problem": {"problem"},
+        "principle_method": PRINCIPLE_METHOD_KINDS,
+        "evaluation_setup": {"evaluation"},
+        "results": {"result"},
+        "limitations": {"limitation"},
+    }.items():
+        titles = SECTION_TITLES[section_id]
+        nodes = [
+            node
+            for node in graph.nodes.values()
+            if node.kind in kinds and not fallback_node_belongs_to_results(section_id, node.label)
+        ][:max_nodes_per_kind]
+        if section_id == "results":
+            nodes.extend(
+                node
+                for node in graph.nodes.values()
+                if node.kind == "evaluation" and looks_like_result_or_ablation(node.label)
+            )
+            nodes = nodes[:max_nodes_per_kind]
         if not nodes:
             continue
         paragraphs = []
@@ -80,7 +138,7 @@ def build_report_draft_from_graph(
             evidence_ids = graph.evidence_ids_for(node.node_id)
             paragraphs.append(
                 ReportParagraph(
-                    paragraph_id=f"{kind}_{index:02d}",
+                    paragraph_id=f"{section_id}_{index:02d}",
                     markdown=node.label,
                     used_node_ids=[node.node_id],
                     used_evidence_ids=evidence_ids,
@@ -88,8 +146,8 @@ def build_report_draft_from_graph(
             )
         sections.append(
             ReportSection(
-                section_id=kind,
-                title=localized_section_title(kind, titles, output_language=output_language),
+                section_id=section_id,
+                title=localized_section_title(section_id, titles, output_language=output_language),
                 paragraphs=paragraphs,
             )
         )
@@ -99,6 +157,7 @@ def build_report_draft_from_graph(
 def audit_report_draft_against_graph(
     draft: GraphReportDraft,
     graph: ClaimGraph,
+    dom: PaperDOM | None = None,
 ) -> list[AuditFinding]:
     findings: list[AuditFinding] = []
     if draft.paper_id != graph.paper_id:
@@ -169,6 +228,9 @@ def audit_report_draft_against_graph(
                 graph=graph,
                 evidence_ids=known_evidence_ids,
             )
+            declared_source_texts = (
+                report_source_texts(dom, known_source_ids) if dom is not None else []
+            )
             if known_evidence_ids and not known_source_ids:
                 findings.append(
                     AuditFinding(
@@ -202,7 +264,10 @@ def audit_report_draft_against_graph(
                     )
             paragraph_overlaps_any_node = bool(known_node_ids) and text_overlaps_any_reference(
                 paragraph.markdown,
-                [graph.nodes[node_id].label for node_id in known_node_ids],
+                [
+                    *[graph.nodes[node_id].label for node_id in known_node_ids],
+                    *declared_source_texts,
+                ],
             )
             if known_node_ids and not paragraph_overlaps_any_node:
                 findings.append(
@@ -236,7 +301,10 @@ def audit_report_draft_against_graph(
                             node_id=node_id,
                         )
                     )
-            declared_node_texts = [graph.nodes[node_id].label for node_id in known_node_ids]
+            declared_node_texts = [
+                *[graph.nodes[node_id].label for node_id in known_node_ids],
+                *declared_source_texts,
+            ]
             if paragraph_overlaps_any_node:
                 for number_text in number_texts(paragraph.markdown):
                     if declared_node_texts and not any(
@@ -251,10 +319,10 @@ def audit_report_draft_against_graph(
                                     f"{normalized_number_text(number_text)}"
                                 ),
                                 severity=AuditSeverity.ERROR,
-                                code="report_paragraph_number_not_grounded_in_declared_nodes",
+                                code="report_paragraph_number_not_grounded_in_declared_evidence",
                                 message=(
                                     "Report paragraph includes a numeric value that is not present "
-                                    "in its declared ClaimGraph node labels"
+                                    "in its declared ClaimGraph node labels or evidence sources"
                                 ),
                                 node_id=known_node_ids[0] if known_node_ids else None,
                                 source_ids=known_source_ids,
@@ -289,6 +357,24 @@ def evidence_source_ids(graph: ClaimGraph, evidence_id: str) -> list[str]:
     return [source_id] if source_id else []
 
 
+def report_source_texts(dom: PaperDOM, source_ids: list[str]) -> list[str]:
+    texts: list[str] = []
+    source_id_set = set(source_ids)
+    for span in dom.spans:
+        if span.source_id in source_id_set and span.text:
+            texts.append(span.text)
+    for figure in dom.figures:
+        if figure.source_id in source_id_set and figure.caption:
+            texts.append(figure.caption)
+    for table in dom.tables:
+        if table.source_id in source_id_set and table.caption:
+            texts.append(table.caption)
+    for equation in dom.equations:
+        if equation.source_id in source_id_set and equation.latex_or_text:
+            texts.append(equation.latex_or_text)
+    return texts
+
+
 def render_graph_report_markdown(
     *,
     title: str,
@@ -300,6 +386,7 @@ def render_graph_report_markdown(
 ) -> str:
     quality = quality or {}
     output_language = "en" if output_language == "en" else "zh"
+    draft = coerce_reader_report_draft(draft, output_language=output_language)
     display_title = reader_display_title(title=title, draft=draft, dom=dom)
     lines = [
         f"# {display_title}",
@@ -338,6 +425,105 @@ def render_graph_report_markdown(
         label = "Trust boundary" if output_language == "en" else "可信边界"
         lines.extend([f"{label}：{boundary}", ""])
     return "\n".join(lines).rstrip() + "\n"
+
+
+def coerce_reader_report_draft(
+    draft: GraphReportDraft,
+    *,
+    output_language: str,
+) -> GraphReportDraft:
+    buckets: dict[str, list[ReportParagraph]] = {section_id: [] for section_id in READER_SECTION_ORDER}
+    for section_index, section in enumerate(draft.sections):
+        default_bucket = reader_section_bucket(section) or positional_reader_section_bucket(
+            section, section_index
+        )
+        for paragraph in section.paragraphs:
+            bucket = default_bucket
+            text = paragraph.markdown
+            if bucket == "principle_method" and is_detached_concept_note(text):
+                continue
+            if bucket in buckets:
+                buckets[bucket].append(paragraph)
+
+    sections: list[ReportSection] = []
+    for section_id in READER_SECTION_ORDER:
+        paragraphs = buckets.get(section_id) or []
+        if not paragraphs:
+            continue
+        paragraphs = [
+            paragraph.model_copy(update={"paragraph_id": f"{section_id}_{index:02d}"})
+            for index, paragraph in enumerate(paragraphs, start=1)
+        ]
+        sections.append(
+            ReportSection(
+                section_id=section_id,
+                title=localized_section_title(
+                    section_id,
+                    SECTION_TITLES[section_id],
+                    output_language=output_language,
+                ),
+                paragraphs=paragraphs,
+            )
+        )
+    return draft.model_copy(update={"sections": sections or draft.sections})
+
+
+def positional_reader_section_bucket(section: ReportSection, section_index: int) -> str | None:
+    text = f"{section.section_id} {section.title}".strip().lower()
+    if re.fullmatch(r"(?:section[_ -]?)?\d+", section.section_id.strip().lower()) or re.fullmatch(
+        r"(?:section[_ -]?)?\d+", section.title.strip().lower()
+    ):
+        if 0 <= section_index < len(READER_SECTION_ORDER):
+            return READER_SECTION_ORDER[section_index]
+    if text in {"section_01 section_01", "section 01 section 01"}:
+        return "problem"
+    return None
+
+
+def reader_section_bucket(section: ReportSection) -> str | None:
+    section_id = section.section_id.lower().strip()
+    title = section.title.lower().strip()
+    if section_id in {"problem", "motivation"} or "问题" in title or "动机" in title:
+        return "problem"
+    if section_id in {
+        "claim",
+        "claims",
+        "mechanism",
+        "method",
+        "methodology",
+        "implementation",
+        "concept",
+        "concept_bridge",
+        "principle_method",
+    }:
+        return "principle_method"
+    if any(marker in title for marker in ("主张", "贡献", "机制", "方法", "实现", "概念", "原理")):
+        return "principle_method"
+    if section_id in {"evaluation", "evaluation_setup", "experiment", "experiments"}:
+        return "evaluation_setup"
+    if any(marker in title for marker in ("实验设置", "评估设置")):
+        return "evaluation_setup"
+    if section_id in {"result", "results"}:
+        return "results"
+    if any(marker in title for marker in ("结果", "消融", "结论")):
+        return "results"
+    if section_id in {"limitation", "limitations"}:
+        return "limitations"
+    if any(marker in title for marker in ("限制", "局限", "边界")):
+        return "limitations"
+    return None
+
+
+def is_detached_concept_note(text: str) -> bool:
+    stripped = str(text or "").strip()
+    if not stripped:
+        return True
+    concept_only_markers = ("其核心概念是", "相关概念", "读懂论文必须掌握")
+    if any(marker in stripped for marker in concept_only_markers) and not any(
+        marker in stripped for marker in ("具体实现", "该模块", "该方法", "通过", "因此")
+    ):
+        return True
+    return False
 
 
 def localized_section_title(
@@ -415,7 +601,7 @@ def review_status_label(status: str, *, output_language: str) -> str:
 
 
 def report_anchor(draft: GraphReportDraft, *, output_language: str) -> str:
-    priority = ["problem", "claim", "mechanism"]
+    priority = ["problem", "principle_method", "claim", "mechanism"]
     selected: list[str] = []
     for section_id in priority:
         for section in draft.sections:

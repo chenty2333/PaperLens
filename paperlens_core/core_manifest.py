@@ -230,7 +230,7 @@ def current_core_v2_findings(root: Path) -> list[AuditFinding]:
         ),
         *audit_claim_graph(graph, dom),
         *audit_reading_required_outputs(graph, reading_plan),
-        *audit_report_draft_against_graph(report_draft, graph),
+        *audit_report_draft_against_graph(report_draft, graph, dom),
         *(audit_relation_candidates(relation_log, observation_ids) if relation_log else []),
     ]
 
