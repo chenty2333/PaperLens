@@ -107,6 +107,12 @@ npm run core:build
 npm run tauri:build
 ```
 
+Build a portable Windows folder and zip:
+
+```powershell
+npm run portable:build
+```
+
 Bump and synchronize all release versions from one command:
 
 ```powershell
@@ -121,17 +127,26 @@ The installer is written to:
 src-tauri/target/release/bundle/nsis/
 ```
 
+The portable package is written to:
+
+```text
+build/PaperLens/
+build/PaperLens-<version>-windows-x64-portable.zip
+build/PaperLens-<version>-windows-x64-portable.zip.sha256
+build/PaperLens-<version>-windows-x64-portable.json
+```
+
 ## CI
 
 The Windows installer workflow lives at [.github/workflows/windows-installer.yml](.github/workflows/windows-installer.yml).
 
 It runs:
 
+- Linux preflight checks for synchronized versions, Python lint, frontend lint, and frontend build;
 - committed-secret guard;
-- Python lint;
-- frontend lint/build;
 - Python sidecar build;
 - Tauri NSIS installer build;
+- portable Windows zip packaging;
 - installer artifact upload;
 - GitHub Release publish when a `v*` tag is pushed, when `main` changes `package.json` version, or when manually dispatched with `publish_release=true`;
 - signed updater metadata publish when updater signing secrets are configured.
@@ -144,7 +159,7 @@ Automatic in-app updates are enabled only for signed release builds. Configure t
 - `TAURI_SIGNING_PRIVATE_KEY`: private signing key used only inside GitHub Actions.
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: optional signing key password.
 
-The workflow publishes the NSIS installer, its signature, and `latest.json` to the GitHub Release. By default the app checks `https://github.com/<owner>/<repo>/releases/latest/download/latest.json`; override that with the `PAPERLENS_UPDATER_ENDPOINT` repository variable if needed.
+The workflow publishes the NSIS installer, portable zip, portable hash/metadata, installer signature, and `latest.json` to the GitHub Release. By default the app checks `https://github.com/<owner>/<repo>/releases/latest/download/latest.json`; override that with the `PAPERLENS_UPDATER_ENDPOINT` repository variable if needed.
 
 ## Security And Privacy Defaults
 

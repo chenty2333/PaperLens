@@ -108,6 +108,12 @@ npm run core:build
 npm run tauri:build
 ```
 
+构建 Windows 绿色版目录和 zip：
+
+```powershell
+npm run portable:build
+```
+
 一次性推进并同步所有发布版本号：
 
 ```powershell
@@ -122,17 +128,26 @@ npm run version:patch
 src-tauri/target/release/bundle/nsis/
 ```
 
+绿色版输出到：
+
+```text
+build/PaperLens/
+build/PaperLens-<version>-windows-x64-portable.zip
+build/PaperLens-<version>-windows-x64-portable.zip.sha256
+build/PaperLens-<version>-windows-x64-portable.json
+```
+
 ## CI
 
 Windows 安装包 workflow 在 [.github/workflows/windows-installer.yml](.github/workflows/windows-installer.yml)。
 
 它会执行：
 
+- Linux preflight：版本同步检查、Python lint、前端 lint、前端 build；
 - 已提交密钥扫描；
-- Python lint；
-- 前端 lint/build；
 - Python sidecar 构建；
 - Tauri NSIS 安装包构建；
+- Windows 绿色版 zip 打包；
 - 安装包 artifact 上传；
 - 推送 `v*` tag、`main` 上 `package.json` 版本号变化，或手动运行并选择 `publish_release=true` 时发布 GitHub Release；
 - 配置 updater 签名 secret 后，同时发布应用内自动升级所需的签名元数据。
@@ -145,7 +160,7 @@ CI 不需要模型 API key。
 - `TAURI_SIGNING_PRIVATE_KEY`：只在 GitHub Actions 中使用的私钥；
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`：可选的私钥密码。
 
-workflow 会把 NSIS 安装包、签名文件和 `latest.json` 一起上传到 GitHub Release。默认检查地址是 `https://github.com/<owner>/<repo>/releases/latest/download/latest.json`；如需使用自己的更新源，可以设置 repository variable `PAPERLENS_UPDATER_ENDPOINT`。
+workflow 会把 NSIS 安装包、绿色版 zip、绿色版 hash/metadata、签名文件和 `latest.json` 一起上传到 GitHub Release。默认检查地址是 `https://github.com/<owner>/<repo>/releases/latest/download/latest.json`；如需使用自己的更新源，可以设置 repository variable `PAPERLENS_UPDATER_ENDPOINT`。
 
 ## 安全和隐私默认值
 

@@ -26,8 +26,45 @@ permissions:
   contents: read
 
 jobs:
+  preflight:
+    name: Preflight checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip uv
+          npm ci
+
+      - name: Check synchronized versions
+        run: npm run version:check
+
+      - name: Python lint
+        run: uv run --extra dev ruff check .
+
+      - name: Frontend lint and build
+        run: |
+          npm run lint
+          npm run build
+
   build-windows:
     name: Build PaperLens Windows installer
+    needs: preflight
     runs-on: windows-2025-vs2026
     permissions:
       contents: read
@@ -193,17 +230,6 @@ jobs:
             throw "Potential secret or private key found in tracked files."
           }
 
-      - name: Python checks
-        shell: pwsh
-        run: |
-          uv run --extra dev ruff check .
-
-      - name: Frontend checks
-        shell: pwsh
-        run: |
-          npm run lint
-          npm run build
-
       - name: Build PaperLens Core sidecar
         shell: pwsh
         run: npm run core:build
@@ -239,6 +265,10 @@ jobs:
             "Updater signature: $($signature.FullName)"
           }
 
+      - name: Build portable zip
+        shell: pwsh
+        run: .\scripts\build_windows_portable.ps1 -SkipInstall -SkipBuild
+
       - name: Generate updater manifest
         shell: pwsh
         run: |
@@ -257,11 +287,15 @@ jobs:
             --output "$artifactDir/latest.json" `
             --notes "PaperLens ${{ steps.release-meta.outputs.release_tag }}"
 
-      - name: Upload installer artifact
+      - name: Upload Windows release artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: PaperLens-Windows-NSIS
-          path: src-tauri/target/release/bundle/nsis/*
+          name: PaperLens-Windows-Release
+          path: |
+            src-tauri/target/release/bundle/nsis/*
+            build/PaperLens-*-windows-x64-portable.zip
+            build/PaperLens-*-windows-x64-portable.zip.sha256
+            build/PaperLens-*-windows-x64-portable.json
           if-no-files-found: error
           retention-days: 14
 
@@ -279,10 +313,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Download installer artifact
+      - name: Download Windows release artifacts
         uses: actions/download-artifact@v7
         with:
-          name: PaperLens-Windows-NSIS
+          name: PaperLens-Windows-Release
           path: release
 
       - name: Publish GitHub release
@@ -294,7 +328,7 @@ jobs:
           tag="${{ needs.build-windows.outputs.release_tag }}"
           repo="${GITHUB_REPOSITORY:?}"
           installer="$(find release -maxdepth 1 -name '*.exe' -print -quit)"
-          mapfile -t assets < <(find release -maxdepth 1 -type f \( -name '*.exe' -o -name '*.sig' -o -name 'latest.json' \) | sort)
+          mapfile -t assets < <(find release -maxdepth 1 -type f \( -name '*.exe' -o -name '*.sig' -o -name 'latest.json' -o -name '*.zip' -o -name '*.sha256' -o -name '*.json' \) | sort)
           if [ -z "$installer" ]; then
             echo "No installer found in artifact."
             exit 1

@@ -1,6 +1,6 @@
 [project]
 name = "paperlens-core"
-version = "0.1.4"
+version = "0.1.5"
 description = "Python core engine and sidecar for PaperLens."
 requires-python = ">=3.12,<3.15"
 license = "Unlicense"

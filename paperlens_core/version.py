@@ -4,6 +4,8 @@ import re
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
+from paperlens_core._version import __version__ as BUNDLED_VERSION
+
 
 PACKAGE_NAME = "paperlens-core"
 
@@ -12,7 +14,7 @@ def core_version() -> str:
     try:
         return version(PACKAGE_NAME)
     except PackageNotFoundError:
-        return source_tree_version() or "0.0.0"
+        return BUNDLED_VERSION or source_tree_version() or "0.0.0"
 
 
 def display_version() -> str:

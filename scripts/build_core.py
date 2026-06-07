@@ -16,6 +16,7 @@ def host_tuple() -> str:
 
 def main() -> int:
     BINARIES.mkdir(parents=True, exist_ok=True)
+    (ROOT / "build").mkdir(parents=True, exist_ok=True)
     subprocess.check_call(
         [
             sys.executable,
@@ -23,6 +24,8 @@ def main() -> int:
             "PyInstaller",
             "--clean",
             "--noconfirm",
+            "--specpath",
+            str(ROOT / "build"),
             "--onefile",
             "--name",
             "paperlens-core",
@@ -45,7 +48,13 @@ def main() -> int:
     suffix = ".exe" if sys.platform == "win32" else ""
     source = ROOT / "dist" / f"paperlens-core{suffix}"
     target = BINARIES / f"paperlens-core-{host_tuple()}{suffix}"
+    if not source.exists():
+        raise SystemExit(f"PyInstaller did not produce {source}")
+    if source.stat().st_size < 1_048_576:
+        raise SystemExit(f"PyInstaller output is unexpectedly small: {source}")
     shutil.copy2(source, target)
+    if target.stat().st_size < 1_048_576:
+        raise SystemExit(f"Sidecar copy is unexpectedly small: {target}")
     print(target)
     return 0
 

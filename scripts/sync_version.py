@@ -10,12 +10,16 @@ from typing import Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
+SEMVER_PARTS_RE = re.compile(
+    r"^(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)(?P<suffix>[-+][0-9A-Za-z.-]+)?$"
+)
 
 
 VERSION_FILES = {
     "package_json": ROOT / "package.json",
     "package_lock": ROOT / "package-lock.json",
     "pyproject": ROOT / "pyproject.toml",
+    "core_version": ROOT / "paperlens_core" / "_version.py",
     "uv_lock": ROOT / "uv.lock",
     "tauri_conf": ROOT / "src-tauri" / "tauri.conf.json",
     "cargo_toml": ROOT / "src-tauri" / "Cargo.toml",
@@ -32,7 +36,13 @@ def main(argv: list[str] | None = None) -> int:
     subparsers.add_parser("check", help="Fail if any PaperLens version field is out of sync")
     subparsers.add_parser("sync", help="Rewrite all PaperLens version fields from package.json")
     bump = subparsers.add_parser("bump", help="Bump package.json and sync all derived versions")
-    bump.add_argument("part", choices=["patch", "minor", "major"], help="Version segment to bump")
+    bump.add_argument(
+        "part",
+        choices=["patch", "minor", "major"],
+        default="patch",
+        nargs="?",
+        help="Version segment to bump; defaults to patch",
+    )
     args = parser.parse_args(argv)
 
     if args.command == "check":
@@ -65,6 +75,7 @@ def sync_versions(version: str) -> int:
     write_package_json(version)
     write_package_lock(version)
     replace_project_version(VERSION_FILES["pyproject"], version)
+    replace_python_version_constant(VERSION_FILES["core_version"], version)
     replace_lock_package_version(VERSION_FILES["uv_lock"], "paperlens-core", version)
     write_tauri_conf(version)
     replace_project_version(VERSION_FILES["cargo_toml"], version)
@@ -83,6 +94,9 @@ def collect_versions() -> dict[str, str]:
         "package-lock.json": string_value(package_lock.get("version")),
         "package-lock packages.root": string_value(root_lock.get("version")),
         "pyproject.toml": read_project_version(VERSION_FILES["pyproject"]),
+        "paperlens_core/_version.py": read_python_version_constant(
+            VERSION_FILES["core_version"]
+        ),
         "uv.lock paperlens-core": read_lock_package_version(
             VERSION_FILES["uv_lock"], "paperlens-core"
         ),
@@ -102,7 +116,12 @@ def read_package_version() -> str:
 
 def bumped_version(version: str, part: str) -> str:
     validate_version(version)
-    major, minor, patch = [int(item) for item in version.split(".")]
+    match = SEMVER_PARTS_RE.fullmatch(version)
+    if not match:
+        raise SystemExit(f"Unsupported PaperLens version: {version!r}")
+    major = int(match.group("major"))
+    minor = int(match.group("minor"))
+    patch = int(match.group("patch"))
     if part == "major":
         return f"{major + 1}.0.0"
     if part == "minor":
@@ -154,6 +173,22 @@ def replace_project_version(path: Path, version: str) -> None:
         path,
         r'(?m)^version\s*=\s*"([^"]+)"',
         lambda _match: f'version = "{version}"',
+    )
+
+
+def read_python_version_constant(path: Path) -> str:
+    match = re.search(
+        r'(?m)^__version__\s*=\s*"([^"]+)"',
+        path.read_text(encoding="utf-8"),
+    )
+    return match.group(1) if match else ""
+
+
+def replace_python_version_constant(path: Path, version: str) -> None:
+    replace_once(
+        path,
+        r'(?m)^__version__\s*=\s*"([^"]+)"',
+        lambda _match: f'__version__ = "{version}"',
     )
 
 

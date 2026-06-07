@@ -1,7 +1,7 @@
 {
   "name": "paperlens",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.5",
   "license": "Unlicense",
   "type": "module",
   "scripts": {
@@ -20,7 +20,9 @@
     "version:minor": "uv run python scripts/sync_version.py bump minor",
     "version:major": "uv run python scripts/sync_version.py bump major",
     "core:version": "uv run python -m paperlens_core.main version",
-    "core:build": "uv run --extra build python scripts/build_core.py"
+    "core:build": "uv run --extra build python scripts/build_core.py",
+    "portable:build": "powershell -ExecutionPolicy Bypass -File scripts/build_windows_portable.ps1",
+    "release:prepare": "npm run version:check && npm run lint && uv run --extra dev ruff check . && npm run build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.1",
