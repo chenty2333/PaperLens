@@ -137,6 +137,8 @@ def validate_paperlens_output(
         "你给到",
         "供给的片段",
         "供给的图示",
+        "证据包",
+        "evidence pack",
         "提供的页面",
         "提供的材料",
         "提供的证据",

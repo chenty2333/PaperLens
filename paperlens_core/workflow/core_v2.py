@@ -276,7 +276,7 @@ OBSERVATION_CARDS_SCHEMA: dict[str, Any] = {
             "properties": {
                 "cards": {
                     "type": "array",
-                    "maxItems": 8,
+                    "maxItems": 16,
                     "items": {
                         "type": "object",
                         "additionalProperties": False,
@@ -409,7 +409,7 @@ GRAPH_REPORT_DRAFT_SCHEMA: dict[str, Any] = {
                             "paragraphs": {
                                 "type": "array",
                                 "minItems": 1,
-                                "maxItems": 4,
+                                "maxItems": 16,
                                 "items": {
                                     "type": "object",
                                     "additionalProperties": False,
@@ -749,7 +749,7 @@ def run_core_v2_report_writer(
                 ),
                 schema_name="paperlens_core_v2_graph_report_draft",
                 schema=GRAPH_REPORT_DRAFT_SCHEMA,
-                max_tokens=12000,
+                max_tokens=16000,
             )
         usage = dict(getattr(raw, "usage", {}) or {})
         record_usage(stage, usage)
@@ -832,8 +832,16 @@ def build_graph_report_writer_prompt(
                 "beyond the labels of the declared graph nodes."
             ),
             "shape_rule": (
-                "Use a readable paper-report structure: takeaway, problem, method mechanism, "
-                "implementation details, evaluation setup, results, and limitations when present."
+                "Use a readable paper-report structure: takeaway, problem, core claims and "
+                "contributions, method mechanism, implementation and training flow, evaluation "
+                "setup, results, and limitations when present. Core claims must explain the "
+                "problem claim, method claim, mechanism claim, novelty over prior work, and "
+                "result/application claim. Implementation must be written as near-reproducible "
+                "notes: preprocessing, module roles, feature path, losses/objectives, training "
+                "protocol, inference path, dimensions/hyperparameters/formulas when present. "
+                "Do not collapse claim, mechanism, or implementation sections into one brief "
+                "paragraph. Preserve all non-duplicative graph facts that a reader would need "
+                "to avoid opening the original paper except for quick verification."
             ),
         },
     }
@@ -858,7 +866,7 @@ def report_writer_graph_pack(graph: ClaimGraph, dom: PaperDOM) -> list[dict[str,
                 "kind": node.kind,
                 "label": node.label,
                 "evidence_ids": evidence_ids,
-                "sources": [report_source_summary(dom, source_id) for source_id in source_ids[:3]],
+                "sources": [report_source_summary(dom, source_id) for source_id in source_ids[:5]],
                 "confidence": node.payload.get("confidence"),
                 "uncertainty": node.payload.get("uncertainty"),
             }
@@ -873,7 +881,7 @@ def report_source_summary(dom: PaperDOM, source_id: str) -> dict[str, Any]:
                 "source_id": source_id,
                 "kind": span.kind,
                 "page_no": span.page_no,
-                "text": first_sentence(span.text, limit=900),
+                "text": first_sentence(span.text, limit=1200),
             }
     for figure in dom.figures:
         if figure.source_id == source_id:
@@ -881,7 +889,7 @@ def report_source_summary(dom: PaperDOM, source_id: str) -> dict[str, Any]:
                 "source_id": source_id,
                 "kind": figure.kind,
                 "page_no": figure.page_no,
-                "text": first_sentence(figure.caption or "", limit=700),
+                "text": first_sentence(figure.caption or "", limit=900),
             }
     for table in dom.tables:
         if table.source_id == source_id:
@@ -889,7 +897,7 @@ def report_source_summary(dom: PaperDOM, source_id: str) -> dict[str, Any]:
                 "source_id": source_id,
                 "kind": table.kind,
                 "page_no": table.page_no,
-                "text": first_sentence(table.caption or "", limit=700),
+                "text": first_sentence(table.caption or "", limit=900),
             }
     for equation in dom.equations:
         if equation.source_id == source_id:
@@ -897,7 +905,7 @@ def report_source_summary(dom: PaperDOM, source_id: str) -> dict[str, Any]:
                 "source_id": source_id,
                 "kind": equation.kind,
                 "page_no": equation.page_no,
-                "text": first_sentence(equation.latex_or_text, limit=700),
+                "text": first_sentence(equation.latex_or_text, limit=900),
             }
     return {"source_id": source_id, "kind": "unknown", "page_no": None, "text": ""}
 
@@ -1560,6 +1568,12 @@ def bootstrap_covered_outputs(
 ) -> list[str]:
     if task.task_type == ReadingTaskType.ORIENTATION and observation_type == ObservationType.PROBLEM:
         return list(task.required_outputs)
+    if task.task_type in {
+        ReadingTaskType.CLAIM_INVENTORY,
+        ReadingTaskType.METHOD_MECHANISM,
+        ReadingTaskType.IMPLEMENTATION_PATH,
+    }:
+        return list(task.required_outputs)
     return [observation_type.value] if observation_type.value in task.required_outputs else []
 
 
@@ -1740,7 +1754,10 @@ def build_observation_task_prompt(
                 "reader-grade paper facts, not phrases like 'evidence shows', 'I saw', or "
                 "task labels. For each card, evidence_quotes must contain 1-3 short exact "
                 "substrings copied from the cited sources, preserving original technical terms, "
-                "dataset names, metric names, and numeric values when present."
+                "dataset names, metric names, and numeric values when present. For claim, "
+                "mechanism, and implementation tasks, prefer complete lossless compression over "
+                "brief summaries: include all non-duplicative paper facts needed for a reader to "
+                "avoid opening the original paper except for quick verification."
             ),
         },
     }
@@ -1761,21 +1778,21 @@ def observation_task_instruction(
         )
     if task_type == ReadingTaskType.CLAIM_INVENTORY:
         return (
-            "抽取论文自己的核心主张/贡献，避免把实现细节或结果反复当成主张。"
+            "把论文自己的核心主张做成尽量无损的压缩：覆盖 problem_claim、method_claim、mechanism_claim、novelty_claim、evaluation_claim、result_claim。必须包含论文声称解决的问题、主要贡献点、机制为什么成立、相对既有方法的新意、实验验证口径、关键性能/应用价值；可以 6-10 张卡，不要只给一句总括。"
             if zh
-            else "Extract the paper's own main claims or contributions; do not repeat implementation details as claims."
+            else "Compress the paper's own claims losslessly: cover problem_claim, method_claim, mechanism_claim, novelty_claim, evaluation_claim, and result_claim. Include the stated problem, main contributions, why the mechanism should work, novelty over prior work, evaluation basis, and key performance/application value; use 6-10 cards rather than one generic summary."
         )
     if task_type == ReadingTaskType.METHOD_MECHANISM:
         return (
-            "解释方法机制链路：关键模块是什么、为什么需要它、它如何缓解论文提出的问题。"
+            "完整解释方法机制链路，覆盖 mechanism_overview、theoretical_decomposition、distortion_alignment、quality_disentanglement、module_interactions、optimization_goals。必须说明每个关键模块为什么存在、输入输出是什么、解决什么冲突、与其它模块如何配合；保留定理/分解/公式背后的优化目标，不要只复述模块名。"
             if zh
-            else "Explain the mechanism chain: key modules, why they exist, and how they address the problem."
+            else "Explain the mechanism chain completely, covering mechanism_overview, theoretical_decomposition, distortion_alignment, quality_disentanglement, module_interactions, and optimization_goals. State why each key module exists, its inputs/outputs, the conflict it addresses, how modules interact, and the optimization goals behind theorem/decomposition/formulas; do not only list module names."
         )
     if task_type == ReadingTaskType.IMPLEMENTATION_PATH:
         return (
-            "抽取可执行实现路径：输入预处理、网络/模块、训练目标、推理流程、重要超参数或尺寸。"
+            "把实现细节做成可复现级压缩，覆盖 preprocessing、model_components、feature_pipeline、training_objectives、loss_terms、training_protocol、inference_flow、hyperparameters_or_shapes。必须抽取点云如何转成输入、所有网络/模块 G/D/H/R 的角色、特征从哪里到哪里、损失项各自约束什么、训练顺序和源域/目标域如何参与、测试时走哪条路径、重要尺寸/超参数/公式编号；可以 8-12 张卡。"
             if zh
-            else "Extract implementation facts: preprocessing, networks/modules, objectives, inference flow, and important sizes or hyperparameters."
+            else "Compress implementation details to near-reproducible notes, covering preprocessing, model_components, feature_pipeline, training_objectives, loss_terms, training_protocol, inference_flow, and hyperparameters_or_shapes. Extract how point clouds become inputs, roles of G/D/H/R, feature flow, what each loss constrains, training order and source/target domain usage, test-time path, and important dimensions/hyperparameters/formula numbers; use 8-12 cards."
         )
     if task_type == ReadingTaskType.EVALUATION_SETUP:
         return (
@@ -1829,7 +1846,7 @@ def source_pack(dom: PaperDOM, source_ids: list[str]) -> list[dict[str, Any]]:
             "kind": span.kind,
             "page_no": span.page_no,
             "section_id": span.section_id,
-            "text": span.text[:1800],
+            "text": span.text[:3200],
         }
     for figure in dom.figures:
         by_source[figure.source_id] = {
@@ -1972,6 +1989,12 @@ def clean_model_covered_outputs(value: Any, task: ReadingTask) -> list[str]:
 
 def infer_covered_outputs_from_type(observation_type: str, task: ReadingTask) -> list[str]:
     if task.task_type == ReadingTaskType.ORIENTATION and observation_type == "problem":
+        return list(task.required_outputs)
+    if task.task_type == ReadingTaskType.CLAIM_INVENTORY and observation_type == "claim":
+        return list(task.required_outputs)
+    if task.task_type == ReadingTaskType.METHOD_MECHANISM and observation_type == "mechanism":
+        return list(task.required_outputs)
+    if task.task_type == ReadingTaskType.IMPLEMENTATION_PATH and observation_type == "implementation":
         return list(task.required_outputs)
     return [observation_type] if observation_type in task.required_outputs else []
 

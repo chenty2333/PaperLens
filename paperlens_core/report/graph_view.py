@@ -37,9 +37,9 @@ class GraphReportDraft(BaseModel):
 
 SECTION_TITLES = {
     "problem": {"zh": "问题与动机", "en": "Problem"},
-    "claim": {"zh": "核心主张", "en": "Claims"},
+    "claim": {"zh": "核心主张与贡献", "en": "Claims and Contributions"},
     "mechanism": {"zh": "方法机制", "en": "Mechanism"},
-    "implementation": {"zh": "实现细节", "en": "Implementation"},
+    "implementation": {"zh": "实现细节与训练流程", "en": "Implementation and Training"},
     "evaluation": {"zh": "实验设置", "en": "Evaluation Setup"},
     "result": {"zh": "结果与结论", "en": "Results"},
     "limitation": {"zh": "限制与边界", "en": "Limitations"},
@@ -49,10 +49,26 @@ SECTION_TITLES = {
 NUMBER_TEXT_PATTERN = re.compile(
     r"(?<![A-Za-z0-9_])[-+]?(?:\d[\d,]*(?:\.\d+)?|\.\d+)(?:\s?%|[A-Za-z]{1,6})?"
 )
+READER_HOSTILE_PHRASES = (
+    "你给到",
+    "你提供",
+    "供给的片段",
+    "供给片段",
+    "供给的图示",
+    "证据包",
+    "提供的页面",
+    "提供的材料",
+    "提供的证据",
+    "supplied excerpts",
+    "provided excerpts",
+    "provided excerpt",
+    "the user provided",
+    "evidence pack",
+)
 
 
 def build_report_draft_from_graph(
-    graph: ClaimGraph, *, max_nodes_per_kind: int = 8, output_language: str = "zh"
+    graph: ClaimGraph, *, max_nodes_per_kind: int = 12, output_language: str = "zh"
 ) -> GraphReportDraft:
     sections: list[ReportSection] = []
     for kind, titles in SECTION_TITLES.items():
@@ -517,6 +533,9 @@ def is_english_mechanical_evidence(text: str) -> bool:
 
 def is_internal_report_line(line: str) -> bool:
     stripped = line.strip()
+    lowered = stripped.lower()
+    if any(phrase in stripped or phrase in lowered for phrase in READER_HOSTILE_PHRASES):
+        return True
     if re.search(r"\b(?:problem|claim|mechanism|implementation|evaluation|result|limitation|concept):obs_", stripped):
         return True
     if "evidence:" in stripped or "span:" in stripped:

@@ -265,7 +265,10 @@ def build_initial_reading_plan(
 
     for task_type in TASK_DEPENDENCY_ORDER:
         targets = _select_sources_for_task_type(
-            dom, task_type, section_task_map, max_sources_per_task
+            dom,
+            task_type,
+            section_task_map,
+            source_limit_for_task(task_type, max_sources_per_task),
         )
         if not targets:
             continue
@@ -286,6 +289,18 @@ def build_initial_reading_plan(
         tasks = _fallback_tasks(dom, max_sources_per_task, max_tokens_per_task)
 
     return ReadingPlan(paper_id=dom.paper_id, tasks=tasks)
+
+
+def source_limit_for_task(task_type: ReadingTaskType, default_limit: int) -> int:
+    if task_type in {
+        ReadingTaskType.CLAIM_INVENTORY,
+        ReadingTaskType.METHOD_MECHANISM,
+        ReadingTaskType.IMPLEMENTATION_PATH,
+    }:
+        return max(default_limit, 16)
+    if task_type in {ReadingTaskType.EVALUATION_SETUP, ReadingTaskType.RESULT_EXTRACTION}:
+        return max(default_limit, 12)
+    return default_limit
 
 
 def _map_sections_to_tasks(dom: PaperDOM) -> dict[str, list[ReadingTaskType]]:
@@ -674,14 +689,37 @@ def re_like_reference_entry(text: str) -> bool:
 def required_outputs_for_task(task_type: ReadingTaskType) -> list[str]:
     return {
         ReadingTaskType.ORIENTATION: ["problem", "motivation", "scope"],
-        ReadingTaskType.CLAIM_INVENTORY: ["claim"],
-        ReadingTaskType.METHOD_MECHANISM: ["mechanism"],
-        ReadingTaskType.IMPLEMENTATION_PATH: ["implementation"],
+        ReadingTaskType.CLAIM_INVENTORY: [
+            "problem_claim",
+            "method_claim",
+            "mechanism_claim",
+            "novelty_claim",
+            "evaluation_claim",
+            "result_claim",
+        ],
+        ReadingTaskType.METHOD_MECHANISM: [
+            "mechanism_overview",
+            "theoretical_decomposition",
+            "distortion_alignment",
+            "quality_disentanglement",
+            "module_interactions",
+            "optimization_goals",
+        ],
+        ReadingTaskType.IMPLEMENTATION_PATH: [
+            "preprocessing",
+            "model_components",
+            "feature_pipeline",
+            "training_objectives",
+            "loss_terms",
+            "training_protocol",
+            "inference_flow",
+            "hyperparameters_or_shapes",
+        ],
         ReadingTaskType.EVALUATION_SETUP: ["evaluation"],
         ReadingTaskType.RESULT_EXTRACTION: ["result"],
         ReadingTaskType.LIMITATIONS: ["limitation"],
         ReadingTaskType.CONCEPT_BRIDGE: ["concept"],
-        ReadingTaskType.RELATED_POSITIONING: ["claim", "limitation"],
+        ReadingTaskType.RELATED_POSITIONING: ["claim"],
         ReadingTaskType.REPRODUCIBILITY: ["implementation", "limitation"],
     }[task_type]
 
