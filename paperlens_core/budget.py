@@ -31,12 +31,13 @@ class BudgetManager:
         input_tokens = first_int(usage, "input_tokens", "prompt_tokens") or 0
         prompt_details = usage.get("prompt_tokens_details") or {}
         input_details = usage.get("input_tokens_details") or {}
-        cached_input_tokens = (
-            first_int(usage, "cached_input_tokens", "cache_read_input_tokens")
-            or first_int(prompt_details, "cached_tokens")
-            or first_int(input_details, "cached_tokens")
-            or 0
-        )
+        cached_input_tokens = first_int(usage, "cached_input_tokens", "cache_read_input_tokens")
+        if cached_input_tokens is None:
+            cached_input_tokens = first_int(prompt_details, "cached_tokens")
+        if cached_input_tokens is None:
+            cached_input_tokens = first_int(input_details, "cached_tokens")
+        if cached_input_tokens is None:
+            cached_input_tokens = 0
         output_tokens = first_int(usage, "output_tokens", "completion_tokens") or 0
         cached_input_tokens = min(cached_input_tokens, input_tokens)
         billable_uncached_input_tokens = max(0, input_tokens - cached_input_tokens)
@@ -53,12 +54,14 @@ class BudgetManager:
             return copy.copy(self.snapshot)
 
     def public_dict(self) -> dict[str, Any]:
+        with self._lock:
+            snapshot = copy.copy(self.snapshot)
         return {
-            "input_tokens": self.snapshot.input_tokens,
-            "cached_input_tokens": self.snapshot.cached_input_tokens,
-            "output_tokens": self.snapshot.output_tokens,
-            "estimated_usd": round(self.snapshot.estimated_usd, 6),
-            "calls": self.snapshot.calls,
+            "input_tokens": snapshot.input_tokens,
+            "cached_input_tokens": snapshot.cached_input_tokens,
+            "output_tokens": snapshot.output_tokens,
+            "estimated_usd": round(snapshot.estimated_usd, 6),
+            "calls": snapshot.calls,
         }
 
 

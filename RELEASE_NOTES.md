@@ -9,6 +9,7 @@ This release turns the local PaperLens workspace into a versioned product data s
 - JSON artifacts, reports, library indexes, QA cache files, and typed core artifacts are written atomically to reduce partial-file corruption after crashes or forced shutdowns.
 - SQLite-backed paper state access is serialized and safe for service worker threads.
 - ClaimGraph and audit lookups now use in-memory indexes for evidence edges and PaperDOM source text.
+- Model budget snapshots now preserve explicit zero token fields and are read under lock.
 - Corrupt critical JSON files are moved into `.paperlens/recovery/` during repair instead of being overwritten silently.
 - Added workspace-level maintenance commands for doctor, migration, cache cleanup, export, and import.
 
