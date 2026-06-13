@@ -1144,8 +1144,6 @@ class PaperLensRequestHandler(BaseHTTPRequestHandler):
         auth = self.headers.get("Authorization") or ""
         if auth.lower().startswith("bearer "):
             token = auth.split(" ", 1)[1]
-        if not token:
-            token = query.get("token", [""])[0]
         return bool(token) and secrets.compare_digest(token, self.state.token)
 
     def _route_get(self, parts: list[str], query: dict[str, list[str]]) -> Any:

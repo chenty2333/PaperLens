@@ -202,6 +202,11 @@ type ChatStore = {
   activeBySubject: Record<string, string>
 }
 
+type ImageCandidate = {
+  src: string
+  authenticated?: boolean
+}
+
 const EMPTY_CHAT_MESSAGES: ChatMessage[] = []
 const ACTIVE_JOB_STATUSES = new Set(['queued', 'running', 'paused', 'cancelling'])
 const RETRYABLE_JOB_STATUSES = new Set(['failed', 'cancelled'])
@@ -294,9 +299,15 @@ function loadSettings(): RunSettings {
   }
 }
 
-function serviceHeaders(service: ServiceInfo) {
+function serviceAuthHeaders(service: ServiceInfo) {
   return {
     Authorization: `Bearer ${service.token}`,
+  }
+}
+
+function serviceJsonHeaders(service: ServiceInfo) {
+  return {
+    ...serviceAuthHeaders(service),
     'Content-Type': 'application/json',
   }
 }
@@ -307,7 +318,7 @@ function serviceUrl(service: ServiceInfo, path: string) {
 
 async function apiGet<T>(service: ServiceInfo, path: string): Promise<T> {
   const response = await fetch(serviceUrl(service, path), {
-    headers: serviceHeaders(service),
+    headers: serviceAuthHeaders(service),
   })
   if (!response.ok) throw new Error(await responseErrorMessage(response))
   return response.json() as Promise<T>
@@ -316,7 +327,7 @@ async function apiGet<T>(service: ServiceInfo, path: string): Promise<T> {
 async function apiPost<T>(service: ServiceInfo, path: string, payload: unknown): Promise<T> {
   const response = await fetch(serviceUrl(service, path), {
     method: 'POST',
-    headers: serviceHeaders(service),
+    headers: serviceJsonHeaders(service),
     body: JSON.stringify(payload),
   })
   if (!response.ok) throw new Error(await responseErrorMessage(response))
@@ -343,12 +354,64 @@ function errorMessage(err: unknown) {
   return err instanceof Error ? err.message : String(err)
 }
 
-function parsePaperLensEvent(event: Event): PaperLensEvent | null {
+function parsePaperLensSseFrame(frame: string): PaperLensEvent | null {
+  const dataLines: string[] = []
+  for (const rawLine of frame.split(/\r?\n/)) {
+    if (!rawLine || rawLine.startsWith(':')) continue
+    const separator = rawLine.indexOf(':')
+    const field = separator === -1 ? rawLine : rawLine.slice(0, separator)
+    let value = separator === -1 ? '' : rawLine.slice(separator + 1)
+    if (value.startsWith(' ')) value = value.slice(1)
+    if (field === 'data') dataLines.push(value)
+  }
+  if (!dataLines.length) return null
   try {
-    return JSON.parse((event as MessageEvent).data) as PaperLensEvent
+    return JSON.parse(dataLines.join('\n')) as PaperLensEvent
   } catch {
     return null
   }
+}
+
+function startPaperLensEventStream(
+  service: ServiceInfo,
+  path: string,
+  onEvent: (event: PaperLensEvent) => void,
+  onClose: () => void,
+): AbortController {
+  const controller = new AbortController()
+  void (async () => {
+    try {
+      const response = await fetch(serviceUrl(service, path), {
+        headers: serviceAuthHeaders(service),
+        signal: controller.signal,
+      })
+      if (!response.ok) throw new Error(await responseErrorMessage(response))
+      if (!response.body) throw new Error('PaperLens event stream is unavailable')
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        let boundary = buffer.indexOf('\n\n')
+        while (boundary >= 0) {
+          const frame = buffer.slice(0, boundary)
+          buffer = buffer.slice(boundary + 2)
+          const parsed = parsePaperLensSseFrame(frame)
+          if (parsed) onEvent(parsed)
+          boundary = buffer.indexOf('\n\n')
+        }
+      }
+      buffer += decoder.decode()
+      const parsed = parsePaperLensSseFrame(buffer)
+      if (parsed) onEvent(parsed)
+      if (!controller.signal.aborted) onClose()
+    } catch {
+      if (!controller.signal.aborted) onClose()
+    }
+  })()
+  return controller
 }
 
 function encodeOutput(outputDir: string) {
@@ -472,7 +535,7 @@ function assetServiceSrc(service: ServiceInfo | null, outputDir: string, assetPa
   if (!service || !outputDir || !assetPath) return ''
   return serviceUrl(
     service,
-    `/assets?output_dir=${encodeOutput(outputDir)}&path=${encodeURIComponent(assetPath)}&token=${encodeURIComponent(service.token)}`,
+    `/assets?output_dir=${encodeOutput(outputDir)}&path=${encodeURIComponent(assetPath)}`,
   )
 }
 
@@ -502,22 +565,30 @@ function viteDevFileSrc(path: string) {
   return `/paperlens-media?path=${encodeURIComponent(path)}`
 }
 
-function uniqueCandidates(values: string[]) {
-  return values.filter((value, index) => value && values.indexOf(value) === index)
+function uniqueImageCandidates(values: Array<ImageCandidate | null | undefined>) {
+  const seen = new Set<string>()
+  const result: ImageCandidate[] = []
+  for (const value of values) {
+    if (!value?.src || seen.has(value.src)) continue
+    seen.add(value.src)
+    result.push(value)
+  }
+  return result
 }
 
 function localAssetCandidates(src: string | undefined, report: ReportPayload | null, outputDir: string, service: ServiceInfo | null) {
   if (!src) return []
-  if (/^(https?:|data:|blob:)/i.test(src)) return [src]
+  if (/^(https?:|data:|blob:)/i.test(src)) return [{ src }]
   const baseDir = report?.paper.report_path ? dirname(report.paper.report_path) : ''
   const assetPath = resolveRelativePath(baseDir, src)
   const outputRoot = outputRootForReport(report, outputDir)
   const absolutePath = absoluteReportAssetPath(src, report, outputDir)
-  return uniqueCandidates([
-    assetServiceSrc(service, outputRoot, assetPath),
-    viteDevFileSrc(absolutePath),
-    absolutePath ? convertFileSrc(absolutePath) : '',
-    src,
+  const serviceSrc = assetServiceSrc(service, outputRoot, assetPath)
+  return uniqueImageCandidates([
+    serviceSrc ? { src: serviceSrc, authenticated: true } : null,
+    viteDevFileSrc(absolutePath) ? { src: viteDevFileSrc(absolutePath) } : null,
+    absolutePath ? { src: convertFileSrc(absolutePath) } : null,
+    { src },
   ])
 }
 
@@ -699,7 +770,7 @@ function App() {
   const [rightSidebarOpen, setRightSidebarOpen] = useState(() => loadBooleanPreference('paperLens.layout.rightOpen', true))
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth)
   const chatEndRef = useRef<HTMLDivElement>(null)
-  const eventSourcesRef = useRef<Set<EventSource>>(new Set())
+  const eventStreamsRef = useRef<Set<AbortController>>(new Set())
 
   const selectedPaper = useMemo(
     () => workspace?.papers.find((paper) => paper.paper_id === selectedPaperId) ?? workspace?.papers[0] ?? null,
@@ -839,10 +910,10 @@ function App() {
   }, [])
 
   useEffect(() => {
-    const sources = eventSourcesRef.current
+    const streams = eventStreamsRef.current
     return () => {
-      sources.forEach((source) => source.close())
-      sources.clear()
+      streams.forEach((stream) => stream.abort())
+      streams.clear()
     }
   }, [])
 
@@ -991,28 +1062,29 @@ function App() {
 
   function subscribeJob(jobId: string, outputDir: string) {
     if (!service) return
-    const source = new EventSource(
-      serviceUrl(service, `/jobs/${encodeURIComponent(jobId)}/events?token=${encodeURIComponent(service.token)}`),
-    )
-    const release = trackEventSource(source)
-    source.addEventListener('paperlens', (event) => {
-      const parsed = parsePaperLensEvent(event)
-      if (!parsed) return
-      setJobEvents((current) => [...current.slice(-500), parsed])
-      if (
-        parsed.type === 'job_completed'
-        || parsed.type === 'job_failed'
-        || parsed.type === 'job_cancelled'
-        || parsed.level === 'critical'
-      ) {
+    let release = () => {}
+    const stream = startPaperLensEventStream(
+      service,
+      `/jobs/${encodeURIComponent(jobId)}/events`,
+      (parsed) => {
+        setJobEvents((current) => [...current.slice(-500), parsed])
+        if (
+          parsed.type === 'job_completed'
+          || parsed.type === 'job_failed'
+          || parsed.type === 'job_cancelled'
+          || parsed.level === 'critical'
+        ) {
+          release()
+          void refreshJobs()
+          void openWorkspace(outputDir)
+        }
+      },
+      () => {
         release()
         void refreshJobs()
-        void openWorkspace(outputDir)
-      }
-    })
-    source.onerror = () => {
-      release()
-    }
+      },
+    )
+    release = trackEventStream(stream)
   }
 
   async function startReadJob() {
@@ -1349,62 +1421,70 @@ function App() {
     outputDir: string,
   ) {
     if (!service) return
-    const source = new EventSource(
-      serviceUrl(service, `/ask/${encodeURIComponent(answerId)}/events?token=${encodeURIComponent(service.token)}`),
-    )
-    const release = trackEventSource(source)
-    source.addEventListener('paperlens', (event) => {
-      const parsed = parsePaperLensEvent(event)
-      if (!parsed) return
-      if (parsed.type === 'answer_started') {
+    let release = () => {}
+    const stream = startPaperLensEventStream(
+      service,
+      `/ask/${encodeURIComponent(answerId)}/events`,
+      (parsed) => {
+        if (parsed.type === 'answer_started') {
+          setChatThreadMessages(threadKey, (current) =>
+            current.map((message) =>
+              message.id === assistantMessageId
+                ? { ...message, content: parsed.message ?? '正在核对证据...' }
+                : message,
+            ),
+          )
+        }
+        if (parsed.type === 'answer_completed') {
+          const answer = (parsed.data?.answer ?? null) as AnswerPayload | null
+          setChatThreadMessages(threadKey, (current) =>
+            current.map((message) =>
+              message.id === assistantMessageId
+                ? {
+                    ...message,
+                    pending: false,
+                    content: answerText(answer) || '没有返回可用回答。',
+                    answer,
+                    error: null,
+                  }
+                : message,
+            ),
+          )
+          release()
+          void openWorkspace(outputDir)
+        }
+        if (parsed.type === 'answer_failed') {
+          const text = parsed.message ?? '回答失败'
+          setChatThreadMessages(threadKey, (current) =>
+            current.map((message) =>
+              message.id === assistantMessageId
+                ? { ...message, pending: false, content: text, error: text }
+                : message,
+            ),
+          )
+          release()
+        }
+      },
+      () => {
+        const text = '连接已中断，请稍后重试。'
         setChatThreadMessages(threadKey, (current) =>
           current.map((message) =>
-            message.id === assistantMessageId
-              ? { ...message, content: parsed.message ?? '正在核对证据...' }
-              : message,
-          ),
-        )
-      }
-      if (parsed.type === 'answer_completed') {
-        const answer = (parsed.data?.answer ?? null) as AnswerPayload | null
-        setChatThreadMessages(threadKey, (current) =>
-          current.map((message) =>
-            message.id === assistantMessageId
-              ? {
-                  ...message,
-                  pending: false,
-                  content: answerText(answer) || '没有返回可用回答。',
-                  answer,
-                  error: null,
-                }
-              : message,
-          ),
-        )
-        release()
-        void openWorkspace(outputDir)
-      }
-      if (parsed.type === 'answer_failed') {
-        const text = parsed.message ?? '回答失败'
-        setChatThreadMessages(threadKey, (current) =>
-          current.map((message) =>
-            message.id === assistantMessageId
+            message.id === assistantMessageId && message.pending
               ? { ...message, pending: false, content: text, error: text }
               : message,
           ),
         )
         release()
-      }
-    })
-    source.onerror = () => {
-      release()
-    }
+      },
+    )
+    release = trackEventStream(stream)
   }
 
-  function trackEventSource(source: EventSource) {
-    eventSourcesRef.current.add(source)
+  function trackEventStream(stream: AbortController) {
+    eventStreamsRef.current.add(stream)
     return () => {
-      source.close()
-      eventSourcesRef.current.delete(source)
+      stream.abort()
+      eventStreamsRef.current.delete(stream)
     }
   }
 
@@ -2030,12 +2110,53 @@ function MarkdownImage({
   outputDir: string
   service: ServiceInfo | null
 }) {
-  const candidates = localAssetCandidates(src, report, outputDir, service)
-  const candidateKey = candidates.join('\n')
+  const candidates = useMemo(
+    () => localAssetCandidates(src, report, outputDir, service),
+    [outputDir, report, service, src],
+  )
+  const candidateKey = candidates
+    .map((candidate) => `${candidate.authenticated ? 'auth' : 'direct'}:${candidate.src}`)
+    .join('\n')
   const [loadState, setLoadState] = useState({ key: '', index: 0 })
+  const [fetchedAsset, setFetchedAsset] = useState({ key: '', src: '' })
   const candidateIndex = loadState.key === candidateKey ? loadState.index : 0
-  const currentSrc = candidates[candidateIndex] ?? ''
-  if (!currentSrc) return null
+  const currentCandidate = candidates[candidateIndex] ?? null
+  const fetchKey = `${candidateKey}\n#${candidateIndex}`
+  useEffect(() => {
+    if (!currentCandidate?.authenticated) return
+    if (!service) return
+    let cancelled = false
+    let objectUrl = ''
+    const controller = new AbortController()
+    fetch(currentCandidate.src, {
+      headers: serviceAuthHeaders(service),
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(await responseErrorMessage(response))
+        const blob = await response.blob()
+        objectUrl = URL.createObjectURL(blob)
+        if (cancelled) URL.revokeObjectURL(objectUrl)
+        else setFetchedAsset({ key: fetchKey, src: objectUrl })
+      })
+      .catch(() => {
+        if (cancelled) return
+        setLoadState((current) => {
+          const currentIndex = current.key === candidateKey ? current.index : 0
+          const nextIndex = currentIndex + 1
+          return nextIndex < candidates.length ? { key: candidateKey, index: nextIndex } : current
+        })
+      })
+    return () => {
+      cancelled = true
+      controller.abort()
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [candidateKey, candidates.length, currentCandidate, fetchKey, service])
+  const currentSrc = currentCandidate?.authenticated
+    ? fetchedAsset.key === fetchKey ? fetchedAsset.src : ''
+    : currentCandidate?.src ?? ''
+  if (!currentCandidate || !currentSrc) return null
   return (
     <img
       src={currentSrc}
