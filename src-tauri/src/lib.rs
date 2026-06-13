@@ -231,9 +231,8 @@ fn workspace_artifacts(output_dir: &Path) -> Vec<PathBuf> {
     .map(|name| output_dir.join(name))
     .collect();
 
-    let paperlens_workspace = output_dir.join(".paperlens").exists();
     let papers_dir = output_dir.join("papers");
-    if paperlens_workspace || legacy_papers_dir_looks_managed(&papers_dir) {
+    if output_dir.join(".paperlens").exists() {
         artifacts.push(papers_dir);
     }
     artifacts
@@ -245,35 +244,6 @@ fn has_paperlens_workspace_marker(output_dir: &Path) -> bool {
         || output_dir.join("PaperLens.json").exists()
         || output_dir.join("PaperLens_Library.md").exists()
         || output_dir.join("PaperLens_Library.json").exists()
-        || legacy_papers_dir_looks_managed(&output_dir.join("papers"))
-}
-
-fn legacy_papers_dir_looks_managed(path: &Path) -> bool {
-    if !path.is_dir() {
-        return false;
-    }
-    let Ok(entries) = fs::read_dir(path) else {
-        return false;
-    };
-    let mut seen_report = false;
-    for entry in entries {
-        let Ok(entry) = entry else {
-            return false;
-        };
-        let child = entry.path();
-        if !child.is_file() {
-            return false;
-        }
-        let extension = child
-            .extension()
-            .and_then(|value| value.to_str())
-            .map(|value| value.to_ascii_lowercase());
-        if extension.as_deref() != Some("md") {
-            return false;
-        }
-        seen_report = true;
-    }
-    seen_report
 }
 
 fn is_filesystem_root(path: &Path) -> bool {

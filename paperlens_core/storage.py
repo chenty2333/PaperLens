@@ -160,7 +160,7 @@ class WorkspaceStore:
         repaired: list[str] = []
         manifest = self.read_manifest(recover=True)
         if not manifest:
-            origin = "legacy" if self.has_legacy_workspace_content() else "new"
+            origin = "existing" if self.has_existing_workspace_content() else "new"
             manifest = self.new_manifest(app_version=app_version, origin=origin)
             self.write_manifest(manifest)
             self.append_migration(
@@ -254,10 +254,10 @@ class WorkspaceStore:
             },
         )
 
-    def has_legacy_workspace_content(self) -> bool:
-        return self.has_persisted_run_content() or self.state_db_path.exists()
+    def has_existing_workspace_content(self) -> bool:
+        return self.has_persisted_workspace_content() or self.state_db_path.exists()
 
-    def has_persisted_run_content(self) -> bool:
+    def has_persisted_workspace_content(self) -> bool:
         if any(
             path.exists()
             for path in [
@@ -311,7 +311,9 @@ class WorkspaceStore:
                 issues.append(f"invalid_json:{relative}:{error}")
 
         db_status = self.sqlite_status()
-        if db_status != "ok" and (db_status != "missing" or self.has_persisted_run_content()):
+        if db_status != "ok" and (
+            db_status != "missing" or self.has_persisted_workspace_content()
+        ):
             issues.append(f"state_db:{db_status}")
 
         library_status = self.library_records_status()
