@@ -2390,9 +2390,10 @@ function AnswerEvidence({ answer }: { answer: AnswerPayload }) {
 }
 
 function EvidenceSummary({ paper, service, outputDir }: { paper: PaperSummary | null; service: ServiceInfo | null; outputDir: string }) {
-  const [payload, setPayload] = useState<Record<string, unknown> | null>(null)
+  const [payloadState, setPayloadState] = useState<{ key: string; payload: Record<string, unknown> } | null>(null)
   const [open, setOpen] = useState(false)
   const paperId = paper?.paper_id ?? ''
+  const payloadKey = `${outputDir}::${paperId}`
   useEffect(() => {
     if (!paperId || !service || !outputDir) return
     let cancelled = false
@@ -2401,15 +2402,16 @@ function EvidenceSummary({ paper, service, outputDir }: { paper: PaperSummary | 
       `/papers/${encodeURIComponent(paperId)}/evidence?output_dir=${encodeOutput(outputDir)}`,
     )
       .then((value) => {
-        if (!cancelled) setPayload(value)
+        if (!cancelled) setPayloadState({ key: `${outputDir}::${paperId}`, payload: value })
       })
       .catch(() => {
-        if (!cancelled) setPayload(null)
+        if (!cancelled) setPayloadState(null)
       })
     return () => {
       cancelled = true
     }
   }, [paperId, service, outputDir])
+  const payload = payloadState?.key === payloadKey ? payloadState.payload : null
   const claims = Array.isArray(payload?.claims) ? payload.claims : []
   const evidence = Array.isArray(payload?.evidence) ? payload.evidence : []
   return (
