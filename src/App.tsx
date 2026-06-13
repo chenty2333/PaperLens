@@ -2133,6 +2133,13 @@ function SettingsPanel({
           <label>Concurrency</label>
           <input type="number" min="1" max="16" value={settings.concurrency} onChange={(event) => update('concurrency', event.target.value)} />
         </div>
+        <div className="field">
+          <label>报告语言</label>
+          <select value={settings.outputLanguage} onChange={(event) => update('outputLanguage', event.target.value as RunSettings['outputLanguage'])}>
+            <option value="zh">中文</option>
+            <option value="en">English</option>
+          </select>
+        </div>
       </div>
       <button type="button" onClick={() => openWorkspace()} disabled={!settings.outputDir || loading}>
         {loading ? <Loader2 className="spinning" size={15} /> : <FolderOpen size={15} />} 导入已有结果
