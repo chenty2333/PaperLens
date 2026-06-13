@@ -8,7 +8,7 @@ import {
 } from 'react'
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
-import { confirm, message, open } from '@tauri-apps/plugin-dialog'
+import { confirm, message, open, save } from '@tauri-apps/plugin-dialog'
 import { openPath } from '@tauri-apps/plugin-opener'
 import { relaunch } from '@tauri-apps/plugin-process'
 import { check, type DownloadEvent } from '@tauri-apps/plugin-updater'
@@ -21,10 +21,12 @@ import remarkMath from 'remark-math'
 import 'katex/dist/katex.min.css'
 import {
   AlertTriangle,
+  Archive,
   ArrowUp,
   BookOpen,
   ChevronDown,
   ChevronRight,
+  Database,
   FileText,
   FolderOpen,
   KeyRound,
@@ -40,8 +42,10 @@ import {
   RefreshCw,
   RotateCcw,
   Settings2,
+  ShieldCheck,
   Square,
   Trash2,
+  Wrench,
   XCircle,
 } from 'lucide-react'
 import './App.css'
@@ -103,6 +107,7 @@ type Workspace = {
   output_dir: string
   status: string
   manifest?: Record<string, unknown>
+  storage?: WorkspaceStorageHealth
   papers: PaperSummary[]
   paper_count: number
 }
@@ -202,6 +207,36 @@ type CleanupReport = {
   removed: string[]
   missing: string[]
   errors: string[]
+}
+
+type WorkspaceStorageStats = {
+  managed_bytes?: number
+  cache_bytes?: number
+  paper_reports?: number
+}
+
+type WorkspaceStorageHealth = {
+  status?: string
+  issues?: string[]
+  repairs?: string[]
+  stats?: WorkspaceStorageStats
+  library?: {
+    exists?: boolean
+    records?: number
+    invalid_lines?: number
+  }
+  state_db?: string
+}
+
+type WorkspaceMaintenanceResult = WorkspaceStorageHealth & {
+  selected?: number
+  bytes?: number
+  removed?: string[]
+  errors?: string[]
+  archive?: string
+  file_count?: number
+  extracted?: number
+  backup_dir?: string
 }
 
 const defaultSettings: RunSettings = {
@@ -494,6 +529,67 @@ function cleanupSummary(report: CleanupReport) {
   return pieces.join('，')
 }
 
+function formatBytes(value?: number) {
+  if (!value || value <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let size = value
+  let unitIndex = 0
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024
+    unitIndex += 1
+  }
+  const digits = size >= 10 || unitIndex === 0 ? 0 : 1
+  return `${size.toFixed(digits)} ${units[unitIndex]}`
+}
+
+function workspaceHealthSummary(storage?: WorkspaceStorageHealth) {
+  if (!storage) return '未打开'
+  const status = storage.status || 'UNKNOWN'
+  const issues = storage.issues?.length ?? 0
+  const repairs = storage.repairs?.length ?? 0
+  const cache = formatBytes(storage.stats?.cache_bytes)
+  const records = storage.library?.records ?? 0
+  const pieces = [`${status}`, `${issues} 个问题`, `${records} 篇记录`, `缓存 ${cache}`]
+  if (repairs) pieces.push(`${repairs} 项修复`)
+  return pieces.join(' · ')
+}
+
+function workspaceStatusClass(status?: string) {
+  const normalized = String(status || '').toLowerCase()
+  if (normalized === 'pass' || normalized === 'repaired') return 'pass'
+  if (normalized === 'warn') return 'warn'
+  if (normalized === 'fail') return 'fail'
+  return 'unknown'
+}
+
+function workspaceMaintenanceSummary(action: string, result: WorkspaceMaintenanceResult) {
+  const status = result.status || 'PASS'
+  if (action === 'cache') {
+    const errors = result.errors?.length ?? 0
+    const pieces = [`清理缓存 ${result.selected ?? result.removed?.length ?? 0} 项`, formatBytes(result.bytes)]
+    if (errors) pieces.push(`${errors} 项失败`)
+    return pieces.join('，')
+  }
+  if (action === 'export') {
+    return `已导出备份：${result.file_count ?? 0} 个文件，${formatBytes(result.bytes)}`
+  }
+  if (action === 'import') {
+    const backup = result.backup_dir ? '，原库已自动备份' : ''
+    return `已导入备份：${result.extracted ?? 0} 个文件${backup}`
+  }
+  const issues = result.issues?.length ?? 0
+  const repairs = result.repairs?.length ?? 0
+  const prefix = action === 'repair' ? '修复完成' : '诊断完成'
+  return `${prefix}：${status}，${issues} 个问题，${repairs} 项修复`
+}
+
+function defaultBackupPath(outputDir: string) {
+  const trimmed = outputDir.replace(/[\\/]+$/, '')
+  const separator = trimmed.includes('/') && !trimmed.includes('\\') ? '/' : '\\'
+  const stamp = new Date().toISOString().slice(0, 10)
+  return `${trimmed}${separator}PaperLens-workspace-${stamp}.zip`
+}
+
 function clearPaperLensLocalStorage() {
   for (const key of Object.keys(localStorage)) {
     if (key.startsWith('paperLens.')) localStorage.removeItem(key)
@@ -557,6 +653,7 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [updateBusy, setUpdateBusy] = useState(false)
   const [updateStatus, setUpdateStatus] = useState('')
+  const [maintenanceBusy, setMaintenanceBusy] = useState(false)
   const [maintenanceStatus, setMaintenanceStatus] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [leftWidth, setLeftWidth] = useState(() => loadNumberPreference('paperLens.layout.leftWidth', 300))
@@ -957,6 +1054,117 @@ function App() {
     if (report.errors.length) setError(report.errors.join('\n'))
   }
 
+  async function doctorWorkspace(repair = false) {
+    if (!service || !currentOutputDir) return
+    if (repair) {
+      const ok = await confirm(
+        `这会检查并修复当前论文库的存储结构：\n${currentOutputDir}\n\n损坏的 JSON 会移入恢复目录，缺失目录会重新创建。`,
+        { title: '修复当前库', kind: 'warning' },
+      )
+      if (!ok) return
+    }
+    setMaintenanceBusy(true)
+    setMaintenanceStatus(repair ? '正在修复当前库...' : '正在诊断当前库...')
+    setError(null)
+    try {
+      const result = await apiPost<WorkspaceMaintenanceResult>(service, '/workspaces/doctor', {
+        output_dir: currentOutputDir,
+        repair,
+      })
+      setMaintenanceStatus(workspaceMaintenanceSummary(repair ? 'repair' : 'doctor', result))
+      await openWorkspace(currentOutputDir)
+    } catch (err) {
+      setError(String(err))
+      setMaintenanceStatus('当前库维护失败。')
+    } finally {
+      setMaintenanceBusy(false)
+    }
+  }
+
+  async function cleanupWorkspaceCache() {
+    if (!service || !currentOutputDir) return
+    const ok = await confirm(
+      `清理当前论文库 30 天以前的缓存？\n${currentOutputDir}\n\n不会删除报告、论文记录或 QA 历史。`,
+      { title: '清理缓存', kind: 'warning' },
+    )
+    if (!ok) return
+    setMaintenanceBusy(true)
+    setMaintenanceStatus('正在清理缓存...')
+    setError(null)
+    try {
+      const result = await apiPost<WorkspaceMaintenanceResult>(service, '/workspaces/cleanup-cache', {
+        output_dir: currentOutputDir,
+        max_age_days: 30,
+        dry_run: false,
+      })
+      setMaintenanceStatus(workspaceMaintenanceSummary('cache', result))
+      if (result.errors?.length) setError(result.errors.join('\n'))
+      await openWorkspace(currentOutputDir)
+    } catch (err) {
+      setError(String(err))
+      setMaintenanceStatus('缓存清理失败。')
+    } finally {
+      setMaintenanceBusy(false)
+    }
+  }
+
+  async function exportWorkspace() {
+    if (!service || !currentOutputDir) return
+    const archivePath = await save({
+      title: '导出 PaperLens 论文库备份',
+      defaultPath: defaultBackupPath(currentOutputDir),
+      filters: [{ name: 'Zip Archive', extensions: ['zip'] }],
+    })
+    if (!archivePath) return
+    setMaintenanceBusy(true)
+    setMaintenanceStatus('正在导出备份...')
+    setError(null)
+    try {
+      const result = await apiPost<WorkspaceMaintenanceResult>(service, '/workspaces/export', {
+        output_dir: currentOutputDir,
+        archive_path: archivePath,
+        include_cache: false,
+      })
+      setMaintenanceStatus(workspaceMaintenanceSummary('export', result))
+    } catch (err) {
+      setError(String(err))
+      setMaintenanceStatus('备份导出失败。')
+    } finally {
+      setMaintenanceBusy(false)
+    }
+  }
+
+  async function importWorkspace() {
+    if (!service || !currentOutputDir) return
+    const archivePath = await open({
+      multiple: false,
+      filters: [{ name: 'Zip Archive', extensions: ['zip'] }],
+    })
+    if (typeof archivePath !== 'string') return
+    const ok = await confirm(
+      `将备份导入当前输出目录：\n${currentOutputDir}\n\n如果这里已有 PaperLens 结果，会先自动移到旁路备份目录，再恢复所选备份。`,
+      { title: '导入论文库备份', kind: 'warning' },
+    )
+    if (!ok) return
+    setMaintenanceBusy(true)
+    setMaintenanceStatus('正在导入备份...')
+    setError(null)
+    try {
+      const result = await apiPost<WorkspaceMaintenanceResult>(service, '/workspaces/import', {
+        output_dir: currentOutputDir,
+        archive_path: archivePath,
+        replace: true,
+      })
+      setMaintenanceStatus(workspaceMaintenanceSummary('import', result))
+      await openWorkspace(currentOutputDir)
+    } catch (err) {
+      setError(String(err))
+      setMaintenanceStatus('备份导入失败。')
+    } finally {
+      setMaintenanceBusy(false)
+    }
+  }
+
   async function ask() {
     if (!service || !currentOutputDir || !question.trim()) return
     const text = question.trim()
@@ -1195,10 +1403,18 @@ function App() {
                 updateBusy={updateBusy}
                 updateStatus={updateStatus}
                 maintenanceStatus={maintenanceStatus}
+                maintenanceBusy={maintenanceBusy}
+                workspaceStorage={workspace?.storage}
                 checkForUpdates={checkForUpdates}
                 clearLocalData={clearLocalData}
                 clearWorkspace={clearWorkspace}
+                doctorWorkspace={() => doctorWorkspace(false)}
+                repairWorkspace={() => doctorWorkspace(true)}
+                cleanupWorkspaceCache={cleanupWorkspaceCache}
+                exportWorkspace={exportWorkspace}
+                importWorkspace={importWorkspace}
                 canClearWorkspace={Boolean(currentOutputDir)}
+                canMaintainWorkspace={Boolean(service && currentOutputDir)}
               />
             )}
 
@@ -1474,10 +1690,18 @@ function SettingsPanel({
   updateBusy,
   updateStatus,
   maintenanceStatus,
+  maintenanceBusy,
+  workspaceStorage,
   checkForUpdates,
   clearLocalData,
   clearWorkspace,
+  doctorWorkspace,
+  repairWorkspace,
+  cleanupWorkspaceCache,
+  exportWorkspace,
+  importWorkspace,
   canClearWorkspace,
+  canMaintainWorkspace,
 }: {
   settings: RunSettings
   update: <K extends keyof RunSettings>(key: K, value: RunSettings[K]) => void
@@ -1487,11 +1711,20 @@ function SettingsPanel({
   updateBusy: boolean
   updateStatus: string
   maintenanceStatus: string
+  maintenanceBusy: boolean
+  workspaceStorage?: WorkspaceStorageHealth
   checkForUpdates: () => void
   clearLocalData: () => void
   clearWorkspace: () => void
+  doctorWorkspace: () => void
+  repairWorkspace: () => void
+  cleanupWorkspaceCache: () => void
+  exportWorkspace: () => void
+  importWorkspace: () => void
   canClearWorkspace: boolean
+  canMaintainWorkspace: boolean
 }) {
+  const storageClass = workspaceStatusClass(workspaceStorage?.status)
   return (
     <section className="settings-panel">
       <DirectoryField label="输入目录" value={settings.inputDir} onChange={(value) => update('inputDir', value)} onPick={() => pickDirectory('inputDir')} />
@@ -1531,6 +1764,29 @@ function SettingsPanel({
       </button>
       <div className="maintenance-block">
         <strong>维护</strong>
+        <div className={`workspace-health ${storageClass}`}>
+          <span>
+            <ShieldCheck size={14} /> 当前库
+          </span>
+          <b>{workspaceHealthSummary(workspaceStorage)}</b>
+        </div>
+        <div className="maintenance-actions workspace-actions">
+          <button type="button" onClick={doctorWorkspace} disabled={!canMaintainWorkspace || maintenanceBusy}>
+            {maintenanceBusy ? <Loader2 className="spinning" size={15} /> : <ShieldCheck size={15} />} 诊断
+          </button>
+          <button type="button" onClick={repairWorkspace} disabled={!canMaintainWorkspace || maintenanceBusy}>
+            <Wrench size={15} /> 修复
+          </button>
+          <button type="button" onClick={exportWorkspace} disabled={!canMaintainWorkspace || maintenanceBusy}>
+            <Archive size={15} /> 导出
+          </button>
+          <button type="button" onClick={importWorkspace} disabled={!canMaintainWorkspace || maintenanceBusy}>
+            <FolderOpen size={15} /> 导入
+          </button>
+          <button type="button" onClick={cleanupWorkspaceCache} disabled={!canMaintainWorkspace || maintenanceBusy}>
+            <Database size={15} /> 清缓存
+          </button>
+        </div>
         <div className="maintenance-actions">
           <button type="button" onClick={checkForUpdates} disabled={updateBusy}>
             {updateBusy ? <Loader2 className="spinning" size={15} /> : <RefreshCw size={15} />} 检查更新
