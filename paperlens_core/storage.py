@@ -128,6 +128,7 @@ class WorkspaceStore:
         )
         manifest["updated_at"] = utc_now()
         manifest["app_version"] = app_version or manifest.get("app_version") or ""
+        manifest["layout"] = self.workspace_layout()
         manifest["last_bootstrap"] = {
             "time": utc_now(),
             "migration_status": migration.get("status"),
@@ -200,16 +201,19 @@ class WorkspaceStore:
             "updated_at": now,
             "app_version": app_version or "",
             "origin": origin,
-            "layout": {
-                "root": str(self.output_dir),
-                "internal": INTERNAL_DIRNAME,
-                "state_db": f"{INTERNAL_DIRNAME}/state.sqlite",
-                "data": f"{INTERNAL_DIRNAME}/data",
-                "library": f"{INTERNAL_DIRNAME}/library",
-                "cache": f"{INTERNAL_DIRNAME}/cache",
-                "reports": "papers",
-                "main_report": "PaperLens.md",
-            },
+            "layout": self.workspace_layout(),
+        }
+
+    def workspace_layout(self) -> dict[str, str]:
+        return {
+            "root": str(self.output_dir),
+            "internal": INTERNAL_DIRNAME,
+            "state_db": f"{INTERNAL_DIRNAME}/state.sqlite",
+            "data": f"{INTERNAL_DIRNAME}/data",
+            "library": f"{INTERNAL_DIRNAME}/library",
+            "cache": f"{INTERNAL_DIRNAME}/cache",
+            "reports": "papers",
+            "main_report": "PaperLens.md",
         }
 
     def read_manifest(self, *, recover: bool) -> dict[str, Any] | None:
@@ -486,30 +490,56 @@ class WorkspaceStore:
         if not archive_path.exists():
             raise FileNotFoundError(f"Workspace archive not found: {archive_path}")
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        existing = [path for path in self.managed_paths() if path.exists()]
-        backup_dir = None
-        if existing and not replace:
-            names = ", ".join(path.name for path in existing[:6])
-            raise RuntimeError(
-                "Output directory already contains PaperLens workspace files. "
-                f"Use replace=True after exporting a backup. Existing: {names}"
-            )
-        if existing and replace:
-            backup_dir = self.output_dir.parent / f"{self.output_dir.name}.paperlens-backup-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
-            backup_dir.mkdir(parents=True, exist_ok=False)
-            for path in existing:
-                shutil.move(str(path), str(backup_dir / path.name))
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        staging_dir = (
+            self.output_dir.parent
+            / f".{self.output_dir.name}.paperlens-import-{stamp}-{os.getpid()}"
+        )
+        staging_dir.mkdir(parents=True, exist_ok=False)
+        export_manifest: dict[str, Any] = {}
         extracted = 0
-        with zipfile.ZipFile(archive_path) as archive:
-            for info in archive.infolist():
-                if info.is_dir() or info.filename == "PAPERLENS_EXPORT.json":
-                    continue
-                target = (self.output_dir / info.filename).resolve()
-                safe_relative_to(target, self.output_dir)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with archive.open(info) as source, target.open("wb") as destination:
-                    shutil.copyfileobj(source, destination)
-                extracted += 1
+        try:
+            with zipfile.ZipFile(archive_path) as archive:
+                export_manifest = self.validate_export_archive(archive)
+                for info in archive.infolist():
+                    if info.is_dir() or info.filename == "PAPERLENS_EXPORT.json":
+                        continue
+                    if not archive_member_is_managed(info.filename):
+                        raise ValueError(
+                            f"Archive member is not managed by PaperLens: {info.filename}"
+                        )
+                    target = (staging_dir / info.filename).resolve()
+                    safe_relative_to(target, staging_dir)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.open(info) as source, target.open("wb") as destination:
+                        shutil.copyfileobj(source, destination)
+                    extracted += 1
+            if extracted == 0:
+                raise ValueError("Workspace archive does not contain any managed PaperLens files")
+            existing = [path for path in self.managed_paths() if path.exists()]
+            backup_dir = None
+            if existing and not replace:
+                names = ", ".join(path.name for path in existing[:6])
+                raise RuntimeError(
+                    "Output directory already contains PaperLens workspace files. "
+                    f"Use replace=True after exporting a backup. Existing: {names}"
+                )
+            if existing and replace:
+                backup_dir = (
+                    self.output_dir.parent / f"{self.output_dir.name}.paperlens-backup-{stamp}"
+                )
+                backup_dir.mkdir(parents=True, exist_ok=False)
+                for path in existing:
+                    shutil.move(str(path), str(backup_dir / path.name))
+            try:
+                for child in staging_dir.iterdir():
+                    shutil.move(str(child), str(self.output_dir / child.name))
+            except Exception:
+                if backup_dir:
+                    self.rollback_failed_import(backup_dir, stamp)
+                raise
+        finally:
+            shutil.rmtree(staging_dir, ignore_errors=True)
         migration = self.bootstrap()
         return {
             "status": "PASS",
@@ -517,8 +547,45 @@ class WorkspaceStore:
             "output_dir": str(self.output_dir),
             "extracted": extracted,
             "backup_dir": str(backup_dir) if backup_dir else "",
+            "source_storage_schema_version": export_manifest.get("storage_schema_version"),
             "migration": migration,
         }
+
+    def validate_export_archive(self, archive: zipfile.ZipFile) -> dict[str, Any]:
+        try:
+            raw = archive.read("PAPERLENS_EXPORT.json")
+        except KeyError as exc:
+            raise ValueError("Not a PaperLens workspace archive: missing PAPERLENS_EXPORT.json") from exc
+        try:
+            manifest = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("Invalid PaperLens workspace archive manifest") from exc
+        if not isinstance(manifest, dict):
+            raise ValueError("Invalid PaperLens workspace archive manifest")
+        if manifest.get("schema_version") != EXPORT_SCHEMA_VERSION:
+            raise ValueError(
+                "Unsupported PaperLens workspace archive schema: "
+                f"{manifest.get('schema_version')!r}"
+            )
+        source_schema = int_or_zero(manifest.get("storage_schema_version"))
+        if source_schema > STORAGE_SCHEMA_VERSION:
+            raise RuntimeError(
+                "This PaperLens build cannot import a newer workspace schema: "
+                f"{source_schema} > {STORAGE_SCHEMA_VERSION}"
+            )
+        return manifest
+
+    def rollback_failed_import(self, backup_dir: Path, stamp: str) -> None:
+        failed_dir = (
+            self.output_dir.parent / f"{self.output_dir.name}.paperlens-failed-import-{stamp}"
+        )
+        failed_dir.mkdir(parents=True, exist_ok=False)
+        for path in self.managed_paths():
+            if path.exists():
+                shutil.move(str(path), str(failed_dir / path.name))
+        for child in backup_dir.iterdir():
+            shutil.move(str(child), str(self.output_dir / child.name))
+        backup_dir.rmdir()
 
     def managed_paths(self) -> list[Path]:
         return [self.output_dir / relative for relative in MANAGED_RELATIVE_PATHS]
@@ -565,6 +632,21 @@ def is_fail_issue(issue: str) -> bool:
             "state_db:",
             "invalid_json:",
         )
+    )
+
+
+def archive_member_is_managed(filename: str) -> bool:
+    normalized = filename.replace("\\", "/")
+    first_part = normalized.split("/", 1)[0]
+    if normalized.startswith("/") or ":" in first_part:
+        return False
+    parts = normalized.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        return False
+    normalized = "/".join(parts)
+    return any(
+        normalized == relative or normalized.startswith(f"{relative}/")
+        for relative in MANAGED_RELATIVE_PATHS
     )
 
 
