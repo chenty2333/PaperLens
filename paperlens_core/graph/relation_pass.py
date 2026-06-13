@@ -16,6 +16,14 @@ RELATION_TERMS = {
     "versus",
     "improves over",
     "outperforms",
+    "相关",
+    "基线",
+    "比较",
+    "对比",
+    "相比",
+    "优于",
+    "超过",
+    "提升",
 }
 
 CONTRADICT_TERMS = {
@@ -30,6 +38,37 @@ CONTRADICT_TERMS = {
     "incompatible",
     "not compatible",
     "disagree",
+    "然而",
+    "但是",
+    "尽管",
+    "相反",
+    "不同于",
+    "不一致",
+    "冲突",
+    "矛盾",
+    "不兼容",
+}
+
+SHORT_REFERENCE_TOKENS = {
+    "2d",
+    "3d",
+    "ai",
+    "api",
+    "cnn",
+    "cpu",
+    "ct",
+    "gan",
+    "gpu",
+    "gs",
+    "iot",
+    "llm",
+    "mri",
+    "nerf",
+    "nlp",
+    "qa",
+    "rl",
+    "vae",
+    "vlm",
 }
 
 KIND_PAIR_RULES: dict[tuple[str, str], str] = {
@@ -62,8 +101,6 @@ def apply_relation_pass(graph: ClaimGraph) -> ClaimGraph:
 
             edge_kind = _infer_edge_kind(source_node, target_node)
             if edge_kind is None:
-                continue
-            if _edge_exists(graph, source_node.node_id, target_node.node_id, edge_kind):
                 continue
             graph.add_edge(
                 GraphEdge(
@@ -132,18 +169,23 @@ def _payload_source_ids(node: Any) -> list[str]:
 
 
 def _text_references_node(text: str, node_label: str) -> bool:
-    tokens = set(re.findall(r"[a-z0-9]{4,}", node_label.lower()))
+    tokens = set(_reference_tokens(node_label))
     if not tokens:
         return False
-    overlap = sum(1 for token in tokens if token in text.lower())
-    return overlap >= 2
+    text_tokens = set(_reference_tokens(text))
+    required_overlap = 1 if len(tokens) <= 2 else 2
+    return len(tokens & text_tokens) >= required_overlap
 
 
-def _edge_exists(graph: ClaimGraph, source_id: str, target_id: str, kind: str) -> bool:
-    for edge in graph.edges:
-        if edge.source_id == source_id and edge.target_id == target_id and edge.kind == kind:
-            return True
-    return False
+def _reference_tokens(text: str) -> list[str]:
+    tokens = re.findall(r"[a-z0-9][a-z0-9_+.-]*|[\u4e00-\u9fff]{2,}", text.lower())
+    return [
+        token
+        for token in tokens
+        if len(token) >= 4
+        or token in SHORT_REFERENCE_TOKENS
+        or (len(token) >= 2 and any(character.isdigit() for character in token))
+    ]
 
 
 def _normalize(text: str) -> str:

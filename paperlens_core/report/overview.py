@@ -6,7 +6,9 @@ from typing import Any
 from paperlens_core.library_graph import graph_node_labels
 from paperlens_core.report.rows import (
     classification_counts,
+    markdown_link,
     reading_priority_key,
+    report_href,
     row_decision,
 )
 from paperlens_core.report.text import compact_reason
@@ -71,9 +73,11 @@ def render_paperlens_report(
         suffix = f"；{graph_link}" if graph_link and output_language != "en" else ""
         if graph_link and output_language == "en":
             suffix = f"; {graph_link}"
-        lines.append(
-            f"- [{decision.class_label}] [{display_row_title(row)}](./papers/{row['report_name']}) - {reason}{suffix}"
+        report_link = markdown_link(
+            display_row_title(row),
+            report_href(row.get("report_name"), prefix="./papers"),
         )
+        lines.append(f"- [{decision.class_label}] {report_link} - {reason}{suffix}")
     if visible_reviews:
         if output_language == "en":
             lines.extend(
@@ -104,7 +108,7 @@ def core_graph_report_link(row: dict[str, Any], *, output_language: str) -> str:
     if name == _string_or_none(row.get("report_name")):
         return ""
     label = "Core graph report" if output_language == "en" else "事实图报告"
-    return f"[{label}](./papers/{name})"
+    return markdown_link(label, report_href(name, prefix="./papers"))
 
 
 def one_line_row_reason(row: dict[str, Any], *, output_language: str = "zh") -> str:

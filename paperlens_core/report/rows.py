@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from urllib.parse import quote
 
 from paperlens_core.schemas import ClassificationDecision, PaperRecord, SkimCard
 
@@ -15,6 +16,21 @@ def _report_slug(value: str) -> str:
 
 def paper_report_filename(paper: PaperRecord) -> str:
     return f"{paper.paper_id}_{_report_slug(paper.canonical_title or paper.paper_id)[:60]}.md"
+
+
+def markdown_link(label: str, href: str) -> str:
+    return f"[{markdown_link_label(label)}]({href})"
+
+
+def markdown_link_label(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").replace("\\", "\\\\"))
+    return text.replace("[", "\\[").replace("]", "\\]").strip()
+
+
+def report_href(report_name: Any, *, prefix: str = "papers") -> str:
+    name = str(report_name or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
+    safe_name = quote(name or "report.md", safe="")
+    return f"{prefix.rstrip('/')}/{safe_name}"
 
 
 def row_decision(row: dict[str, Any]) -> ClassificationDecision:
@@ -83,8 +99,9 @@ def report_link_lines(rows: list[dict[str, Any]]) -> list[str]:
     result = []
     for row in rows:
         paper = row["paper"]
+        label = f"{paper.paper_id}: {paper.canonical_title or paper.paper_id}"
         result.append(
-            f"- [{paper.paper_id}: {paper.canonical_title or paper.paper_id}](papers/{row['report_name']})"
+            f"- {markdown_link(label, report_href(row.get('report_name')))}"
         )
     return result
 
@@ -93,8 +110,9 @@ def describe_rows(rows: list[dict[str, Any]]) -> list[str]:
     result = []
     for row in rows:
         paper = row["paper"]
+        label = f"{paper.paper_id}: {paper.canonical_title or paper.paper_id}"
         result.append(
-            f"- [{paper.paper_id}: {paper.canonical_title or paper.paper_id}](papers/{row['report_name']}) - {row_relation(row)}"
+            f"- {markdown_link(label, report_href(row.get('report_name')))} - {row_relation(row)}"
         )
     return result
 
