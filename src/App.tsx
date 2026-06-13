@@ -419,6 +419,8 @@ function encodeOutput(outputDir: string) {
 
 function normalizeLocalPath(path: string) {
   const slash = path.includes('\\') ? '\\' : '/'
+  const isUncPath = /^[\\/]{2}[^\\/]/.test(path)
+  const isRootedPath = !isUncPath && /^[\\/]/.test(path)
   const normalized = path.replace(/\//g, '\\')
   const parts: string[] = []
   for (const part of normalized.split('\\')) {
@@ -431,6 +433,12 @@ function normalizeLocalPath(path: string) {
   }
   if (/^[A-Za-z]:$/.test(parts[0] ?? '')) {
     return `${parts[0]}\\${parts.slice(1).join('\\')}`
+  }
+  if (isUncPath) {
+    return `\\\\${parts.join('\\')}`
+  }
+  if (isRootedPath) {
+    return `${slash}${parts.join(slash)}`
   }
   return parts.join(slash)
 }
@@ -2218,7 +2226,7 @@ function AnswerEvidence({ answer }: { answer: AnswerPayload }) {
         <ChevronRight size={14} />
         证据边界
         {answer.cited_source_ids?.length ? (
-          <span>source IDs {answer.cited_source_ids.slice(0, 3).join(', ')}</span>
+          <span>{answer.cited_source_ids.length} 条依据</span>
         ) : null}
         {answer.confidence ? <span>{answer.confidence}</span> : null}
       </summary>
@@ -2251,15 +2259,16 @@ function AnswerEvidence({ answer }: { answer: AnswerPayload }) {
 function EvidenceSummary({ paper, service, outputDir }: { paper: PaperSummary | null; service: ServiceInfo | null; outputDir: string }) {
   const [payload, setPayload] = useState<Record<string, unknown> | null>(null)
   const [open, setOpen] = useState(false)
+  const paperId = paper?.paper_id ?? ''
   useEffect(() => {
-    if (!paper || !service || !outputDir) return
+    if (!paperId || !service || !outputDir) return
     apiGet<Record<string, unknown>>(
       service,
-      `/papers/${encodeURIComponent(paper.paper_id)}/evidence?output_dir=${encodeOutput(outputDir)}`,
+      `/papers/${encodeURIComponent(paperId)}/evidence?output_dir=${encodeOutput(outputDir)}`,
     )
       .then(setPayload)
       .catch(() => setPayload(null))
-  }, [paper, service, outputDir])
+  }, [paperId, service, outputDir])
   const claims = Array.isArray(payload?.claims) ? payload.claims : []
   const evidence = Array.isArray(payload?.evidence) ? payload.evidence : []
   return (
@@ -2279,7 +2288,7 @@ function EvidenceSummary({ paper, service, outputDir }: { paper: PaperSummary | 
         <div className="evidence-list">
           {evidence.slice(0, 8).map((item, index) => (
             <div key={index} className="evidence-item">
-              <strong>{String((item as Record<string, unknown>).id ?? `E${index + 1}`)}</strong>
+              <strong title={String((item as Record<string, unknown>).id ?? '')}>依据 {index + 1}</strong>
               <p>{String((item as Record<string, unknown>).interpretation ?? (item as Record<string, unknown>).text ?? '')}</p>
             </div>
           ))}
