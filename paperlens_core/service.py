@@ -1036,31 +1036,33 @@ class PaperLensServiceState:
         )
         with self._lock:
             self.answers[answer_id] = answer
-        answer.events.append(
-            {
-                "type": "answer_queued",
-                "level": "info",
-                "message": "Question queued",
-                "data": {"answer_id": answer_id, "scope": scope},
-            }
-        )
+            answer.events.append(
+                {
+                    "type": "answer_queued",
+                    "level": "info",
+                    "message": "Question queued",
+                    "data": {"answer_id": answer_id, "scope": scope},
+                }
+            )
+            summary = answer.summary()
         thread = threading.Thread(target=self._answer_thread, args=(answer,), daemon=True)
         answer.thread = thread
         thread.start()
-        return answer.summary()
+        return summary
 
     def _answer_thread(self, answer: ManagedAnswer) -> None:
-        answer.status = "running"
-        answer.updated_at = utc_now()
-        answer.events.append(
-            {
-                "type": "answer_started",
-                "level": "info",
-                "message": "Checking PaperLens ClaimGraph and evidence",
-                "data": {"answer_id": answer.answer_id, "scope": answer.scope},
-            }
-        )
-        payload = answer.request_payload
+        with self._lock:
+            answer.status = "running"
+            answer.updated_at = utc_now()
+            answer.events.append(
+                {
+                    "type": "answer_started",
+                    "level": "info",
+                    "message": "Checking PaperLens ClaimGraph and evidence",
+                    "data": {"answer_id": answer.answer_id, "scope": answer.scope},
+                }
+            )
+            payload = dict(answer.request_payload)
         overrides = config_overrides_from_payload(payload)
         try:
             if answer.scope == "library":
@@ -1089,36 +1091,57 @@ class PaperLensServiceState:
                         chat_history=chat_history_from_payload(payload),
                     )
                 )
-            answer.answer = result
-            answer.status = "completed"
+            with self._lock:
+                answer.answer = result
+                answer.status = "completed"
         except Exception as exc:
-            answer.status = "failed"
-            answer.error = str(exc)
-            answer.events.append(
-                {
-                    "type": "answer_failed",
-                    "level": "error",
-                    "message": str(exc),
-                    "data": {"answer_id": answer.answer_id},
-                }
-            )
+            with self._lock:
+                answer.status = "failed"
+                answer.error = str(exc)
+                answer.events.append(
+                    {
+                        "type": "answer_failed",
+                        "level": "error",
+                        "message": str(exc),
+                        "data": {"answer_id": answer.answer_id},
+                    }
+                )
         finally:
-            answer.completed_at = utc_now()
-            answer.updated_at = answer.completed_at
-            scrub_sensitive_request_payload(answer.request_payload)
-            answer.events.append(
-                {
-                    "type": "answer_completed" if answer.status == "completed" else "answer_failed",
-                    "level": "info" if answer.status == "completed" else "error",
-                    "message": "Answer ready" if answer.status == "completed" else answer.error,
-                    "data": {
-                        "answer_id": answer.answer_id,
-                        "status": answer.status,
-                        "answer": answer.answer if answer.status == "completed" else None,
-                    },
-                }
-            )
+            with self._lock:
+                answer.completed_at = utc_now()
+                answer.updated_at = answer.completed_at
+                scrub_sensitive_request_payload(answer.request_payload)
+                answer.events.append(
+                    {
+                        "type": "answer_completed" if answer.status == "completed" else "answer_failed",
+                        "level": "info" if answer.status == "completed" else "error",
+                        "message": "Answer ready" if answer.status == "completed" else answer.error,
+                        "data": {
+                            "answer_id": answer.answer_id,
+                            "status": answer.status,
+                            "answer": answer.answer if answer.status == "completed" else None,
+                        },
+                    }
+                )
             self.prune_memory()
+
+    def answer_summary(self, answer_id: str) -> dict[str, Any]:
+        with self._lock:
+            answer = self.answers.get(answer_id)
+            if not answer:
+                raise KeyError(f"Unknown answer: {answer_id}")
+            return answer.summary()
+
+    def answer_for_events(self, answer_id: str) -> ManagedAnswer:
+        with self._lock:
+            answer = self.answers.get(answer_id)
+            if not answer:
+                raise KeyError(f"Unknown answer: {answer_id}")
+            return answer
+
+    def answer_status(self, answer: ManagedAnswer) -> str:
+        with self._lock:
+            return answer.status
 
 
 class PaperLensHttpServer(ThreadingHTTPServer):
@@ -1262,15 +1285,10 @@ class PaperLensRequestHandler(BaseHTTPRequestHandler):
             self._stream_events(job.events, terminal_status=lambda: job.status)
             return None
         if len(parts) == 2 and parts[0] == "ask":
-            answer = self.state.answers.get(parts[1])
-            if not answer:
-                raise KeyError(f"Unknown answer: {parts[1]}")
-            return answer.summary()
+            return self.state.answer_summary(parts[1])
         if len(parts) == 3 and parts[0] == "ask" and parts[2] == "events":
-            answer = self.state.answers.get(parts[1])
-            if not answer:
-                raise KeyError(f"Unknown answer: {parts[1]}")
-            self._stream_events(answer.events, terminal_status=lambda: answer.status)
+            answer = self.state.answer_for_events(parts[1])
+            self._stream_events(answer.events, terminal_status=lambda: self.state.answer_status(answer))
             return None
         raise RouteError(HTTPStatus.NOT_FOUND, f"Unknown route: /{'/'.join(parts)}")
 

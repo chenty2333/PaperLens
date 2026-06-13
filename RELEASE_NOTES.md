@@ -28,6 +28,7 @@ This release turns the local PaperLens workspace into a versioned product data s
 - Markdown reports are sanitized without raw HTML rendering.
 - Runtime events, error records, and model-call ledger entries are redacted before writing to disk or the desktop event stream.
 - Completed read jobs and QA answers now clear runtime API keys from in-memory request payloads; retries use the current UI provider settings.
+- QA answer state updates and event-stream status reads now use the service lock consistently.
 - Local maintenance cleanup no longer clears interface settings until the desktop cleanup command succeeds.
 - Local chat history now has bounded storage snapshots and tolerates localStorage quota or availability failures.
 - Desktop cleanup removes symbolic links as links instead of following them into external directories.
