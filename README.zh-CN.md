@@ -197,7 +197,7 @@ Release notes 来自 [RELEASE_NOTES.md](RELEASE_NOTES.md)，并复用于 GitHub 
 
 PaperLens 的默认设计是避免把 key 写进仓库和输出产物。
 
-UI 不会把 API key 写入 `localStorage`。Git 会忽略生成的论文库、报告、sidecar、本地缓存、虚拟环境、构建产物和 `.env` 文件。本地模型调用账本只记录请求大小、阶段名、状态和 provider usage metadata，不记录 prompt 正文或 API key。
+UI 不会把 API key 写入 `localStorage`。桌面端访问本地 Core 服务时使用 HTTP header 鉴权，不再把 token 放进 URL query，实时进度流和报告图片也是如此。Markdown 报告会经过清洗，并且不会渲染 raw HTML。Git 会忽略生成的论文库、报告、sidecar、本地缓存、虚拟环境、构建产物和 `.env` 文件。本地模型调用账本只记录请求大小、阶段名、状态和 provider usage metadata，不记录 prompt 正文或 API key。
 
 ## 文档
 

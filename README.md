@@ -199,7 +199,7 @@ GitHub Release and signed updater manifest.
 
 PaperLens is designed to keep keys out of the repository and output artifacts.
 
-The UI does not persist API keys to `localStorage`. Generated paper libraries, reports, sidecars, local caches, virtual environments, build output, and `.env` files are ignored by Git. Local model-call accounting stores request sizes, stage names, status, and provider usage metadata, not prompt bodies or API keys.
+The UI does not persist API keys to `localStorage`. Desktop-to-core requests authenticate with local HTTP headers instead of URL query tokens, including live progress streams and report images. Markdown reports are sanitized and raw HTML is not rendered. Generated paper libraries, reports, sidecars, local caches, virtual environments, build output, and `.env` files are ignored by Git. Local model-call accounting stores request sizes, stage names, status, and provider usage metadata, not prompt bodies or API keys.
 
 ## Documentation
 

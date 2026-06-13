@@ -39,6 +39,8 @@ Workspace maintenance:
 
 Security defaults:
   - API keys are accepted at runtime and redacted from run config snapshots.
+  - Desktop-to-core requests use local HTTP header auth, not URL query tokens.
+  - Markdown reports are sanitized and raw HTML is not rendered.
   - Model-call diagnostics record stage, payload size, usage, status, and request id.
   - Model prompts and responses are not written to the call ledger.
   - Local app settings do not persist the API key.
