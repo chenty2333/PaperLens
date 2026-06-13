@@ -300,6 +300,56 @@ def config_overrides_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+RETRY_PAYLOAD_OVERRIDE_KEYS = {
+    "provider_kind",
+    "base_url",
+    "api_key",
+    "api_key_env",
+    "model",
+    "reasoning_model",
+    "timeout_seconds",
+    "concurrency",
+    "output_language",
+    "read_mode",
+    "visual_verification_mode",
+    "visual_verification_max_pages",
+}
+
+
+def retry_payload_from_current_settings(
+    original: dict[str, Any],
+    current: dict[str, Any],
+) -> dict[str, Any]:
+    payload = dict(original)
+    for key in RETRY_PAYLOAD_OVERRIDE_KEYS:
+        if key in current:
+            payload[key] = current[key]
+    if isinstance(original.get("provider"), dict):
+        provider = dict(original["provider"])
+        current_provider = current.get("provider") if isinstance(current.get("provider"), dict) else {}
+        for key in {
+            "kind",
+            "base_url",
+            "api_key",
+            "api_key_env",
+            "model",
+            "reasoning_model",
+            "timeout_seconds",
+        }:
+            if key in current_provider:
+                provider[key] = current_provider[key]
+        payload["provider"] = provider
+    return payload
+
+
+def scrub_sensitive_request_payload(payload: dict[str, Any]) -> None:
+    if "api_key" in payload:
+        payload["api_key"] = None
+    provider = payload.get("provider")
+    if isinstance(provider, dict) and "api_key" in provider:
+        provider["api_key"] = None
+
+
 def public_report_path(output_dir: Path, record: dict[str, Any]) -> str:
     outputs = record.get("outputs") if isinstance(record.get("outputs"), dict) else {}
     report = string_or_none(outputs.get("briefing_md"))
@@ -888,6 +938,7 @@ class PaperLensServiceState:
             with self._lock:
                 job.completed_at = utc_now()
                 job.updated_at = job.completed_at
+                scrub_sensitive_request_payload(job.request_payload)
                 final_type = "job_completed"
                 final_level = "info"
                 final_message = "PaperLens read job completed"
@@ -917,7 +968,7 @@ class PaperLensServiceState:
                 raise KeyError(f"Unknown job: {job_id}")
             if original.status not in RETRYABLE_JOB_STATUSES:
                 raise ValueError(f"Job {job_id} cannot be retried from status {original.status}")
-            retry_payload = dict(original.request_payload)
+            retry_payload = retry_payload_from_current_settings(original.request_payload, payload)
             current_stage = original.current_stage
         from_stage = safe_workflow_stage(string_or_none(payload.get("from_stage")) or current_stage)
         if from_stage:
@@ -1054,6 +1105,7 @@ class PaperLensServiceState:
         finally:
             answer.completed_at = utc_now()
             answer.updated_at = answer.completed_at
+            scrub_sensitive_request_payload(answer.request_payload)
             answer.events.append(
                 {
                     "type": "answer_completed" if answer.status == "completed" else "answer_failed",

@@ -259,6 +259,25 @@ const defaultSettings: RunSettings = {
   readMode: 'standard',
 }
 
+function modelSettingsPayload(settings: RunSettings) {
+  return {
+    provider_kind: settings.providerKind,
+    base_url: settings.baseUrl || null,
+    api_key: settings.apiKey,
+    model: settings.model || null,
+    reasoning_model: settings.reasoningModel || null,
+  }
+}
+
+function readJobSettingsPayload(settings: RunSettings) {
+  return {
+    ...modelSettingsPayload(settings),
+    concurrency: Number(settings.concurrency || '1') || 1,
+    output_language: settings.outputLanguage,
+    read_mode: settings.readMode,
+  }
+}
+
 const markdownSanitizeSchema = {
   ...defaultSchema,
   tagNames: [...new Set([...(defaultSchema.tagNames ?? []), 'figure', 'figcaption'])],
@@ -835,6 +854,7 @@ function App() {
       && settings.model.trim()
       && providerReady,
   )
+  const canRetryJob = Boolean(service && settings.apiKey.trim() && settings.model.trim() && providerReady)
 
   function setChatThreadMessages(threadId: string, update: (current: ChatMessage[]) => ChatMessage[]) {
     setChatStore((current) => {
@@ -1101,14 +1121,7 @@ function App() {
     const payload = {
       input_dir: settings.inputDir,
       output_dir: settings.outputDir,
-      provider_kind: settings.providerKind,
-      base_url: settings.baseUrl || null,
-      api_key: settings.apiKey,
-      model: settings.model || null,
-      reasoning_model: settings.reasoningModel || null,
-      concurrency: Number(settings.concurrency || '1') || 1,
-      output_language: settings.outputLanguage,
-      read_mode: settings.readMode,
+      ...readJobSettingsPayload(settings),
     }
     try {
       const job = await apiPost<JobSummary>(service, '/jobs/read', payload)
@@ -1123,8 +1136,13 @@ function App() {
 
   async function controlJob(jobId: string, command: 'cancel' | 'pause' | 'resume' | 'retry') {
     if (!service) return
+    if (command === 'retry' && !canRetryJob) {
+      setError('请先填写模型、API key 和 provider 设置后再重试。')
+      return
+    }
     try {
-      const job = await apiPost<JobSummary>(service, `/jobs/${encodeURIComponent(jobId)}/${command}`, {})
+      const payload = command === 'retry' ? readJobSettingsPayload(settings) : {}
+      const job = await apiPost<JobSummary>(service, `/jobs/${encodeURIComponent(jobId)}/${command}`, payload)
       if (command === 'retry') {
         setActiveJobId(job.job_id)
         setJobEvents([])
@@ -1396,10 +1414,7 @@ function App() {
         output_dir: currentOutputDir,
         paper_id: chatScope === 'paper' ? selectedPaper?.paper_id : null,
         question: text,
-        provider_kind: settings.providerKind,
-        base_url: settings.baseUrl || null,
-        api_key: settings.apiKey,
-        model: settings.model || null,
+        ...modelSettingsPayload(settings),
         limit: 8,
         chat_history: history,
       })
@@ -1868,8 +1883,9 @@ function App() {
                       <button
                         type="button"
                         className="icon-button small"
-                        title="重试"
+                        title={canRetryJob ? '重试' : '填写模型设置后重试'}
                         aria-label="重试"
+                        disabled={!canRetryJob}
                         onClick={() => controlJob(visibleJob.job_id, 'retry')}
                       >
                         <RotateCcw size={14} />

@@ -26,6 +26,7 @@ This release turns the local PaperLens workspace into a versioned product data s
 - Desktop progress streams and report images now authenticate with local HTTP headers instead of URL query tokens.
 - Markdown reports are sanitized without raw HTML rendering.
 - Runtime events, error records, and model-call ledger entries are redacted before writing to disk or the desktop event stream.
+- Completed read jobs and QA answers now clear runtime API keys from in-memory request payloads; retries use the current UI provider settings.
 - Local maintenance cleanup no longer clears interface settings until the desktop cleanup command succeeds.
 - Desktop cleanup removes symbolic links as links instead of following them into external directories.
 - Markdown reports open external links through the system browser and no longer load remote image URLs directly.
