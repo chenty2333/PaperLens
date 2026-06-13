@@ -1122,7 +1122,7 @@ function App() {
   async function clearWorkspace() {
     if (!currentOutputDir) return
     const ok = await confirm(
-      `这会删除当前输出目录里的 PaperLens 结果：\n${currentOutputDir}\n\n会删除 .paperlens、papers 和 PaperLens.md；不会删除输入 PDF。`,
+      `这会删除当前输出目录里的 PaperLens 结果：\n${currentOutputDir}\n\n只会在识别到 PaperLens workspace 标记后清理 .paperlens、PaperLens.md 和受管理的报告目录；不会删除输入 PDF 或普通 papers 文件夹。`,
       { title: '清空当前库', kind: 'warning' },
     )
     if (!ok) return

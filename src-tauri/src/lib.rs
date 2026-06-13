@@ -194,9 +194,8 @@ fn add_app_path(
 }
 
 fn workspace_artifacts(output_dir: &Path) -> Vec<PathBuf> {
-    [
+    let mut artifacts: Vec<PathBuf> = [
         ".paperlens",
-        "papers",
         "PaperLens.md",
         "PaperLens.json",
         "PaperLens_Library.md",
@@ -204,7 +203,55 @@ fn workspace_artifacts(output_dir: &Path) -> Vec<PathBuf> {
     ]
     .into_iter()
     .map(|name| output_dir.join(name))
-    .collect()
+    .collect();
+
+    let paperlens_workspace = output_dir.join(".paperlens").exists();
+    let papers_dir = output_dir.join("papers");
+    if paperlens_workspace || legacy_papers_dir_looks_managed(&papers_dir) {
+        artifacts.push(papers_dir);
+    }
+    artifacts
+}
+
+fn has_paperlens_workspace_marker(output_dir: &Path) -> bool {
+    output_dir.join(".paperlens").exists()
+        || output_dir.join("PaperLens.md").exists()
+        || output_dir.join("PaperLens.json").exists()
+        || output_dir.join("PaperLens_Library.md").exists()
+        || output_dir.join("PaperLens_Library.json").exists()
+        || legacy_papers_dir_looks_managed(&output_dir.join("papers"))
+}
+
+fn legacy_papers_dir_looks_managed(path: &Path) -> bool {
+    if !path.is_dir() {
+        return false;
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return false;
+    };
+    let mut seen_report = false;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let child = entry.path();
+        if !child.is_file() {
+            return false;
+        }
+        let extension = child
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase());
+        if extension.as_deref() != Some("md") {
+            return false;
+        }
+        seen_report = true;
+    }
+    seen_report
+}
+
+fn is_filesystem_root(path: &Path) -> bool {
+    path.parent().is_none()
 }
 
 #[tauri::command]
@@ -450,6 +497,13 @@ fn clear_workspace_data(output_dir: String) -> Result<CleanupReport, String> {
     }
     if !root.is_dir() {
         return Err("当前输出路径不是目录。".to_string());
+    }
+    let root = fs::canonicalize(&root).map_err(|err| format!("无法解析当前输出目录：{err}"))?;
+    if is_filesystem_root(&root) {
+        return Err("拒绝清理磁盘根目录。请选择 PaperLens 输出目录。".to_string());
+    }
+    if !has_paperlens_workspace_marker(&root) {
+        return Err("当前目录没有可识别的 PaperLens workspace 标记，已拒绝清理。".to_string());
     }
 
     let mut report = CleanupReport::default();
