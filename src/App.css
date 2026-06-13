@@ -248,6 +248,7 @@ button.primary:disabled {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .maintenance-actions {

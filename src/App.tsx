@@ -797,10 +797,11 @@ function workspaceMaintenanceSummary(action: string, result: WorkspaceMaintenanc
     return pieces.join('，')
   }
   if (action === 'export') {
-    return `已导出备份：${result.file_count ?? 0} 个文件，${formatBytes(result.bytes)}`
+    const archive = result.archive ? `，位置：${result.archive}` : ''
+    return `已导出备份：${result.file_count ?? 0} 个文件，${formatBytes(result.bytes)}${archive}`
   }
   if (action === 'import') {
-    const backup = result.backup_dir ? '，原库已自动备份' : ''
+    const backup = result.backup_dir ? `，原库备份：${result.backup_dir}` : ''
     return `已导入备份：${result.extracted ?? 0} 个文件${backup}`
   }
   const issues = result.issues?.length ?? 0
@@ -1854,7 +1855,12 @@ function App() {
 
         {evidenceOpen && (
           <aside className="evidence-drawer">
-            <EvidenceSummary paper={selectedPaper} service={service} outputDir={currentOutputDir} />
+            <EvidenceSummary
+              key={`${currentOutputDir}::${selectedPaper?.paper_id ?? ''}`}
+              paper={selectedPaper}
+              service={service}
+              outputDir={currentOutputDir}
+            />
           </aside>
         )}
       </section>
@@ -2389,12 +2395,20 @@ function EvidenceSummary({ paper, service, outputDir }: { paper: PaperSummary | 
   const paperId = paper?.paper_id ?? ''
   useEffect(() => {
     if (!paperId || !service || !outputDir) return
+    let cancelled = false
     apiGet<Record<string, unknown>>(
       service,
       `/papers/${encodeURIComponent(paperId)}/evidence?output_dir=${encodeOutput(outputDir)}`,
     )
-      .then(setPayload)
-      .catch(() => setPayload(null))
+      .then((value) => {
+        if (!cancelled) setPayload(value)
+      })
+      .catch(() => {
+        if (!cancelled) setPayload(null)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [paperId, service, outputDir])
   const claims = Array.isArray(payload?.claims) ? payload.claims : []
   const evidence = Array.isArray(payload?.evidence) ? payload.evidence : []
