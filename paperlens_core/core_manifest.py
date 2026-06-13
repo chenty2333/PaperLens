@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +16,7 @@ from paperlens_core.audit import (
     publish_status_from_findings,
 )
 from paperlens_core.dom import PaperDOM
+from paperlens_core.file_utils import hash_file
 from paperlens_core.graph import ClaimGraph
 from paperlens_core.reading import ObservationLog, ReadingPlan, RelationCandidateLog
 from paperlens_core.runtime import read_artifact_envelope, write_typed_artifact
@@ -276,4 +276,4 @@ def read_required_artifact_data(
 
 
 def sha256_file(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    return hash_file(path)

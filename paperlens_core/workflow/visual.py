@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import uuid
@@ -10,6 +9,7 @@ from typing import Any, Protocol
 from paperlens_core.agents.llm import JsonLlmClient, llm_call_context
 from paperlens_core.config import CoreConfig
 from paperlens_core.events import EventWriter
+from paperlens_core.file_utils import hash_file
 from paperlens_core.schemas import PaperRecord
 from paperlens_core.workflow.utils import hash_text
 
@@ -204,7 +204,7 @@ def build_vlm_page_prompt(*, paper: PaperRecord, artifacts: list[Any]) -> str:
 
 def hash_file_bytes(path: Path) -> str:
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+        return hash_file(path, length=16)
     except OSError:
         return f"missing:{hash_text(str(path))[:16]}"
 

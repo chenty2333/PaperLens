@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import os
 from pathlib import Path
 from typing import Any
@@ -12,6 +11,7 @@ from paperlens_core.config import CoreConfig
 from paperlens_core.control import ControlState
 from paperlens_core.db import ArtifactDb
 from paperlens_core.events import EventWriter, write_json
+from paperlens_core.file_utils import hash_file
 from paperlens_core.runtime import (
     llm_cache_path,
     read_llm_cache,
@@ -266,7 +266,7 @@ class PaperLensWorkflow:
     ) -> None:
         if not path.exists():
             return
-        content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+        content_hash = hash_file(path)
         artifact = ArtifactVersion(
             artifact_id=f"{artifact_type}:{paper_id or 'run'}:{path.name}:{content_hash[:12]}",
             paper_id=paper_id,
