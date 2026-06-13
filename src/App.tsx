@@ -9,7 +9,7 @@ import {
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { confirm, message, open, save } from '@tauri-apps/plugin-dialog'
-import { openPath } from '@tauri-apps/plugin-opener'
+import { openPath, openUrl } from '@tauri-apps/plugin-opener'
 import { relaunch } from '@tauri-apps/plugin-process'
 import { check, type DownloadEvent } from '@tauri-apps/plugin-updater'
 import ReactMarkdown from 'react-markdown'
@@ -585,7 +585,8 @@ function uniqueImageCandidates(values: Array<ImageCandidate | null | undefined>)
 
 function localAssetCandidates(src: string | undefined, report: ReportPayload | null, outputDir: string, service: ServiceInfo | null) {
   if (!src) return []
-  if (/^(https?:|data:|blob:)/i.test(src)) return [{ src }]
+  if (/^https?:/i.test(src)) return []
+  if (/^(data:|blob:)/i.test(src)) return [{ src }]
   const baseDir = report?.paper.report_path ? dirname(report.paper.report_path) : ''
   const assetPath = resolveRelativePath(baseDir, src)
   const outputRoot = outputRootForReport(report, outputDir)
@@ -2087,15 +2088,21 @@ function MarkdownBlock({
           img: ({ src, alt }) => (
             <MarkdownImage src={src} alt={alt ?? ''} report={report} outputDir={outputDir} service={service} />
           ),
-          a: ({ href, children }) => (
-            <a href={href} onClick={(event) => {
-              if (href && !/^https?:/i.test(href)) {
-                event.preventDefault()
-              }
-            }}>
-              {children}
-            </a>
-          ),
+          a: ({ href, children }) => {
+            const externalHref = href && /^(https?:|mailto:)/i.test(href) ? href : ''
+            return (
+              <a
+                href={externalHref || undefined}
+                rel={externalHref ? 'noreferrer' : undefined}
+                onClick={(event) => {
+                  event.preventDefault()
+                  if (externalHref) void openUrl(externalHref).catch(() => undefined)
+                }}
+              >
+                {children}
+              </a>
+            )
+          },
         }}
       >
         {markdown}

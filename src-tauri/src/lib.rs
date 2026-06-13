@@ -159,12 +159,22 @@ fn command_label(label: &str, path: &Path) -> String {
 }
 
 fn remove_cleanup_path(report: &mut CleanupReport, path: PathBuf) {
-    if !path.exists() {
-        report.missing.push(path_label(&path));
-        return;
-    }
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            report.missing.push(path_label(&path));
+            return;
+        }
+        Err(err) => {
+            report.errors.push(format!("{}: {err}", path_label(&path)));
+            return;
+        }
+    };
 
-    let result = if path.is_dir() {
+    let file_type = metadata.file_type();
+    let result = if file_type.is_symlink() || file_type.is_file() {
+        fs::remove_file(&path)
+    } else if file_type.is_dir() {
         fs::remove_dir_all(&path)
     } else {
         fs::remove_file(&path)
