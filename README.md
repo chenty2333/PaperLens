@@ -113,7 +113,7 @@ backup directory next to the workspace.
 Requirements:
 
 - Node.js 24
-- Python 3.12+
+- Python 3.12
 - Rust stable
 - `uv`
 - NSIS on Windows for installer builds
