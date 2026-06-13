@@ -14,7 +14,6 @@ import { relaunch } from '@tauri-apps/plugin-process'
 import { check, type DownloadEvent } from '@tauri-apps/plugin-updater'
 import ReactMarkdown from 'react-markdown'
 import rehypeKatex from 'rehype-katex'
-import rehypeRaw from 'rehype-raw'
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
@@ -2075,7 +2074,7 @@ function MarkdownBlock({
     <div className="markdown-body">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkMath]}
-        rehypePlugins={[rehypeRaw, [rehypeSanitize, markdownSanitizeSchema], rehypeKatex]}
+        rehypePlugins={[[rehypeSanitize, markdownSanitizeSchema], rehypeKatex]}
         components={{
           img: ({ src, alt }) => (
             <MarkdownImage src={src} alt={alt ?? ''} report={report} outputDir={outputDir} service={service} />
