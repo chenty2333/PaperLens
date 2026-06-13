@@ -1041,16 +1041,21 @@ class PaperLensServiceState:
     def start_answer(self, payload: dict[str, Any]) -> dict[str, Any]:
         output_dir = path_from_payload(payload, "output_dir")
         scope = string_or_none(payload.get("scope")) or "paper"
+        if scope not in {"paper", "library"}:
+            raise ValueError("Question scope must be 'paper' or 'library'")
         question = string_or_none(payload.get("question"))
         if not question:
             raise ValueError("Missing question")
+        paper_id = string_or_none(payload.get("paper_id"))
+        if scope == "paper" and not paper_id:
+            raise ValueError("paper_id is required for paper-scoped questions")
         answer_id = f"ask_{uuid.uuid4().hex[:12]}"
         answer = ManagedAnswer(
             answer_id=answer_id,
             request_payload=dict(payload),
             scope=scope,
             output_dir=output_dir,
-            paper_id=string_or_none(payload.get("paper_id")),
+            paper_id=paper_id,
             question=question,
         )
         with self._lock:

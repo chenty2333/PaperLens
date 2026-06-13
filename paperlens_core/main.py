@@ -65,7 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--visual-verification-max-pages", type=int)
     ask = subparsers.add_parser("ask", help="Ask a question about a generated paper report")
     ask.add_argument("--output-dir", required=True)
-    ask.add_argument("--paper-id")
+    ask.add_argument("--paper-id", required=True)
     ask.add_argument("--question", required=True)
     ask.add_argument("--config")
     ask.add_argument("--provider-kind")

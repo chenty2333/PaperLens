@@ -35,7 +35,7 @@ class RunRequest(CoreRequest):
 class PaperQuestionRequest(CoreRequest):
     output_dir: Path
     question: str
-    paper_id: str | None = None
+    paper_id: str
     chat_history: list[JsonObject] = Field(default_factory=list)
 
 
