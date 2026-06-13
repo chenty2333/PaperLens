@@ -38,14 +38,17 @@ REQUIRED_DIRS = (
     "papers",
 )
 
-MANAGED_RELATIVE_PATHS = (
+MANAGED_DIR_RELATIVE_PATHS = (
     INTERNAL_DIRNAME,
-    "papers",
+)
+MANAGED_FILE_RELATIVE_PATHS = (
     "PaperLens.md",
     "PaperLens.json",
     "PaperLens_Library.md",
     "PaperLens_Library.json",
 )
+MANAGED_RELATIVE_PATHS = (*MANAGED_DIR_RELATIVE_PATHS, *MANAGED_FILE_RELATIVE_PATHS)
+MANAGED_REPORTS_DIR = "papers"
 
 CRITICAL_JSON_RELATIVE_PATHS = (
     f"{INTERNAL_DIRNAME}/workspace.json",
@@ -268,7 +271,9 @@ class WorkspaceStore:
         ):
             return True
         papers_dir = self.output_dir / "papers"
-        return papers_dir.exists() and any(papers_dir.glob("*.md"))
+        return papers_dir.exists() and any(
+            is_managed_report_file(path) for path in papers_dir.glob("*.md")
+        )
 
     def doctor(self, *, repair: bool = False) -> dict[str, Any]:
         repairs: list[str] = []
@@ -490,8 +495,8 @@ class WorkspaceStore:
         }
 
     def iter_export_files(self, *, include_cache: bool, archive_path: Path) -> Iterable[Path]:
-        for relative in MANAGED_RELATIVE_PATHS:
-            path = self.output_dir / relative
+        managed_roots = [self.output_dir / relative for relative in MANAGED_RELATIVE_PATHS]
+        for path in [*managed_roots, *self.managed_report_paths()]:
             reject_workspace_symlink(path, self.output_dir)
             if not path.exists():
                 continue
@@ -578,11 +583,9 @@ class WorkspaceStore:
                     / f"{self.output_dir.name}.paperlens-backup-{stamp}-{os.getpid()}"
                 )
                 backup_dir.mkdir(parents=True, exist_ok=False)
-                for path in existing:
-                    shutil.move(str(path), str(backup_dir / path.name))
+                move_managed_paths(paths=existing, source_root=self.output_dir, target_root=backup_dir)
             try:
-                for child in staging_dir.iterdir():
-                    shutil.move(str(child), str(self.output_dir / child.name))
+                move_workspace_contents(staging_dir, self.output_dir)
             except Exception:
                 if backup_dir:
                     self.rollback_failed_import(backup_dir, stamp)
@@ -610,9 +613,11 @@ class WorkspaceStore:
     def quarantine_failed_import(self, stamp: str) -> Path:
         failed_dir = self.failed_import_dir(stamp)
         failed_dir.mkdir(parents=True, exist_ok=False)
-        for path in self.managed_paths():
-            if path.exists():
-                shutil.move(str(path), str(failed_dir / path.name))
+        move_managed_paths(
+            paths=self.managed_paths(),
+            source_root=self.output_dir,
+            target_root=failed_dir,
+        )
         return failed_dir
 
     def validate_export_archive(self, archive: zipfile.ZipFile) -> dict[str, Any]:
@@ -651,12 +656,13 @@ class WorkspaceStore:
     def rollback_failed_import(self, backup_dir: Path, stamp: str) -> None:
         failed_dir = self.failed_import_dir(stamp)
         failed_dir.mkdir(parents=True, exist_ok=False)
-        for path in self.managed_paths():
-            if path.exists():
-                shutil.move(str(path), str(failed_dir / path.name))
-        for child in backup_dir.iterdir():
-            shutil.move(str(child), str(self.output_dir / child.name))
-        backup_dir.rmdir()
+        move_managed_paths(
+            paths=self.managed_paths(),
+            source_root=self.output_dir,
+            target_root=failed_dir,
+        )
+        move_workspace_contents(backup_dir, self.output_dir)
+        shutil.rmtree(backup_dir, ignore_errors=True)
 
     def failed_import_dir(self, stamp: str) -> Path:
         return unique_sibling_path(
@@ -665,16 +671,27 @@ class WorkspaceStore:
         )
 
     def managed_paths(self) -> list[Path]:
-        return [self.output_dir / relative for relative in MANAGED_RELATIVE_PATHS]
+        return [
+            *[self.output_dir / relative for relative in MANAGED_RELATIVE_PATHS],
+            *self.managed_report_paths(),
+        ]
+
+    def managed_report_paths(self) -> list[Path]:
+        papers_dir = self.output_dir / MANAGED_REPORTS_DIR
+        if not papers_dir.exists():
+            return []
+        return [
+            path
+            for path in sorted(papers_dir.glob("*.md"))
+            if is_managed_report_file(path)
+        ]
 
     def stats(self) -> dict[str, Any]:
         managed_bytes = sum(path_size(path) for path in self.managed_paths() if path.exists())
         return {
             "managed_bytes": managed_bytes,
             "cache_bytes": path_size(self.cache_dir),
-            "paper_reports": len(list((self.output_dir / "papers").glob("*.md")))
-            if (self.output_dir / "papers").exists()
-            else 0,
+            "paper_reports": len(self.managed_report_paths()),
         }
 
     @staticmethod
@@ -752,10 +769,30 @@ def archive_member_is_managed(filename: str) -> bool:
     if any(part in {"", ".", ".."} for part in parts):
         return False
     normalized = "/".join(parts)
-    return any(
-        normalized == relative or normalized.startswith(f"{relative}/")
-        for relative in MANAGED_RELATIVE_PATHS
-    )
+    if any(normalized == relative for relative in MANAGED_FILE_RELATIVE_PATHS):
+        return True
+    if any(normalized.startswith(f"{relative}/") for relative in MANAGED_DIR_RELATIVE_PATHS):
+        return True
+    return is_managed_report_archive_path(normalized)
+
+
+def is_managed_report_archive_path(normalized: str) -> bool:
+    parts = normalized.split("/")
+    if len(parts) != 2 or parts[0] != MANAGED_REPORTS_DIR:
+        return False
+    name = parts[1]
+    return name.startswith("p_") and name.endswith(".md")
+
+
+def is_managed_report_file(path: Path) -> bool:
+    try:
+        is_file = path.is_file()
+    except OSError:
+        return False
+    if not is_file or path.is_symlink():
+        return False
+    name = path.name
+    return name.startswith("p_") and name.endswith(".md")
 
 
 def validate_import_member(info: zipfile.ZipInfo) -> None:
@@ -769,6 +806,33 @@ def validate_import_member(info: zipfile.ZipInfo) -> None:
             f"Archive member is too large: {info.filename} "
             f"({info.file_size} bytes exceeds {MAX_IMPORT_MEMBER_BYTES})"
         )
+
+
+def move_managed_paths(
+    *,
+    paths: Iterable[Path],
+    source_root: Path,
+    target_root: Path,
+) -> None:
+    for path in paths:
+        if not path.exists():
+            continue
+        relative = path.relative_to(source_root)
+        target = target_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(path), str(target))
+
+
+def move_workspace_contents(source_root: Path, target_root: Path) -> None:
+    files = [path for path in sorted(source_root.rglob("*")) if path.is_file()]
+    for path in files:
+        relative = path.relative_to(source_root)
+        target = target_root / relative
+        if target.exists():
+            raise FileExistsError(f"Refusing to overwrite existing workspace file: {target}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(path), str(target))
+    shutil.rmtree(source_root, ignore_errors=True)
 
 
 def path_size(path: Path, *, skip_dirs: set[str] | None = None) -> int:
