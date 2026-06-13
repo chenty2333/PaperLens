@@ -21,6 +21,7 @@ This release turns the local PaperLens workspace into a versioned product data s
 - Workspace archives can be exported before upgrades and imported into a clean workspace if recovery is needed.
 - Workspace archive import now rejects encrypted, abnormally large, or suspiciously dense archives before extraction.
 - Workspace archive export/import now rejects symlink entries and verifies the manifest file count before restore.
+- Workspace archive paths must be `.zip` files outside PaperLens-managed data paths.
 - Desktop startup diagnostics now show the Core launch attempts and searched locations when the bundled sidecar is missing or cannot run.
 - Desktop progress streams and report images now authenticate with local HTTP headers instead of URL query tokens.
 - Markdown reports are sanitized without raw HTML rendering.

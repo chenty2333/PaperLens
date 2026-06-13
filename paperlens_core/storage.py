@@ -449,6 +449,7 @@ class WorkspaceStore:
     def export_archive(self, archive_path: Path, *, include_cache: bool = False) -> dict[str, Any]:
         self.bootstrap()
         archive_path = archive_path.expanduser().resolve()
+        validate_workspace_archive_path(archive_path, self.output_dir)
         archive_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = archive_path.with_name(f".{archive_path.name}.{os.getpid()}.tmp")
         files = list(self.iter_export_files(include_cache=include_cache, archive_path=archive_path))
@@ -507,6 +508,7 @@ class WorkspaceStore:
 
     def import_archive(self, archive_path: Path, *, replace: bool = False) -> dict[str, Any]:
         archive_path = archive_path.expanduser().resolve()
+        validate_workspace_archive_path(archive_path, self.output_dir)
         if not archive_path.exists():
             raise FileNotFoundError(f"Workspace archive not found: {archive_path}")
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -666,6 +668,27 @@ def safe_relative_to(path: Path, root: Path) -> Path:
         return path.resolve().relative_to(root.resolve())
     except ValueError as exc:
         raise ValueError(f"Path escapes workspace: {path}") from exc
+
+
+def validate_workspace_archive_path(archive_path: Path, output_dir: Path) -> None:
+    if archive_path.suffix.lower() != ".zip":
+        raise ValueError(f"Workspace archive path must end with .zip: {archive_path}")
+    output_dir = output_dir.expanduser().resolve()
+    for relative in MANAGED_RELATIVE_PATHS:
+        managed = (output_dir / relative).resolve()
+        if archive_path == managed:
+            raise ValueError(
+                f"Workspace archive path cannot overwrite managed PaperLens data: {archive_path}"
+            )
+        if managed.suffix:
+            continue
+        try:
+            archive_path.relative_to(managed)
+        except ValueError:
+            continue
+        raise ValueError(
+            f"Workspace archive path cannot be inside managed PaperLens data: {archive_path}"
+        )
 
 
 def int_or_zero(value: Any) -> int:
