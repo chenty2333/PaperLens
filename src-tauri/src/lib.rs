@@ -233,7 +233,7 @@ fn workspace_artifacts(output_dir: &Path) -> Vec<PathBuf> {
 
     let papers_dir = output_dir.join("papers");
     if output_dir.join(".paperlens").exists() {
-        artifacts.push(papers_dir);
+        artifacts.extend(managed_report_files(&papers_dir));
     }
     artifacts
 }
@@ -244,6 +244,30 @@ fn has_paperlens_workspace_marker(output_dir: &Path) -> bool {
         || output_dir.join("PaperLens.json").exists()
         || output_dir.join("PaperLens_Library.md").exists()
         || output_dir.join("PaperLens_Library.json").exists()
+}
+
+fn managed_report_files(path: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(path) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| is_paperlens_report_file(path))
+        .collect()
+}
+
+fn is_paperlens_report_file(path: &Path) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.file_type().is_file() {
+        return false;
+    }
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    name.starts_with("p_") && name.ends_with(".md")
 }
 
 fn is_filesystem_root(path: &Path) -> bool {

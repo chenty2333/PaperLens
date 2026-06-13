@@ -30,7 +30,7 @@ This release turns the local PaperLens workspace into a versioned product data s
 - Completed read jobs and QA answers now clear runtime API keys from in-memory request payloads; retries use the current UI provider settings.
 - QA answer state updates and event-stream status reads now use the service lock consistently.
 - Local maintenance cleanup no longer clears interface settings until the desktop cleanup command succeeds.
-- Workspace cleanup now requires explicit PaperLens workspace markers and no longer treats a generic `papers/` folder full of Markdown files as managed data.
+- Workspace cleanup now requires explicit PaperLens workspace markers and removes only generated `p_*.md` reports inside `papers/`, instead of deleting a generic `papers/` folder.
 - Local chat history now has bounded storage snapshots and tolerates localStorage quota or availability failures.
 - Desktop cleanup removes symbolic links as links instead of following them into external directories.
 - Markdown reports open external links through the system browser and no longer load remote image URLs directly.
