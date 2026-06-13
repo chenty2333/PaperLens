@@ -309,7 +309,7 @@ async function apiGet<T>(service: ServiceInfo, path: string): Promise<T> {
   const response = await fetch(serviceUrl(service, path), {
     headers: serviceHeaders(service),
   })
-  if (!response.ok) throw new Error((await response.json()).error ?? response.statusText)
+  if (!response.ok) throw new Error(await responseErrorMessage(response))
   return response.json() as Promise<T>
 }
 
@@ -319,8 +319,36 @@ async function apiPost<T>(service: ServiceInfo, path: string, payload: unknown):
     headers: serviceHeaders(service),
     body: JSON.stringify(payload),
   })
-  if (!response.ok) throw new Error((await response.json()).error ?? response.statusText)
+  if (!response.ok) throw new Error(await responseErrorMessage(response))
   return response.json() as Promise<T>
+}
+
+async function responseErrorMessage(response: Response) {
+  const fallback = response.statusText || `HTTP ${response.status}`
+  try {
+    const contentType = response.headers.get('content-type') ?? ''
+    if (contentType.includes('application/json')) {
+      const payload = await response.json() as Record<string, unknown>
+      const message = typeof payload.error === 'string' ? payload.error : JSON.stringify(payload)
+      return message || fallback
+    }
+    const text = await response.text()
+    return text.trim() || fallback
+  } catch {
+    return fallback
+  }
+}
+
+function errorMessage(err: unknown) {
+  return err instanceof Error ? err.message : String(err)
+}
+
+function parsePaperLensEvent(event: Event): PaperLensEvent | null {
+  try {
+    return JSON.parse((event as MessageEvent).data) as PaperLensEvent
+  } catch {
+    return null
+  }
 }
 
 function encodeOutput(outputDir: string) {
@@ -408,6 +436,10 @@ function pruneChatStore(store: ChatStore): ChatStore {
 
 function newChatThreadId() {
   return `thread_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`
+}
+
+function newChatMessageId() {
+  return `msg_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`
 }
 
 function chatTitleFromQuestion(question: string) {
@@ -607,7 +639,7 @@ function truncateText(value: string, maxLength: number) {
 }
 
 function formatUpdateError(err: unknown) {
-  const text = String(err)
+  const text = errorMessage(err)
   const lower = text.toLowerCase()
   if (lower.includes('endpoints') || lower.includes('endpoint') || lower.includes('configured') || lower.includes('pubkey')) {
     return '当前构建没有配置自动更新源。正式 GitHub Release 构建会使用签名的 latest.json 自动升级；开发版可从 Releases 手动下载安装包。'
@@ -705,17 +737,25 @@ function App() {
   const layoutRightWidth = effectiveRightSidebarOpen
     ? clamp(rightWidth, 300, Math.max(300, viewportWidth - layoutLeftWidth - 520))
     : 48
+  const providerReady = settings.providerKind === 'openai'
+    || settings.providerKind === 'anthropic'
+    || Boolean(settings.baseUrl.trim())
   const canRun = Boolean(
     service &&
       settings.inputDir &&
       settings.outputDir &&
       settings.apiKey.trim() &&
       settings.model.trim() &&
-      (settings.providerKind === 'openai' ||
-        settings.providerKind === 'anthropic' ||
-        settings.baseUrl.trim()),
+      providerReady,
   )
-  const canAsk = Boolean(question.trim() && service && currentOutputDir && settings.apiKey.trim() && settings.model.trim())
+  const canAsk = Boolean(
+    question.trim()
+      && service
+      && currentOutputDir
+      && settings.apiKey.trim()
+      && settings.model.trim()
+      && providerReady,
+  )
 
   function setChatThreadMessages(threadId: string, update: (current: ChatMessage[]) => ChatMessage[]) {
     setChatStore((current) => {
@@ -808,6 +848,7 @@ function App() {
 
   useEffect(() => {
     const unsubs: Array<() => void> = []
+    let disposed = false
     listen<string>('core-service-log', (event) => {
       try {
         const parsed = JSON.parse(event.payload) as PaperLensEvent
@@ -815,11 +856,18 @@ function App() {
       } catch {
         // service logs are diagnostic only
       }
-    }).then((unlisten) => unsubs.push(unlisten))
-    listen<string>('core-service-error', (event) => setError(event.payload)).then((unlisten) =>
-      unsubs.push(unlisten),
-    )
-    return () => unsubs.forEach((unlisten) => unlisten())
+    }).then((unlisten) => {
+      if (disposed) unlisten()
+      else unsubs.push(unlisten)
+    })
+    listen<string>('core-service-error', (event) => setError(event.payload)).then((unlisten) => {
+      if (disposed) unlisten()
+      else unsubs.push(unlisten)
+    })
+    return () => {
+      disposed = true
+      unsubs.forEach((unlisten) => unlisten())
+    }
   }, [])
 
   useEffect(() => {
@@ -840,14 +888,12 @@ function App() {
   useEffect(() => {
     invoke<ServiceInfo>('ensure_core_service')
       .then((info) => setService(info))
-      .catch((err) => setError(String(err)))
+      .catch((err) => setError(errorMessage(err)))
   }, [])
 
   useEffect(() => {
     if (!service || !settings.outputDir || workspace) return
     let cancelled = false
-    setLoading(true)
-    setError(null)
     apiPost<Workspace>(service, '/workspaces/open', { output_dir: settings.outputDir })
       .then((loaded) => {
         if (cancelled) return
@@ -860,10 +906,7 @@ function App() {
         }
       })
       .catch((err) => {
-        if (!cancelled) setError(String(err))
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
+        if (!cancelled) setError(errorMessage(err))
       })
     return () => {
       cancelled = true
@@ -899,7 +942,7 @@ function App() {
       })
       .catch((err) => {
         if (!cancelled) {
-          setError(String(err))
+          setError(errorMessage(err))
           setReport(null)
         }
       })
@@ -929,7 +972,7 @@ function App() {
         setSelectedPaperId(loaded.papers[0]?.paper_id ?? '')
       }
     } catch (err) {
-      setError(String(err))
+      setError(errorMessage(err))
     } finally {
       setLoading(false)
     }
@@ -946,14 +989,15 @@ function App() {
     }
   }
 
-  function subscribeJob(jobId: string) {
+  function subscribeJob(jobId: string, outputDir: string) {
     if (!service) return
     const source = new EventSource(
       serviceUrl(service, `/jobs/${encodeURIComponent(jobId)}/events?token=${encodeURIComponent(service.token)}`),
     )
     const release = trackEventSource(source)
     source.addEventListener('paperlens', (event) => {
-      const parsed = JSON.parse((event as MessageEvent).data) as PaperLensEvent
+      const parsed = parsePaperLensEvent(event)
+      if (!parsed) return
       setJobEvents((current) => [...current.slice(-500), parsed])
       if (
         parsed.type === 'job_completed'
@@ -963,7 +1007,7 @@ function App() {
       ) {
         release()
         void refreshJobs()
-        void openWorkspace(settings.outputDir)
+        void openWorkspace(outputDir)
       }
     })
     source.onerror = () => {
@@ -991,9 +1035,9 @@ function App() {
       setActiveJobId(job.job_id)
       setJobs((current) => [job, ...current.filter((item) => item.job_id !== job.job_id)])
       setJobEvents([])
-      subscribeJob(job.job_id)
+      subscribeJob(job.job_id, job.output_dir || settings.outputDir)
     } catch (err) {
-      setError(String(err))
+      setError(errorMessage(err))
     }
   }
 
@@ -1004,11 +1048,11 @@ function App() {
       if (command === 'retry') {
         setActiveJobId(job.job_id)
         setJobEvents([])
-        subscribeJob(job.job_id)
+        subscribeJob(job.job_id, job.output_dir || currentOutputDir)
       }
       await refreshJobs()
     } catch (err) {
-      setError(String(err))
+      setError(errorMessage(err))
     }
   }
 
@@ -1122,7 +1166,7 @@ function App() {
       setMaintenanceStatus(workspaceMaintenanceSummary(repair ? 'repair' : 'doctor', result))
       await openWorkspace(currentOutputDir)
     } catch (err) {
-      setError(String(err))
+      setError(errorMessage(err))
       setMaintenanceStatus('当前库维护失败。')
     } finally {
       setMaintenanceBusy(false)
@@ -1149,7 +1193,7 @@ function App() {
       if (result.errors?.length) setError(result.errors.join('\n'))
       await openWorkspace(currentOutputDir)
     } catch (err) {
-      setError(String(err))
+      setError(errorMessage(err))
       setMaintenanceStatus('缓存清理失败。')
     } finally {
       setMaintenanceBusy(false)
@@ -1175,7 +1219,7 @@ function App() {
       })
       setMaintenanceStatus(workspaceMaintenanceSummary('export', result))
     } catch (err) {
-      setError(String(err))
+      setError(errorMessage(err))
       setMaintenanceStatus('备份导出失败。')
     } finally {
       setMaintenanceBusy(false)
@@ -1206,7 +1250,7 @@ function App() {
       setMaintenanceStatus(workspaceMaintenanceSummary('import', result))
       await openWorkspace(currentOutputDir)
     } catch (err) {
-      setError(String(err))
+      setError(errorMessage(err))
       setMaintenanceStatus('备份导入失败。')
     } finally {
       setMaintenanceBusy(false)
@@ -1216,7 +1260,7 @@ function App() {
   async function ask() {
     if (!service || !currentOutputDir || !question.trim()) return
     const text = question.trim()
-    const messageId = `msg_${Date.now()}`
+    const messageId = newChatMessageId()
     const threadId = activeChatThreadId || createChatThread(text)
     const history = chatMessages
       .filter((message) => !message.pending && !message.error)
@@ -1258,12 +1302,13 @@ function App() {
         limit: 8,
         chat_history: history,
       })
-      subscribeAnswer(answer.answer_id, `${messageId}_assistant`, threadId)
+      subscribeAnswer(answer.answer_id, `${messageId}_assistant`, threadId, currentOutputDir)
     } catch (err) {
+      const text = errorMessage(err)
       setChatThreadMessages(threadId, (current) =>
         current.map((message) =>
           message.id === `${messageId}_assistant`
-            ? { ...message, pending: false, content: String(err), error: String(err) }
+            ? { ...message, pending: false, content: text, error: text }
             : message,
         ),
       )
@@ -1276,14 +1321,20 @@ function App() {
     if (canAsk) void ask()
   }
 
-  function subscribeAnswer(answerId: string, assistantMessageId: string, threadKey: string) {
+  function subscribeAnswer(
+    answerId: string,
+    assistantMessageId: string,
+    threadKey: string,
+    outputDir: string,
+  ) {
     if (!service) return
     const source = new EventSource(
       serviceUrl(service, `/ask/${encodeURIComponent(answerId)}/events?token=${encodeURIComponent(service.token)}`),
     )
     const release = trackEventSource(source)
     source.addEventListener('paperlens', (event) => {
-      const parsed = JSON.parse((event as MessageEvent).data) as PaperLensEvent
+      const parsed = parsePaperLensEvent(event)
+      if (!parsed) return
       if (parsed.type === 'answer_started') {
         setChatThreadMessages(threadKey, (current) =>
           current.map((message) =>
@@ -1309,7 +1360,7 @@ function App() {
           ),
         )
         release()
-        void openWorkspace(currentOutputDir)
+        void openWorkspace(outputDir)
       }
       if (parsed.type === 'answer_failed') {
         const text = parsed.message ?? '回答失败'
