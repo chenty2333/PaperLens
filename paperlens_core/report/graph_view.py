@@ -78,6 +78,71 @@ READER_HOSTILE_PHRASES = (
     "the user provided",
     "evidence pack",
 )
+RESULT_OR_ABLATION_MARKERS = (
+    "ablation",
+    "outperform",
+    "outperforms",
+    "outperformed",
+    "improvement",
+    "improves",
+    "improved",
+    "better than",
+    "higher than",
+    "lower than",
+    "reduce",
+    "reduces",
+    "reduced",
+    "increase",
+    "increases",
+    "increased",
+    "achieve",
+    "achieves",
+    "achieved",
+    "performance gain",
+    "state-of-the-art",
+    "sota",
+    "best result",
+    "性能",
+    "结果",
+    "消融",
+    "提升",
+    "改进",
+    "优于",
+    "超过",
+    "降低",
+    "下降",
+    "达到",
+)
+QUANTITATIVE_RESULT_CONTEXT = (
+    "accuracy",
+    "precision",
+    "recall",
+    "f1",
+    "auc",
+    "bleu",
+    "rouge",
+    "mae",
+    "mse",
+    "error",
+    "latency",
+    "throughput",
+    "score",
+    "metric",
+    "measure",
+    "benchmark",
+    "result",
+    "performance",
+    "准确率",
+    "召回",
+    "误差",
+    "延迟",
+    "吞吐",
+    "分数",
+    "指标",
+    "度量",
+    "基准",
+    "表现",
+)
 
 
 def fallback_node_belongs_to_results(section_id: str, text: str) -> bool:
@@ -86,24 +151,10 @@ def fallback_node_belongs_to_results(section_id: str, text: str) -> bool:
 
 def looks_like_result_or_ablation(text: str) -> bool:
     lowered = str(text or "").lower()
-    if re.search(r"(?:srocc|plcc|rmse|krocc).{0,16}(?:为|达到|=|\d)", lowered):
+    if any(marker in lowered for marker in RESULT_OR_ABLATION_MARKERS):
         return True
-    return any(
-        marker in lowered
-        for marker in (
-            "ablation",
-            "outperform",
-            "improvement",
-            "srocc 为",
-            "plcc 为",
-            "rmse 为",
-            "krocc 为",
-            "提升",
-            "优于",
-            "超过",
-            "下降",
-            "消融",
-        )
+    return bool(NUMBER_TEXT_PATTERN.search(text or "")) and any(
+        marker in lowered for marker in QUANTITATIVE_RESULT_CONTEXT
     )
 
 

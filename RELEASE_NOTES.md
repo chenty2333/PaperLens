@@ -36,6 +36,7 @@ This release turns the local PaperLens workspace into a versioned product data s
 - Markdown reports open external links through the system browser and no longer load remote image URLs directly.
 - Release scripts now use explicit skip branches for optional updater artifacts instead of early success exits.
 - Reading prompts and QA fallbacks are now domain-general and no longer expose ClaimGraph, PaperDOM, or source ID internals in reader-facing answers.
+- Report section routing now uses domain-general result and ablation cues instead of hardcoded paper-metric names.
 
 ## Operator Commands
 
