@@ -37,6 +37,7 @@ import {
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
+  Pause,
   Play,
   Plus,
   RefreshCw,
@@ -142,6 +143,7 @@ type JobSummary = {
   error?: string | null
   latest_event?: PaperLensEvent | null
   result?: Record<string, unknown> | null
+  live?: boolean
 }
 
 type SourceAttribution = {
@@ -202,6 +204,7 @@ type ChatStore = {
 
 const EMPTY_CHAT_MESSAGES: ChatMessage[] = []
 const ACTIVE_JOB_STATUSES = new Set(['queued', 'running', 'paused', 'cancelling'])
+const RETRYABLE_JOB_STATUSES = new Set(['failed', 'cancelled'])
 
 type CleanupReport = {
   removed: string[]
@@ -496,6 +499,8 @@ function statusLabel(status?: string) {
       return '完成'
     case 'failed':
       return '失败'
+    case 'cancelled':
+      return '已停止'
     case 'paused':
       return '暂停'
     case 'cancelling':
@@ -671,7 +676,10 @@ function App() {
     (job) => job.job_id === activeJobId && ACTIVE_JOB_STATUSES.has(job.status),
   )
   const activeJob = selectedActiveJob ?? jobs.find((job) => ACTIVE_JOB_STATUSES.has(job.status)) ?? null
-  const latestJobEvent = activeJob ? jobEvents[jobEvents.length - 1] ?? null : null
+  const visibleJob = activeJob ?? jobs[0] ?? null
+  const visibleJobEvent = activeJob
+    ? jobEvents[jobEvents.length - 1] ?? activeJob.latest_event ?? null
+    : visibleJob?.latest_event ?? null
   const currentOutputDir = workspace?.output_dir || settings.outputDir
   const chatSubjectKey = useMemo(() => {
     const root = currentOutputDir || 'no-output'
@@ -897,7 +905,8 @@ function App() {
   async function refreshJobs() {
     if (!service) return
     try {
-      const loaded = await apiGet<{ jobs: JobSummary[] }>(service, '/jobs')
+      const path = currentOutputDir ? `/jobs?output_dir=${encodeOutput(currentOutputDir)}` : '/jobs'
+      const loaded = await apiGet<{ jobs: JobSummary[] }>(service, path)
       setJobs(loaded.jobs)
     } catch {
       // a stopped service will be reported by the next explicit action
@@ -1614,32 +1623,63 @@ function App() {
                 </div>
               </div>
 
-              {Boolean(activeJob || latestJobEvent) && (
+              {visibleJob && (
                 <div className="activity-strip">
                   <div>
-                    <strong>{activeJob ? statusLabel(activeJob.status) : '最近任务'}</strong>
+                    <strong>{statusLabel(visibleJob.status)}</strong>
                     <span>
-                      {activeJob
-                        ? stageLabel(activeJob.current_stage)
-                        : latestJobEvent?.message ?? latestJobEvent?.type ?? ''}
+                      {ACTIVE_JOB_STATUSES.has(visibleJob.status)
+                        ? stageLabel(visibleJob.current_stage)
+                        : visibleJob.error ?? visibleJobEvent?.message ?? stageLabel(visibleJob.current_stage)}
                     </span>
                   </div>
-                  {activeJob && (
-                    <div className="job-controls">
-                      <button type="button" className="icon-button small" aria-label="Retry" onClick={() => controlJob(activeJob.job_id, 'retry')}>
-                        <RotateCcw size={14} />
-                      </button>
+                  <div className="job-controls">
+                    {visibleJob.status === 'paused' && (
                       <button
                         type="button"
                         className="icon-button small"
-                        aria-label="Stop"
-                        disabled={activeJob.status !== 'running'}
-                        onClick={() => controlJob(activeJob.job_id, 'cancel')}
+                        title="继续"
+                        aria-label="继续"
+                        onClick={() => controlJob(visibleJob.job_id, 'resume')}
+                      >
+                        <Play size={14} />
+                      </button>
+                    )}
+                    {visibleJob.status === 'running' && (
+                      <button
+                        type="button"
+                        className="icon-button small"
+                        title="暂停"
+                        aria-label="暂停"
+                        onClick={() => controlJob(visibleJob.job_id, 'pause')}
+                      >
+                        <Pause size={14} />
+                      </button>
+                    )}
+                    {visibleJob.live !== false && RETRYABLE_JOB_STATUSES.has(visibleJob.status) && (
+                      <button
+                        type="button"
+                        className="icon-button small"
+                        title="重试"
+                        aria-label="重试"
+                        onClick={() => controlJob(visibleJob.job_id, 'retry')}
+                      >
+                        <RotateCcw size={14} />
+                      </button>
+                    )}
+                    {ACTIVE_JOB_STATUSES.has(visibleJob.status) && (
+                      <button
+                        type="button"
+                        className="icon-button small"
+                        title="停止"
+                        aria-label="停止"
+                        disabled={visibleJob.status === 'cancelling'}
+                        onClick={() => controlJob(visibleJob.job_id, 'cancel')}
                       >
                         <Square size={14} />
                       </button>
-                    </div>
-                  )}
+                    )}
+                  </div>
                 </div>
               )}
 

@@ -20,7 +20,7 @@ from paperlens_core.engine import PaperLensEngine
 from paperlens_core.library import read_library_records, search_library
 from paperlens_core.protocol import LibraryQuestionRequest, PaperQuestionRequest, RunRequest
 from paperlens_core.runtime import read_typed_artifact
-from paperlens_core.storage import WorkspaceStore
+from paperlens_core.storage import WorkspaceStore, atomic_write_json
 from paperlens_core.version import display_version
 from paperlens_core.workflow.stages import normalize_workflow_stage
 
@@ -28,6 +28,9 @@ from paperlens_core.workflow.stages import normalize_workflow_stage
 SERVER_VERSION = "paperlens-core-service.v1"
 INTERNAL_DIR = ".paperlens"
 MAX_JSON_REQUEST_BYTES = 2_000_000
+JOB_HISTORY_SCHEMA_VERSION = "paperlens.job_history.v1"
+JOB_RECORD_SCHEMA_VERSION = "paperlens.job_record.v1"
+JOB_HISTORY_LIMIT = 50
 
 
 def utc_now() -> str:
@@ -60,6 +63,25 @@ def read_jsonl(path: Path, *, limit: int | None = None) -> list[dict[str, Any]]:
     except OSError:
         return []
     return rows[-limit:] if limit else rows
+
+
+def job_history_path(output_dir: Path) -> Path:
+    return output_dir.expanduser().resolve() / INTERNAL_DIR / "data" / "jobs.json"
+
+
+def load_job_history(output_dir: Path) -> list[dict[str, Any]]:
+    data = read_json_file(job_history_path(output_dir), {})
+    if not isinstance(data, dict):
+        return []
+    jobs = data.get("jobs")
+    if not isinstance(jobs, list):
+        return []
+    return [job for job in jobs if isinstance(job, dict)]
+
+
+def job_updated_at(job: dict[str, Any]) -> str:
+    value = job.get("updated_at") or job.get("created_at")
+    return value if isinstance(value, str) else ""
 
 
 def write_json_response(handler: BaseHTTPRequestHandler, status: int, payload: Any) -> None:
@@ -167,6 +189,11 @@ def output_dir_from_query(query: dict[str, list[str]]) -> Path:
     if value:
         return Path(value).expanduser().resolve()
     raise ValueError("Missing output_dir")
+
+
+def optional_output_dir_from_query(query: dict[str, list[str]]) -> Path | None:
+    value = query.get("output_dir", [""])[0]
+    return Path(value).expanduser().resolve() if value else None
 
 
 def config_overrides_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -556,6 +583,7 @@ class ManagedJob:
             "error": self.error,
             "latest_event": self.events.snapshot()[-1] if self.events.snapshot() else None,
             "result": self.result,
+            "live": True,
         }
 
 
@@ -602,6 +630,47 @@ class PaperLensServiceState:
         self.answers: dict[str, ManagedAnswer] = {}
         self._lock = threading.Lock()
 
+    def persist_job(self, job: ManagedJob) -> None:
+        store = WorkspaceStore(job.output_dir)
+        store.ensure_layout()
+        path = store.data_dir / "jobs.json"
+        current = [
+            item
+            for item in load_job_history(job.output_dir)
+            if item.get("job_id") != job.job_id
+        ]
+        record = {
+            "schema_version": JOB_RECORD_SCHEMA_VERSION,
+            **job.summary(),
+            "live": False,
+        }
+        current.append(record)
+        current.sort(key=job_updated_at, reverse=True)
+        atomic_write_json(
+            path,
+            {
+                "schema_version": JOB_HISTORY_SCHEMA_VERSION,
+                "updated_at": utc_now(),
+                "jobs": current[:JOB_HISTORY_LIMIT],
+            },
+        )
+
+    def job_summaries(self, *, output_dir: Path | None = None) -> list[dict[str, Any]]:
+        live = [job.summary() for job in self.jobs.values()]
+        persisted = load_job_history(output_dir) if output_dir else []
+        by_id: dict[str, dict[str, Any]] = {
+            str(job.get("job_id")): {**job, "live": False}
+            for job in persisted
+            if job.get("job_id")
+        }
+        for job in live:
+            if output_dir and Path(str(job.get("output_dir", ""))).resolve() != output_dir.resolve():
+                continue
+            by_id[str(job["job_id"])] = job
+        jobs = list(by_id.values())
+        jobs.sort(key=job_updated_at, reverse=True)
+        return jobs
+
     def start_read_job(self, payload: dict[str, Any]) -> dict[str, Any]:
         input_dir = path_from_payload(payload, "input_dir")
         output_dir = path_from_payload(payload, "output_dir")
@@ -628,6 +697,7 @@ class PaperLensServiceState:
                 "data": {"job_id": job_id},
             }
         )
+        self.persist_job(job)
         thread = threading.Thread(target=self._run_job_thread, args=(job,), daemon=True)
         job.thread = thread
         thread.start()
@@ -645,6 +715,7 @@ class PaperLensServiceState:
                 "data": {"job_id": job.job_id},
             }
         )
+        self.persist_job(job)
 
         def on_event(event: dict[str, Any]) -> None:
             job.current_stage = str(event.get("stage") or job.current_stage)
@@ -653,6 +724,7 @@ class PaperLensServiceState:
                 job.status = "failed"
                 job.error = str(event.get("message") or "Job failed")
             job.events.append({**event, "job_id": job.job_id})
+            self.persist_job(job)
 
         payload = job.request_payload
         overrides = config_overrides_from_payload(payload)
@@ -677,31 +749,53 @@ class PaperLensServiceState:
             if result.status != "ok":
                 job.error = str(result.data.get("reason") or "Job failed")
         except Exception as exc:
-            job.status = "failed"
-            job.error = str(exc)
-            job.events.append(
-                {
-                    "type": "job_failed",
-                    "level": "error",
-                    "stage": job.current_stage,
-                    "message": str(exc),
-                    "data": {"job_id": job.job_id},
-                }
-            )
+            if job.control.cancelled:
+                job.status = "cancelled"
+                job.error = None
+                job.events.append(
+                    {
+                        "type": "job_cancelled",
+                        "level": "info",
+                        "stage": job.current_stage,
+                        "message": "PaperLens read job stopped",
+                        "data": {"job_id": job.job_id},
+                    }
+                )
+            else:
+                job.status = "failed"
+                job.error = str(exc)
+                job.events.append(
+                    {
+                        "type": "job_failed",
+                        "level": "error",
+                        "stage": job.current_stage,
+                        "message": str(exc),
+                        "data": {"job_id": job.job_id},
+                    }
+                )
         finally:
             job.completed_at = utc_now()
             job.updated_at = job.completed_at
+            final_type = "job_completed"
+            final_level = "info"
+            final_message = "PaperLens read job completed"
+            if job.status == "failed":
+                final_type = "job_failed"
+                final_level = "error"
+                final_message = job.error or "PaperLens read job failed"
+            elif job.status == "cancelled":
+                final_type = "job_cancelled"
+                final_message = "PaperLens read job stopped"
             job.events.append(
                 {
-                    "type": "job_completed" if job.status == "completed" else "job_failed",
-                    "level": "info" if job.status == "completed" else "error",
+                    "type": final_type,
+                    "level": final_level,
                     "stage": job.current_stage,
-                    "message": "PaperLens read job completed"
-                    if job.status == "completed"
-                    else job.error or "PaperLens read job failed",
+                    "message": final_message,
                     "data": {"job_id": job.job_id, "status": job.status},
                 }
             )
+            self.persist_job(job)
 
     def retry_job(self, job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         original = self.jobs.get(job_id)
@@ -754,6 +848,7 @@ class PaperLensServiceState:
                 "data": {"job_id": job_id},
             }
         )
+        self.persist_job(job)
         return job.summary()
 
     def start_answer(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -968,7 +1063,7 @@ class PaperLensRequestHandler(BaseHTTPRequestHandler):
             asset_path = query.get("path", [""])[0]
             return FileResult(resolve_output_asset(output_dir, asset_path))
         if parts == ["jobs"]:
-            return {"jobs": [job.summary() for job in self.state.jobs.values()]}
+            return {"jobs": self.state.job_summaries(output_dir=optional_output_dir_from_query(query))}
         if len(parts) == 2 and parts[0] == "jobs":
             job = self.state.jobs.get(parts[1])
             if not job:
