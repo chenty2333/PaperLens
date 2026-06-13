@@ -4,7 +4,7 @@ from paperlens_core.schemas import PaperState, now_iso
 from paperlens_core.workflow.stages import WORKFLOW_STAGE_STATES
 
 
-MAIN_STAGE_STATES = WORKFLOW_STAGE_STATES
+MAIN_STAGE_STATES = dict(WORKFLOW_STAGE_STATES)
 
 
 def transition_state(

@@ -5,6 +5,8 @@ from typing import Any
 
 from paperlens_core.schemas import ClassificationDecision, PaperRecord, SkimCard
 
+CLASS_LABEL_SORT_RANK = {"A": 0, "HOLD": 1, "B": 2, "C": 3}
+
 
 def _report_slug(value: str) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9]+", "_", value.strip()).strip("_").lower()
@@ -38,7 +40,7 @@ def higher_read_effort_label(left: str, right: str) -> str:
 
 def reading_priority_key(row: dict[str, Any]) -> tuple[int, float, str]:
     decision = row_decision(row)
-    class_rank = {"A": 0, "HOLD": 1, "B": 2, "C": 3}[decision.class_label]
+    class_rank = CLASS_LABEL_SORT_RANK.get(decision.class_label, CLASS_LABEL_SORT_RANK["HOLD"])
     return (class_rank, -decision.false_negative_risk, row["paper"].paper_id)
 
 
@@ -112,5 +114,5 @@ def cluster_rows_by_scope(rows: list[dict[str, Any]]) -> dict[str, list[dict[str
 def classification_counts(decisions: list[ClassificationDecision]) -> dict[str, int]:
     counts = {"A": 0, "B": 0, "C": 0, "HOLD": 0}
     for decision in decisions:
-        counts[decision.class_label] += 1
+        counts[decision.class_label] = counts.get(decision.class_label, 0) + 1
     return counts

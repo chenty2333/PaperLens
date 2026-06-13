@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -150,7 +151,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser = subparsers.add_parser("serve", help="Run the local PaperLens Core service")
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=0)
-    serve_parser.add_argument("--token")
+    serve_parser.add_argument("--token-env", default="PAPERLENS_SERVICE_TOKEN")
     serve_parser.add_argument("--config")
 
     return parser
@@ -300,6 +301,15 @@ def workspace_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def service_token_from_env(env_name: str | None) -> str | None:
+    if not env_name:
+        return None
+    value = os.getenv(env_name.strip())
+    if not value:
+        return None
+    return value.strip() or None
+
+
 def main(argv: list[str] | None = None) -> int:
     configure_utf8_stdio()
     parser = build_parser()
@@ -316,7 +326,7 @@ def main(argv: list[str] | None = None) -> int:
             return serve(
                 host=args.host,
                 port=args.port,
-                token=args.token,
+                token=service_token_from_env(args.token_env),
                 config_path=Path(args.config).resolve() if args.config else None,
             )
         if args.command == "ask":

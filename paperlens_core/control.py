@@ -9,6 +9,8 @@ class ControlState:
     def __init__(self) -> None:
         self._cancelled = threading.Event()
         self._paused = threading.Event()
+        self._resume_signal = threading.Event()
+        self._resume_signal.set()
 
     @property
     def cancelled(self) -> bool:
@@ -20,16 +22,19 @@ class ControlState:
 
     def cancel(self) -> None:
         self._cancelled.set()
+        self._resume_signal.set()
 
     def pause(self) -> None:
         self._paused.set()
+        self._resume_signal.clear()
 
     def resume(self) -> None:
         self._paused.clear()
+        self._resume_signal.set()
 
     def wait_if_paused(self) -> None:
         while self.paused and not self.cancelled:
-            self._cancelled.wait(0.2)
+            self._resume_signal.wait()
 
     def require_not_cancelled(self) -> None:
         if self.cancelled:

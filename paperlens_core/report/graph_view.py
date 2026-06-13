@@ -108,7 +108,7 @@ def looks_like_result_or_ablation(text: str) -> bool:
 
 
 def build_report_draft_from_graph(
-    graph: ClaimGraph, *, max_nodes_per_kind: int = 12, output_language: str = "zh"
+    graph: ClaimGraph, *, max_nodes_per_kind: int | None = None, output_language: str = "zh"
 ) -> GraphReportDraft:
     sections: list[ReportSection] = []
     for section_id, kinds in {
@@ -123,14 +123,17 @@ def build_report_draft_from_graph(
             node
             for node in graph.nodes.values()
             if node.kind in kinds and not fallback_node_belongs_to_results(section_id, node.label)
-        ][:max_nodes_per_kind]
+        ]
+        if max_nodes_per_kind is not None:
+            nodes = nodes[: max(0, max_nodes_per_kind)]
         if section_id == "results":
             nodes.extend(
                 node
                 for node in graph.nodes.values()
                 if node.kind == "evaluation" and looks_like_result_or_ablation(node.label)
             )
-            nodes = nodes[:max_nodes_per_kind]
+            if max_nodes_per_kind is not None:
+                nodes = nodes[: max(0, max_nodes_per_kind)]
         if not nodes:
             continue
         paragraphs = []
