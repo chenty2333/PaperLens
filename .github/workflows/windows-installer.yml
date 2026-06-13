@@ -164,6 +164,7 @@ jobs:
         run: npm run version:check
 
       - name: Configure updater for signed releases
+        id: configure-updater
         shell: pwsh
         env:
           PAPERLENS_UPDATER_ENDPOINT: ${{ vars.PAPERLENS_UPDATER_ENDPOINT }}
@@ -172,6 +173,7 @@ jobs:
         run: |
           $pubkey = "$env:PAPERLENS_UPDATER_PUBKEY".Trim()
           $privateKeyAvailable = -not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)
+          $updaterEnabled = "false"
           if (-not $pubkey -or -not $privateKeyAvailable) {
             Write-Host "Updater signing is not fully configured; building installer without updater artifacts."
           } else {
@@ -187,7 +189,9 @@ jobs:
             $config.bundle.createUpdaterArtifacts = $true
             $config | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $configPath -Encoding utf8
             Write-Host "Updater artifacts enabled for $endpoint"
+            $updaterEnabled = "true"
           }
+          "updater_enabled=$updaterEnabled" >> $env:GITHUB_OUTPUT
 
       - name: Guard against committed secrets
         shell: pwsh
@@ -244,6 +248,7 @@ jobs:
         shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          UPDATER_ENABLED: ${{ steps.configure-updater.outputs.updater_enabled }}
         run: |
           $version = (Get-Content -LiteralPath "package.json" -Raw | ConvertFrom-Json).version
           $installer = Get-ChildItem "src-tauri/target/release/bundle/nsis" -File -Filter "PaperLens_${version}_x64-setup.exe" | Select-Object -First 1
@@ -258,8 +263,8 @@ jobs:
           }
           "Installer: $($installer.FullName)"
           $signature = Get-ChildItem "src-tauri/target/release/bundle/nsis" -Filter "*.sig" | Select-Object -First 1
-          if (-not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY) -and -not $signature) {
-            throw "Updater signing key was provided, but no updater signature was produced."
+          if ($env:UPDATER_ENABLED -eq "true" -and -not $signature) {
+            throw "Updater artifacts were enabled, but no updater signature was produced."
           }
           if ($signature) {
             "Updater signature: $($signature.FullName)"

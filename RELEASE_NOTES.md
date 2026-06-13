@@ -37,6 +37,8 @@ This release turns the local PaperLens workspace into a versioned product data s
 - Release scripts now use explicit skip branches for optional updater artifacts instead of early success exits.
 - Reading prompts and QA fallbacks are now domain-general and no longer expose ClaimGraph, PaperDOM, or source ID internals in reader-facing answers.
 - Report section routing now uses domain-general result and ablation cues instead of hardcoded paper-metric names.
+- The Windows release workflow now verifies updater signatures only when updater artifacts are explicitly enabled.
+- Switching papers or workspaces no longer shows a stale report, and paper-scoped QA is disabled until a paper is selected.
 
 ## Operator Commands
 

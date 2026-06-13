@@ -881,7 +881,7 @@ function App() {
   const [settings, setSettings] = useState<RunSettings>(loadSettings)
   const [workspace, setWorkspace] = useState<Workspace | null>(null)
   const [selectedPaperId, setSelectedPaperId] = useState('')
-  const [report, setReport] = useState<ReportPayload | null>(null)
+  const [reportState, setReportState] = useState<{ key: string; payload: ReportPayload } | null>(null)
   const [jobs, setJobs] = useState<JobSummary[]>([])
   const [activeJobId, setActiveJobId] = useState('')
   const [jobEvents, setJobEvents] = useState<PaperLensEvent[]>([])
@@ -917,6 +917,10 @@ function App() {
     ? jobEvents[jobEvents.length - 1] ?? activeJob.latest_event ?? null
     : visibleJob?.latest_event ?? null
   const currentOutputDir = workspace?.output_dir || settings.outputDir
+  const reportKey = selectedPaper && currentOutputDir
+    ? `${currentOutputDir}::${selectedPaper.paper_id}::${selectedPaper.report_path || ''}`
+    : ''
+  const report = reportState?.key === reportKey ? reportState.payload : null
   const chatSubjectKey = useMemo(() => {
     const root = currentOutputDir || 'no-output'
     return chatScope === 'library'
@@ -955,6 +959,7 @@ function App() {
     question.trim()
       && service
       && currentOutputDir
+      && (chatScope === 'library' || selectedPaper)
       && settings.apiKey.trim()
       && settings.model.trim()
       && providerReady,
@@ -1142,18 +1147,18 @@ function App() {
       `/papers/${encodeURIComponent(selectedPaper.paper_id)}/report?output_dir=${encodeOutput(currentOutputDir)}`,
     )
       .then((loaded) => {
-        if (!cancelled) setReport(loaded)
+        if (!cancelled) setReportState({ key: reportKey, payload: loaded })
       })
       .catch((err) => {
         if (!cancelled) {
           setError(errorMessage(err))
-          setReport(null)
+          setReportState((current) => (current?.key === reportKey ? null : current))
         }
       })
     return () => {
       cancelled = true
     }
-  }, [currentOutputDir, selectedPaper, service])
+  }, [currentOutputDir, reportKey, selectedPaper, service])
 
   function update<K extends keyof RunSettings>(key: K, value: RunSettings[K]) {
     setSettings((current) => ({ ...current, [key]: value }))
@@ -1347,7 +1352,7 @@ function App() {
       const report = await invoke<CleanupReport>('clear_workspace_data', { outputDir: currentOutputDir })
       setWorkspace(null)
       setSelectedPaperId('')
-      setReport(null)
+      setReportState(null)
       setChatStore((current) => {
         const threads = Object.fromEntries(
           Object.entries(current.threads).filter(([, thread]) => !thread.subjectKey.startsWith(`${currentOutputDir}::`)),
@@ -1483,6 +1488,7 @@ function App() {
 
   async function ask() {
     if (!service || !currentOutputDir || !question.trim()) return
+    if (chatScope === 'paper' && !selectedPaper) return
     const text = question.trim()
     const messageId = newChatMessageId()
     const threadId = activeChatThreadId || createChatThread(text)
