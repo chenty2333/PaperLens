@@ -1101,49 +1101,70 @@ function App() {
   }
 
   async function clearLocalData() {
+    if (maintenanceBusy) return
     const ok = await confirm(
       '这会清除 PaperLens 的本机界面设置、WebView 缓存和日志。不会删除你的论文库或输出目录。',
       { title: '清理本机数据', kind: 'warning' },
     )
     if (!ok) return
-    clearPaperLensLocalStorage()
-    const report = await invoke<CleanupReport>('clear_local_app_data')
+    setMaintenanceBusy(true)
+    setMaintenanceStatus('正在清理本机状态...')
+    setError(null)
     try {
-      const outputDir = await invoke<string>('default_workspace_dir')
-      setSettings({ ...defaultSettings, outputDir })
-    } catch {
-      setSettings(defaultSettings)
+      clearPaperLensLocalStorage()
+      const report = await invoke<CleanupReport>('clear_local_app_data')
+      try {
+        const outputDir = await invoke<string>('default_workspace_dir')
+        setSettings({ ...defaultSettings, outputDir })
+      } catch {
+        setSettings(defaultSettings)
+      }
+      setChatStore({ threads: {}, activeBySubject: {} })
+      setMaintenanceStatus(cleanupSummary(report))
+      if (report.errors.length) setError(report.errors.join('\n'))
+    } catch (err) {
+      setError(errorMessage(err))
+      setMaintenanceStatus('本机状态清理失败。')
+    } finally {
+      setMaintenanceBusy(false)
     }
-    setChatStore({ threads: {}, activeBySubject: {} })
-    setMaintenanceStatus(cleanupSummary(report))
-    if (report.errors.length) setError(report.errors.join('\n'))
   }
 
   async function clearWorkspace() {
-    if (!currentOutputDir) return
+    if (!currentOutputDir || maintenanceBusy) return
     const ok = await confirm(
       `这会删除当前输出目录里的 PaperLens 结果：\n${currentOutputDir}\n\n只会在识别到 PaperLens workspace 标记后清理 .paperlens、PaperLens.md 和受管理的报告目录；不会删除输入 PDF 或普通 papers 文件夹。`,
       { title: '清空当前库', kind: 'warning' },
     )
     if (!ok) return
-    const report = await invoke<CleanupReport>('clear_workspace_data', { outputDir: currentOutputDir })
-    setWorkspace(null)
-    setSelectedPaperId('')
-    setReport(null)
-    setChatStore((current) => {
-      const threads = Object.fromEntries(
-        Object.entries(current.threads).filter(([, thread]) => !thread.subjectKey.startsWith(`${currentOutputDir}::`)),
-      )
-      const activeBySubject = Object.fromEntries(
-        Object.entries(current.activeBySubject).filter(([subjectKey, threadId]) =>
-          !subjectKey.startsWith(`${currentOutputDir}::`) && Boolean(threads[threadId]),
-        ),
-      )
-      return { threads, activeBySubject }
-    })
-    setJobEvents([])
-    setMaintenanceStatus(cleanupSummary(report))
-    if (report.errors.length) setError(report.errors.join('\n'))
+    setMaintenanceBusy(true)
+    setMaintenanceStatus('正在清空当前库...')
+    setError(null)
+    try {
+      const report = await invoke<CleanupReport>('clear_workspace_data', { outputDir: currentOutputDir })
+      setWorkspace(null)
+      setSelectedPaperId('')
+      setReport(null)
+      setChatStore((current) => {
+        const threads = Object.fromEntries(
+          Object.entries(current.threads).filter(([, thread]) => !thread.subjectKey.startsWith(`${currentOutputDir}::`)),
+        )
+        const activeBySubject = Object.fromEntries(
+          Object.entries(current.activeBySubject).filter(([subjectKey, threadId]) =>
+            !subjectKey.startsWith(`${currentOutputDir}::`) && Boolean(threads[threadId]),
+          ),
+        )
+        return { threads, activeBySubject }
+      })
+      setJobEvents([])
+      setMaintenanceStatus(cleanupSummary(report))
+      if (report.errors.length) setError(report.errors.join('\n'))
+    } catch (err) {
+      setError(errorMessage(err))
+      setMaintenanceStatus('当前库清空失败。')
+    } finally {
+      setMaintenanceBusy(false)
+    }
   }
 
   async function doctorWorkspace(repair = false) {
@@ -1864,6 +1885,7 @@ function SettingsPanel({
   canMaintainWorkspace: boolean
 }) {
   const storageClass = workspaceStatusClass(workspaceStorage?.status)
+  const maintenanceDisabled = maintenanceBusy || updateBusy
   return (
     <section className="settings-panel">
       <DirectoryField label="输入目录" value={settings.inputDir} onChange={(value) => update('inputDir', value)} onPick={() => pickDirectory('inputDir')} />
@@ -1910,30 +1932,30 @@ function SettingsPanel({
           <b>{workspaceHealthSummary(workspaceStorage)}</b>
         </div>
         <div className="maintenance-actions workspace-actions">
-          <button type="button" onClick={doctorWorkspace} disabled={!canMaintainWorkspace || maintenanceBusy}>
+          <button type="button" onClick={doctorWorkspace} disabled={!canMaintainWorkspace || maintenanceDisabled}>
             {maintenanceBusy ? <Loader2 className="spinning" size={15} /> : <ShieldCheck size={15} />} 诊断
           </button>
-          <button type="button" onClick={repairWorkspace} disabled={!canMaintainWorkspace || maintenanceBusy}>
+          <button type="button" onClick={repairWorkspace} disabled={!canMaintainWorkspace || maintenanceDisabled}>
             <Wrench size={15} /> 修复
           </button>
-          <button type="button" onClick={exportWorkspace} disabled={!canMaintainWorkspace || maintenanceBusy}>
+          <button type="button" onClick={exportWorkspace} disabled={!canMaintainWorkspace || maintenanceDisabled}>
             <Archive size={15} /> 导出
           </button>
-          <button type="button" onClick={importWorkspace} disabled={!canMaintainWorkspace || maintenanceBusy}>
+          <button type="button" onClick={importWorkspace} disabled={!canMaintainWorkspace || maintenanceDisabled}>
             <FolderOpen size={15} /> 导入
           </button>
-          <button type="button" onClick={cleanupWorkspaceCache} disabled={!canMaintainWorkspace || maintenanceBusy}>
+          <button type="button" onClick={cleanupWorkspaceCache} disabled={!canMaintainWorkspace || maintenanceDisabled}>
             <Database size={15} /> 清缓存
           </button>
         </div>
         <div className="maintenance-actions">
-          <button type="button" onClick={checkForUpdates} disabled={updateBusy}>
+          <button type="button" onClick={checkForUpdates} disabled={updateBusy || maintenanceBusy}>
             {updateBusy ? <Loader2 className="spinning" size={15} /> : <RefreshCw size={15} />} 检查更新
           </button>
-          <button type="button" onClick={clearLocalData}>
+          <button type="button" onClick={clearLocalData} disabled={maintenanceDisabled}>
             清本机状态
           </button>
-          <button type="button" className="danger-button" onClick={clearWorkspace} disabled={!canClearWorkspace}>
+          <button type="button" className="danger-button" onClick={clearWorkspace} disabled={!canClearWorkspace || maintenanceDisabled}>
             清当前库
           </button>
         </div>
