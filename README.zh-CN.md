@@ -129,6 +129,10 @@ npm run build
 npm run tauri:dev
 ```
 
+如果直接启动本地 Core service，通过 `PAPERLENS_SERVICE_TOKEN` 或
+`paperlens-core serve --token-env NAME` 提供固定 service token，不要把密钥写在
+命令行参数里。
+
 构建 Python sidecar 和 Windows 安装包：
 
 ```powershell

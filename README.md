@@ -131,6 +131,10 @@ Run the desktop app in development:
 npm run tauri:dev
 ```
 
+When running the local core service directly, provide a fixed service token through
+`PAPERLENS_SERVICE_TOKEN` or `paperlens-core serve --token-env NAME`. Do not pass
+secrets as command-line arguments.
+
 Build the Python sidecar and Windows installer:
 
 ```powershell
