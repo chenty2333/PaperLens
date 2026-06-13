@@ -100,12 +100,6 @@ class ObservationLog(BaseModel):
     ) -> "ObservationLog":
         if on_duplicate not in {"error", "ignore"}:
             raise ValueError(f"unsupported duplicate policy: {on_duplicate}")
-        if on_duplicate == "error":
-            log = self
-            for card in cards:
-                log = log.append(card)
-            return log
-
         accepted = list(self.cards)
         by_id = {card.observation_id: card for card in accepted}
         for card in cards:
@@ -113,6 +107,8 @@ class ObservationLog(BaseModel):
                 raise ValueError(f"observation paper_id mismatch: {card.paper_id} != {self.paper_id}")
             existing = by_id.get(card.observation_id)
             if existing is not None:
+                if on_duplicate == "error":
+                    raise ValueError(f"duplicate observation_id: {card.observation_id}")
                 if observation_identity_payload(existing) != observation_identity_payload(card):
                     raise ValueError(f"conflicting duplicate observation_id: {card.observation_id}")
                 continue

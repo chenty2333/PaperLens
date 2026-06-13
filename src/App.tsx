@@ -1190,8 +1190,8 @@ function App() {
     setMaintenanceStatus('正在清理本机状态...')
     setError(null)
     try {
-      clearPaperLensLocalStorage()
       const report = await invoke<CleanupReport>('clear_local_app_data')
+      clearPaperLensLocalStorage()
       try {
         const outputDir = await invoke<string>('default_workspace_dir')
         setSettings({ ...defaultSettings, outputDir })

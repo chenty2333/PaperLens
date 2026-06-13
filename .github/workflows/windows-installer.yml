@@ -174,21 +174,20 @@ jobs:
           $privateKeyAvailable = -not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)
           if (-not $pubkey -or -not $privateKeyAvailable) {
             Write-Host "Updater signing is not fully configured; building installer without updater artifacts."
-            exit 0
-          }
+          } else {
+            $endpoint = "$env:PAPERLENS_UPDATER_ENDPOINT".Trim()
+            if (-not $endpoint) {
+              $endpoint = "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download/latest.json"
+            }
 
-          $endpoint = "$env:PAPERLENS_UPDATER_ENDPOINT".Trim()
-          if (-not $endpoint) {
-            $endpoint = "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download/latest.json"
+            $configPath = "src-tauri/tauri.conf.json"
+            $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+            $config.plugins.updater.pubkey = $pubkey
+            $config.plugins.updater.endpoints = @($endpoint)
+            $config.bundle.createUpdaterArtifacts = $true
+            $config | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $configPath -Encoding utf8
+            Write-Host "Updater artifacts enabled for $endpoint"
           }
-
-          $configPath = "src-tauri/tauri.conf.json"
-          $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
-          $config.plugins.updater.pubkey = $pubkey
-          $config.plugins.updater.endpoints = @($endpoint)
-          $config.bundle.createUpdaterArtifacts = $true
-          $config | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $configPath -Encoding utf8
-          Write-Host "Updater artifacts enabled for $endpoint"
 
       - name: Guard against committed secrets
         shell: pwsh
@@ -277,16 +276,16 @@ jobs:
           $signature = Get-ChildItem $artifactDir -Filter "*.sig" | Select-Object -First 1
           if (-not $signature) {
             Write-Host "No updater signature found; skipping latest.json."
-            exit 0
+          } else {
+            $version = (Get-Content -LiteralPath "package.json" -Raw | ConvertFrom-Json).version
+            uv run python scripts/generate_tauri_latest.py `
+              --version $version `
+              --tag "${{ steps.release-meta.outputs.release_tag }}" `
+              --repo "$env:GITHUB_REPOSITORY" `
+              --artifact-dir $artifactDir `
+              --output "$artifactDir/latest.json" `
+              --notes-file RELEASE_NOTES.md
           }
-          $version = (Get-Content -LiteralPath "package.json" -Raw | ConvertFrom-Json).version
-          uv run python scripts/generate_tauri_latest.py `
-            --version $version `
-            --tag "${{ steps.release-meta.outputs.release_tag }}" `
-            --repo "$env:GITHUB_REPOSITORY" `
-            --artifact-dir $artifactDir `
-            --output "$artifactDir/latest.json" `
-            --notes-file RELEASE_NOTES.md
 
       - name: Stage release artifacts
         shell: pwsh

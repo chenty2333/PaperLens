@@ -26,6 +26,7 @@ FACT_NODE_KINDS = {
 def audit_claim_graph(graph: ClaimGraph, dom: PaperDOM) -> list[AuditFinding]:
     findings: list[AuditFinding] = []
     dom_source_ids = dom.source_ids()
+    dom_source_texts = source_text_index(dom)
     if graph.paper_id != dom.paper_id:
         findings.append(
             AuditFinding(
@@ -147,7 +148,7 @@ def audit_claim_graph(graph: ClaimGraph, dom: PaperDOM) -> list[AuditFinding]:
             evidence_texts = [
                 text
                 for source_id in evidence_source_ids
-                if (text := source_text_for_id(dom, source_id))
+                if (text := dom_source_texts.get(source_id, ""))
             ]
             evidence_quotes = normalized_string_list(node.payload.get("evidence_quotes"))
             quote_is_located = bool(evidence_quotes) and text_overlaps_any_reference(
@@ -201,7 +202,7 @@ def audit_claim_graph(graph: ClaimGraph, dom: PaperDOM) -> list[AuditFinding]:
                 if evidence_id in graph.nodes
             ]
             if source_ids and not any(
-                source_text_contains_number(dom, source_id) for source_id in source_ids
+                contains_number(dom_source_texts.get(source_id, "")) for source_id in source_ids
             ):
                 findings.append(
                     AuditFinding(
@@ -218,7 +219,7 @@ def audit_claim_graph(graph: ClaimGraph, dom: PaperDOM) -> list[AuditFinding]:
             source_texts = [
                 text
                 for source_id in source_ids
-                if (text := source_text_for_id(dom, source_id))
+                if (text := dom_source_texts.get(source_id, ""))
             ]
             for number_text in extracted_number_texts(node.payload.get("extracted_numbers")):
                 if source_texts and not any(
@@ -271,6 +272,7 @@ def audit_observation_log(
 ) -> list[AuditFinding]:
     findings: list[AuditFinding] = []
     dom_source_ids = dom.source_ids()
+    dom_source_texts = source_text_index(dom)
     tasks_by_id = {task.task_id: task for task in reading_plan.tasks}
     if log.paper_id != dom.paper_id:
         findings.append(
@@ -384,7 +386,7 @@ def audit_observation_log(
         source_texts = [
             text
             for source_id in card.source_ids
-            if source_id in dom_source_ids and (text := source_text_for_id(dom, source_id))
+            if source_id in dom_source_ids and (text := dom_source_texts.get(source_id, ""))
         ]
         if source_texts and not card.evidence_quotes:
             findings.append(
@@ -583,22 +585,22 @@ def fact_node_source_ids(graph: ClaimGraph, node_id: str) -> list[str]:
 
 
 def source_text_for_id(dom: PaperDOM, source_id: str) -> str:
+    return source_text_index(dom).get(source_id, "")
+
+
+def source_text_index(dom: PaperDOM) -> dict[str, str]:
+    result: dict[str, str] = {}
     for section in dom.sections:
-        if section.source_id == source_id:
-            return section.title
+        result[section.source_id] = section.title
     for span in dom.spans:
-        if span.source_id == source_id:
-            return span.text
+        result[span.source_id] = span.text
     for figure in dom.figures:
-        if figure.source_id == source_id:
-            return figure.caption or ""
+        result[figure.source_id] = figure.caption or ""
     for table in dom.tables:
-        if table.source_id == source_id:
-            return table.caption or ""
+        result[table.source_id] = table.caption or ""
     for equation in dom.equations:
-        if equation.source_id == source_id:
-            return equation.latex_or_text
-    return ""
+        result[equation.source_id] = equation.latex_or_text
+    return result
 
 
 def source_text_contains_number(dom: PaperDOM, source_id: str) -> bool:

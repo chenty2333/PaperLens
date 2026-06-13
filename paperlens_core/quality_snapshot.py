@@ -446,7 +446,8 @@ def count_report_unsupported_paragraphs(findings: list[dict[str, Any]]) -> int:
 def rate(numerator: int | float, denominator: int | float, *, default: float) -> float:
     if not denominator:
         return default
-    return round(float(numerator) / float(denominator), 4)
+    value = float(numerator) / float(denominator)
+    return round(max(0.0, min(value, 1.0)), 4)
 
 
 def average_metric(items: list[dict[str, Any]], key: str) -> float | None:

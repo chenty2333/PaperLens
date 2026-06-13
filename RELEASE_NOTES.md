@@ -7,6 +7,8 @@ This release turns the local PaperLens workspace into a versioned product data s
 - Added a workspace manifest at `.paperlens/workspace.json` with a storage schema version.
 - PaperLens now migrates and checks a workspace before reading, asking questions, or rebuilding the library.
 - JSON artifacts, reports, library indexes, QA cache files, and typed core artifacts are written atomically to reduce partial-file corruption after crashes or forced shutdowns.
+- SQLite-backed paper state access is serialized and safe for service worker threads.
+- ClaimGraph and audit lookups now use in-memory indexes for evidence edges and PaperDOM source text.
 - Corrupt critical JSON files are moved into `.paperlens/recovery/` during repair instead of being overwritten silently.
 - Added workspace-level maintenance commands for doctor, migration, cache cleanup, export, and import.
 
@@ -21,6 +23,8 @@ This release turns the local PaperLens workspace into a versioned product data s
 - Desktop progress streams and report images now authenticate with local HTTP headers instead of URL query tokens.
 - Markdown reports are sanitized without raw HTML rendering.
 - Runtime events, error records, and model-call ledger entries are redacted before writing to disk or the desktop event stream.
+- Local maintenance cleanup no longer clears interface settings until the desktop cleanup command succeeds.
+- Release scripts now use explicit skip branches for optional updater artifacts instead of early success exits.
 
 ## Operator Commands
 

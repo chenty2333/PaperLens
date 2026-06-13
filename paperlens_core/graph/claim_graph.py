@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from paperlens_core.reading.observation import ObservationCard, ObservationType
 
@@ -56,6 +56,25 @@ class ClaimGraph(BaseModel):
     paper_id: str
     nodes: dict[str, GraphNode] = Field(default_factory=dict)
     edges: list[GraphEdge] = Field(default_factory=list)
+    _edge_keys: set[tuple[str, str, str]] = PrivateAttr(default_factory=set)
+    _evidence_ids_by_node: dict[str, list[str]] = PrivateAttr(default_factory=dict)
+
+    def model_post_init(self, __context: Any) -> None:
+        self._rebuild_edge_indexes()
+
+    def _rebuild_edge_indexes(self) -> None:
+        self._edge_keys = set()
+        self._evidence_ids_by_node = {}
+        for edge in self.edges:
+            self._index_edge(edge)
+
+    def _index_edge(self, edge: GraphEdge) -> None:
+        self._edge_keys.add(edge_identity_key(edge))
+        target_node = self.nodes.get(edge.target_id)
+        if edge.kind == "supported_by" and target_node is not None and target_node.kind == "evidence":
+            evidence_ids = self._evidence_ids_by_node.setdefault(edge.source_id, [])
+            if edge.target_id not in evidence_ids:
+                evidence_ids.append(edge.target_id)
 
     def add_node(self, node: GraphNode) -> None:
         existing = self.nodes.get(node.node_id)
@@ -64,25 +83,22 @@ class ClaimGraph(BaseModel):
                 raise ValueError(f"conflicting graph node_id: {node.node_id}")
             return
         self.nodes[node.node_id] = node
+        if node.kind == "evidence":
+            for edge in self.edges:
+                if edge.target_id == node.node_id and edge.kind == "supported_by":
+                    evidence_ids = self._evidence_ids_by_node.setdefault(edge.source_id, [])
+                    if node.node_id not in evidence_ids:
+                        evidence_ids.append(node.node_id)
 
     def add_edge(self, edge: GraphEdge) -> None:
-        if not any(
-            existing.source_id == edge.source_id
-            and existing.target_id == edge.target_id
-            and existing.kind == edge.kind
-            for existing in self.edges
-        ):
-            self.edges.append(edge)
+        key = edge_identity_key(edge)
+        if key in self._edge_keys:
+            return
+        self.edges.append(edge)
+        self._index_edge(edge)
 
     def evidence_ids_for(self, node_id: str) -> list[str]:
-        return [
-            edge.target_id
-            for edge in self.edges
-            if edge.source_id == node_id
-            and edge.kind == "supported_by"
-            and self.nodes.get(edge.target_id) is not None
-            and self.nodes[edge.target_id].kind == "evidence"
-        ]
+        return list(self._evidence_ids_by_node.get(node_id, []))
 
 
 OBSERVATION_NODE_KIND: dict[ObservationType, NodeKind] = {
@@ -166,6 +182,10 @@ def materialize_relation_candidates(
 
 def graph_node_identity_payload(node: GraphNode) -> dict[str, Any]:
     return node.model_dump(mode="json")
+
+
+def edge_identity_key(edge: GraphEdge) -> tuple[str, str, str]:
+    return (edge.source_id, edge.target_id, edge.kind)
 
 
 def observation_node_id(card: ObservationCard) -> str:
