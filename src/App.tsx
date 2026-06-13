@@ -308,7 +308,7 @@ const markdownSanitizeSchema = {
 }
 
 function loadSettings(): RunSettings {
-  const raw = localStorage.getItem('paperLens.settings')
+  const raw = safeGetLocalStorage('paperLens.settings')
   if (!raw) return defaultSettings
   try {
     return { ...defaultSettings, ...JSON.parse(raw), apiKey: '' }
@@ -463,9 +463,46 @@ function normalizeLocalPath(path: string) {
 }
 
 const CHAT_STORE_KEY = 'paperLens.chatStore.v2'
+const CHAT_STORE_LIMITS = {
+  maxThreads: 60,
+  maxMessagesPerThread: 40,
+  maxMessageChars: 24000,
+  maxSerializedChars: 1_500_000,
+}
+const CHAT_STORE_FALLBACK_LIMITS = {
+  maxThreads: 20,
+  maxMessagesPerThread: 20,
+  maxMessageChars: 12000,
+  maxSerializedChars: 900_000,
+}
+
+function safeGetLocalStorage(key: string) {
+  try {
+    return localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+function safeSetLocalStorage(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function safeRemoveLocalStorage(key: string) {
+  try {
+    localStorage.removeItem(key)
+  } catch {
+    // Local storage can be unavailable in restricted webview sessions.
+  }
+}
 
 function loadChatStore(): ChatStore {
-  const raw = localStorage.getItem(CHAT_STORE_KEY)
+  const raw = safeGetLocalStorage(CHAT_STORE_KEY)
   if (!raw) return { threads: {}, activeBySubject: {} }
   try {
     const value = JSON.parse(raw) as unknown
@@ -483,7 +520,8 @@ function loadChatStore(): ChatStore {
           const item = message as ChatMessage
           return ['user', 'assistant'].includes(String(item.role)) && typeof item.content === 'string'
         })
-        .slice(-80)
+        .slice(-CHAT_STORE_LIMITS.maxMessagesPerThread)
+        .map((message) => compactStoredChatMessage(message, CHAT_STORE_LIMITS.maxMessageChars))
       threads[id] = {
         id,
         subjectKey: String(candidate.subjectKey),
@@ -505,22 +543,75 @@ function loadChatStore(): ChatStore {
   }
 }
 
-function pruneChatStore(store: ChatStore): ChatStore {
+function compactStoredChatMessage(message: ChatMessage, maxChars: number): ChatMessage {
+  return {
+    ...message,
+    content: truncateText(message.content, maxChars),
+    error: message.error ? truncateText(message.error, 2000) : null,
+    answer: compactStoredAnswer(message.answer),
+  }
+}
+
+function compactStoredAnswer(answer?: AnswerPayload | null): AnswerPayload | undefined {
+  if (!answer) return undefined
+  return {
+    cited_source_ids: answer.cited_source_ids?.slice(0, 80),
+    confidence: answer.confidence,
+    source_attribution: compactSourceAttribution(answer.source_attribution),
+    related_papers: answer.related_papers?.slice(0, 12).map((paper) => ({
+      paper_id: paper.paper_id,
+      title: truncateText(paper.title, 300),
+      report_path: paper.report_path,
+      why_related: paper.why_related ? truncateText(paper.why_related, 800) : undefined,
+    })),
+  }
+}
+
+function compactSourceAttribution(source?: SourceAttribution): SourceAttribution | undefined {
+  if (!source) return undefined
+  return {
+    paper_claims: source.paper_claims?.slice(0, 12).map((item) => truncateText(item, 800)),
+    paperlens_inferences: source.paperlens_inferences?.slice(0, 12).map((item) => truncateText(item, 800)),
+    cross_paper_synthesis: source.cross_paper_synthesis?.slice(0, 12).map((item) => truncateText(item, 800)),
+    background_context: source.background_context?.slice(0, 12).map((item) => truncateText(item, 800)),
+    evidence_limits: source.evidence_limits?.slice(0, 12).map((item) => truncateText(item, 800)),
+  }
+}
+
+function pruneChatStore(
+  store: ChatStore,
+  limits = CHAT_STORE_LIMITS,
+): ChatStore {
   const threads = Object.fromEntries(
     Object.values(store.threads)
       .map((thread) => ({
         ...thread,
-        messages: thread.messages.filter((message) => !message.pending).slice(-80),
+        title: truncateText(thread.title, 120),
+        messages: thread.messages
+          .filter((message) => !message.pending)
+          .slice(-limits.maxMessagesPerThread)
+          .map((message) => compactStoredChatMessage(message, limits.maxMessageChars)),
       }))
       .filter((thread) => thread.messages.length)
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-      .slice(0, 80)
+      .slice(0, limits.maxThreads)
       .map((thread) => [thread.id, thread]),
   )
   const activeBySubject = Object.fromEntries(
     Object.entries(store.activeBySubject).filter(([, threadId]) => Boolean(threads[threadId])),
   )
   return { threads, activeBySubject }
+}
+
+function persistChatStore(store: ChatStore) {
+  for (const limits of [CHAT_STORE_LIMITS, CHAT_STORE_FALLBACK_LIMITS]) {
+    const pruned = pruneChatStore(store, limits)
+    const payload = JSON.stringify(pruned)
+    if (payload.length <= limits.maxSerializedChars && safeSetLocalStorage(CHAT_STORE_KEY, payload)) {
+      return
+    }
+  }
+  safeRemoveLocalStorage(CHAT_STORE_KEY)
 }
 
 function newChatThreadId() {
@@ -726,8 +817,21 @@ function defaultBackupPath(outputDir: string) {
 }
 
 function clearPaperLensLocalStorage() {
-  for (const key of Object.keys(localStorage)) {
-    if (key.startsWith('paperLens.')) localStorage.removeItem(key)
+  try {
+    for (const key of Object.keys(localStorage)) {
+      if (key.startsWith('paperLens.')) safeRemoveLocalStorage(key)
+    }
+  } catch {
+    for (const key of [
+      'paperLens.settings',
+      'paperLens.layout.leftWidth',
+      'paperLens.layout.rightWidth',
+      'paperLens.layout.leftOpen',
+      'paperLens.layout.rightOpen',
+      CHAT_STORE_KEY,
+    ]) {
+      safeRemoveLocalStorage(key)
+    }
   }
 }
 
@@ -759,14 +863,14 @@ function clamp(value: number, min: number, max: number) {
 }
 
 function loadNumberPreference(key: string, fallback: number) {
-  const raw = localStorage.getItem(key)
+  const raw = safeGetLocalStorage(key)
   if (!raw) return fallback
   const parsed = Number(raw)
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
 function loadBooleanPreference(key: string, fallback: boolean) {
-  const raw = localStorage.getItem(key)
+  const raw = safeGetLocalStorage(key)
   if (!raw) return fallback
   return raw === '1'
 }
@@ -906,27 +1010,27 @@ function App() {
   }
 
   useEffect(() => {
-    localStorage.setItem('paperLens.settings', JSON.stringify({ ...settings, apiKey: '' }))
+    safeSetLocalStorage('paperLens.settings', JSON.stringify({ ...settings, apiKey: '' }))
   }, [settings])
 
   useEffect(() => {
-    localStorage.setItem('paperLens.layout.leftWidth', String(leftWidth))
+    safeSetLocalStorage('paperLens.layout.leftWidth', String(leftWidth))
   }, [leftWidth])
 
   useEffect(() => {
-    localStorage.setItem('paperLens.layout.rightWidth', String(rightWidth))
+    safeSetLocalStorage('paperLens.layout.rightWidth', String(rightWidth))
   }, [rightWidth])
 
   useEffect(() => {
-    localStorage.setItem('paperLens.layout.leftOpen', leftSidebarOpen ? '1' : '0')
+    safeSetLocalStorage('paperLens.layout.leftOpen', leftSidebarOpen ? '1' : '0')
   }, [leftSidebarOpen])
 
   useEffect(() => {
-    localStorage.setItem('paperLens.layout.rightOpen', rightSidebarOpen ? '1' : '0')
+    safeSetLocalStorage('paperLens.layout.rightOpen', rightSidebarOpen ? '1' : '0')
   }, [rightSidebarOpen])
 
   useEffect(() => {
-    localStorage.setItem(CHAT_STORE_KEY, JSON.stringify(pruneChatStore(chatStore)))
+    persistChatStore(chatStore)
   }, [chatStore])
 
   useEffect(() => {
