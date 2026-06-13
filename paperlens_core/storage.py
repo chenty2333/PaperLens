@@ -521,6 +521,7 @@ class WorkspaceStore:
         staging_dir.mkdir(parents=True, exist_ok=False)
         export_manifest: dict[str, Any] = {}
         extracted = 0
+        backup_dir: Path | None = None
         try:
             with zipfile.ZipFile(archive_path) as archive:
                 export_manifest = self.validate_export_archive(archive)
@@ -563,7 +564,6 @@ class WorkspaceStore:
             if extracted == 0:
                 raise ValueError("Workspace archive does not contain any managed PaperLens files")
             existing = [path for path in self.managed_paths() if path.exists()]
-            backup_dir = None
             if existing and not replace:
                 names = ", ".join(path.name for path in existing[:6])
                 raise RuntimeError(
@@ -587,7 +587,14 @@ class WorkspaceStore:
                 raise
         finally:
             shutil.rmtree(staging_dir, ignore_errors=True)
-        migration = self.bootstrap()
+        try:
+            migration = self.bootstrap()
+        except Exception:
+            if backup_dir:
+                self.rollback_failed_import(backup_dir, stamp)
+            else:
+                self.quarantine_failed_import(stamp)
+            raise
         return {
             "status": "PASS",
             "archive": str(archive_path),
@@ -597,6 +604,14 @@ class WorkspaceStore:
             "source_storage_schema_version": export_manifest.get("storage_schema_version"),
             "migration": migration,
         }
+
+    def quarantine_failed_import(self, stamp: str) -> Path:
+        failed_dir = self.failed_import_dir(stamp)
+        failed_dir.mkdir(parents=True, exist_ok=False)
+        for path in self.managed_paths():
+            if path.exists():
+                shutil.move(str(path), str(failed_dir / path.name))
+        return failed_dir
 
     def validate_export_archive(self, archive: zipfile.ZipFile) -> dict[str, Any]:
         try:
@@ -632,10 +647,7 @@ class WorkspaceStore:
         return manifest
 
     def rollback_failed_import(self, backup_dir: Path, stamp: str) -> None:
-        failed_dir = unique_sibling_path(
-            self.output_dir.parent
-            / f"{self.output_dir.name}.paperlens-failed-import-{stamp}-{os.getpid()}"
-        )
+        failed_dir = self.failed_import_dir(stamp)
         failed_dir.mkdir(parents=True, exist_ok=False)
         for path in self.managed_paths():
             if path.exists():
@@ -643,6 +655,12 @@ class WorkspaceStore:
         for child in backup_dir.iterdir():
             shutil.move(str(child), str(self.output_dir / child.name))
         backup_dir.rmdir()
+
+    def failed_import_dir(self, stamp: str) -> Path:
+        return unique_sibling_path(
+            self.output_dir.parent
+            / f"{self.output_dir.name}.paperlens-failed-import-{stamp}-{os.getpid()}"
+        )
 
     def managed_paths(self) -> list[Path]:
         return [self.output_dir / relative for relative in MANAGED_RELATIVE_PATHS]
