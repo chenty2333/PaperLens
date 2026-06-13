@@ -40,9 +40,9 @@ def _cluster_method_families(records: list[dict[str, Any]]) -> list[dict[str, An
         base_term = _base_term(term, seen_terms)
         if base_term and base_term in seen_terms:
             continue
-        if len(paper_ids) < 2:
-            continue
         deduped = list(dict.fromkeys(paper_ids))
+        if len(deduped) < 2:
+            continue
         families.append({"term": term, "paper_ids": deduped, "paper_count": len(deduped)})
         seen_terms.add(term)
 
@@ -66,9 +66,9 @@ def _cluster_datasets(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             by_dataset.setdefault(term, []).append(paper_id)
 
     for term, paper_ids in sorted(by_dataset.items(), key=lambda item: -len(item[1])):
-        if len(paper_ids) < 2:
-            continue
         deduped = list(dict.fromkeys(paper_ids))
+        if len(deduped) < 2:
+            continue
         groups.append({"dataset": term, "paper_ids": deduped, "paper_count": len(deduped)})
 
     return groups
@@ -136,13 +136,14 @@ def _build_concept_index(records: list[dict[str, Any]]) -> dict[str, list[str]]:
 
 
 def _dedupe_relations(relations: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    seen: set[tuple[str, str, str]] = set()
+    seen: set[tuple[str, str, str, str]] = set()
     result: list[dict[str, Any]] = []
     for rel in relations:
         key = (
             str(rel.get("source_paper_id") or ""),
             str(rel.get("target_paper_id") or ""),
             str(rel.get("kind") or ""),
+            str(rel.get("detail") or ""),
         )
         if key in seen:
             continue
@@ -152,7 +153,9 @@ def _dedupe_relations(relations: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _normalize_term(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+    text = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", str(value).lower())
+    tokens = re.findall(r"[a-z0-9]+|[\u4e00-\u9fff]{2,}", text)
+    return " ".join(tokens).strip()
 
 
 def _base_term(term: str, seen: set[str]) -> str | None:
