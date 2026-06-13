@@ -10,6 +10,7 @@ import time
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
+from stat import S_ISLNK
 from typing import Any, Iterable
 
 
@@ -487,6 +488,7 @@ class WorkspaceStore:
     def iter_export_files(self, *, include_cache: bool, archive_path: Path) -> Iterable[Path]:
         for relative in MANAGED_RELATIVE_PATHS:
             path = self.output_dir / relative
+            reject_workspace_symlink(path, self.output_dir)
             if not path.exists():
                 continue
             if path.is_file():
@@ -494,6 +496,7 @@ class WorkspaceStore:
                     yield path
                 continue
             for child in sorted(path.rglob("*")):
+                reject_workspace_symlink(child, self.output_dir)
                 if not child.is_file():
                     continue
                 if child.resolve() == archive_path:
@@ -541,6 +544,12 @@ class WorkspaceStore:
                             f"{total_uncompressed} bytes exceeds "
                             f"{MAX_IMPORT_UNCOMPRESSED_BYTES}"
                         )
+                expected_count = int_or_zero(export_manifest.get("file_count"))
+                if "file_count" in export_manifest and expected_count != len(managed_infos):
+                    raise ValueError(
+                        "Workspace archive file count does not match its manifest: "
+                        f"{len(managed_infos)} != {expected_count}"
+                    )
                 for info in managed_infos:
                     target = (staging_dir / info.filename).resolve()
                     safe_relative_to(target, staging_dir)
@@ -696,6 +705,9 @@ def archive_member_is_managed(filename: str) -> bool:
 def validate_import_member(info: zipfile.ZipInfo) -> None:
     if info.flag_bits & 0x1:
         raise ValueError(f"Encrypted archive member is not supported: {info.filename}")
+    file_type = (info.external_attr >> 16) & 0o170000
+    if S_ISLNK(file_type):
+        raise ValueError(f"Symlink archive member is not supported: {info.filename}")
     if info.file_size > MAX_IMPORT_MEMBER_BYTES:
         raise ValueError(
             f"Archive member is too large: {info.filename} "
@@ -705,7 +717,7 @@ def validate_import_member(info: zipfile.ZipInfo) -> None:
 
 def path_size(path: Path, *, skip_dirs: set[str] | None = None) -> int:
     skip_dirs = skip_dirs or set()
-    if not path.exists():
+    if path.is_symlink() or not path.exists():
         return 0
     if path.is_file():
         try:
@@ -716,9 +728,21 @@ def path_size(path: Path, *, skip_dirs: set[str] | None = None) -> int:
     for child in path.rglob("*"):
         if any(part in skip_dirs for part in child.parts):
             continue
+        if child.is_symlink():
+            continue
         if child.is_file():
             try:
                 total += child.stat().st_size
             except OSError:
                 continue
     return total
+
+
+def reject_workspace_symlink(path: Path, root: Path) -> None:
+    if not path.is_symlink():
+        return
+    try:
+        label = str(path.relative_to(root)).replace("\\", "/")
+    except ValueError:
+        label = str(path)
+    raise ValueError(f"Refusing to export symlinked workspace path: {label}")
