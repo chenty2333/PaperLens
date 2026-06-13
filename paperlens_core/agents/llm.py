@@ -38,14 +38,14 @@ _CALL_GUARD_LOCK = threading.Lock()
 _CALL_GUARD_COUNTS: dict[str, int] = {}
 _LAST_CALL_TIME = 0.0
 _LEDGER_LOCK = threading.Lock()
-_LLM_CONTEXT: contextvars.ContextVar[dict[str, Any]] = contextvars.ContextVar(
-    "paperlens_llm_context", default={}
+_LLM_CONTEXT: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "paperlens_llm_context", default=None
 )
 
 
 @contextmanager
 def llm_call_context(**context: Any) -> Any:
-    parent = dict(_LLM_CONTEXT.get({}))
+    parent = dict(_LLM_CONTEXT.get() or {})
     parent.update({key: value for key, value in context.items() if value is not None})
     token = _LLM_CONTEXT.set(parent)
     try:
@@ -646,27 +646,32 @@ def enforce_request_safety(endpoint: str, payload: dict[str, Any], body_bytes: b
 
 def before_model_attempt(*, run_id: str | None = None) -> None:
     global _LAST_CALL_TIME
-    with _CALL_GUARD_LOCK:
-        max_calls = bounded_int_env(
-            "PAPERLENS_MAX_MODEL_CALLS", default=0, minimum=0, maximum=100_000
-        )
-        context = dict(_LLM_CONTEXT.get({}))
-        guard_key = str(run_id or context.get("run_id") or "__process__")
-        guard_count = _CALL_GUARD_COUNTS.get(guard_key, 0)
-        if max_calls and guard_count >= max_calls:
-            raise LlmError(
-                f"Refusing model request: run has reached PAPERLENS_MAX_MODEL_CALLS={max_calls}"
+    while True:
+        with _CALL_GUARD_LOCK:
+            max_calls = bounded_int_env(
+                "PAPERLENS_MAX_MODEL_CALLS", default=0, minimum=0, maximum=100_000
             )
-        min_interval = float_env(
-            "PAPERLENS_MIN_SECONDS_BETWEEN_CALLS", default=0.25, minimum=0.0, maximum=60.0
-        )
-        now = time.time()
-        wait_seconds = min_interval - (now - _LAST_CALL_TIME)
+            context = dict(_LLM_CONTEXT.get() or {})
+            guard_key = str(run_id or context.get("run_id") or "__process__")
+            guard_count = _CALL_GUARD_COUNTS.get(guard_key, 0)
+            if max_calls and guard_count >= max_calls:
+                raise LlmError(
+                    f"Refusing model request: run has reached PAPERLENS_MAX_MODEL_CALLS={max_calls}"
+                )
+            min_interval = float_env(
+                "PAPERLENS_MIN_SECONDS_BETWEEN_CALLS",
+                default=0.25,
+                minimum=0.0,
+                maximum=60.0,
+            )
+            now = time.time()
+            wait_seconds = min_interval - (now - _LAST_CALL_TIME)
+            if wait_seconds <= 0:
+                _CALL_GUARD_COUNTS[guard_key] = guard_count + 1
+                _LAST_CALL_TIME = now
+                return
         if wait_seconds > 0:
             time.sleep(wait_seconds)
-            now = time.time()
-        _CALL_GUARD_COUNTS[guard_key] = guard_count + 1
-        _LAST_CALL_TIME = now
 
 
 def mark_model_attempt_finished() -> None:
@@ -780,7 +785,7 @@ def extract_openai_response_text(response: dict[str, Any]) -> str:
             if isinstance(content.get("text"), str):
                 chunks.append(content["text"])
             elif isinstance(content.get("refusal"), str):
-                chunks.append(content["refusal"])
+                raise LlmError(f"OpenAI response refusal: {content['refusal']}")
     if chunks:
         return "\n".join(chunks)
     raise LlmError("OpenAI response did not contain text output")
@@ -791,10 +796,15 @@ def extract_chat_completion_text(response: dict[str, Any]) -> str:
     if not choices:
         raise LlmError("Chat completion response did not contain choices")
     message = choices[0].get("message") or {}
+    if isinstance(message.get("refusal"), str):
+        raise LlmError(f"Chat completion refusal: {message['refusal']}")
     content = message.get("content")
     if isinstance(content, str):
         return content
     if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict) and isinstance(part.get("refusal"), str):
+                raise LlmError(f"Chat completion refusal: {part['refusal']}")
         chunks = [
             part.get("text") for part in content if isinstance(part, dict) and part.get("text")
         ]
@@ -847,7 +857,18 @@ def extract_anthropic_text(response: dict[str, Any]) -> str:
 
 
 def image_data_url(path: Path) -> str:
-    mime_type = mimetypes.guess_type(path.name)[0] or "image/png"
+    max_bytes = bounded_int_env(
+        "PAPERLENS_MAX_IMAGE_BYTES", default=12_000_000, minimum=1, maximum=100_000_000
+    )
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise LlmError(f"Cannot read image file: {path}") from exc
+    if size > max_bytes:
+        raise LlmError(f"Image file is too large for model input: {path} ({size} bytes)")
+    mime_type = mimetypes.guess_type(path.name)[0]
+    if not mime_type or not mime_type.startswith("image/"):
+        raise LlmError(f"Unsupported image MIME type for model input: {path}")
     encoded = base64.b64encode(path.read_bytes()).decode("ascii")
     return f"data:{mime_type};base64,{encoded}"
 

@@ -82,8 +82,17 @@ def run_vlm_page_mode(
     artifacts: list[Any],
     stage: str,
 ) -> dict[str, Any]:
-    pages = [artifact.page_no for artifact in artifacts]
-    image_paths = [Path(artifact.render_path) for artifact in artifacts if artifact.render_path]
+    visual_artifacts = [artifact for artifact in artifacts if artifact.render_path]
+    pages = [artifact.page_no for artifact in visual_artifacts]
+    image_paths = [Path(artifact.render_path) for artifact in visual_artifacts]
+    if not visual_artifacts:
+        return {
+            "paper_id": paper.paper_id,
+            "agent_run_id": f"vlm_{paper.paper_id}_skipped",
+            "page_notes": [],
+            "visual_summary": "",
+            "risk_notes": ["No rendered page images were available for VLM verification."],
+        }
     key_payload = {
         "version": "vlm-page-v1",
         "model": workflow.config.provider.model,
@@ -127,11 +136,11 @@ def run_vlm_page_mode(
     ):
         raw = client.invoke_json_with_images(
             system_prompt=VLM_PAGE_READER_SYSTEM_PROMPT,
-            user_prompt=build_vlm_page_prompt(paper=paper, artifacts=artifacts),
+            user_prompt=build_vlm_page_prompt(paper=paper, artifacts=visual_artifacts),
             image_paths=image_paths,
             schema_name="paperlens_vlm_page_notes",
             schema=VLM_PAGE_NOTES_SCHEMA,
-            max_tokens=None,
+            max_tokens=6000,
             detail=workflow.config.visual_detail,
         )
     workflow.write_agent_run(
@@ -197,7 +206,7 @@ def hash_file_bytes(path: Path) -> str:
     try:
         return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
     except OSError:
-        return "missing"
+        return f"missing:{hash_text(str(path))[:16]}"
 
 
 def normalize_excerpt(text: str, *, limit: int) -> str:

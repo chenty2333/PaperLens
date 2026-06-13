@@ -41,7 +41,8 @@ def write_llm_cache(path: Path | None, payload: dict[str, Any]) -> None:
 
 
 def safe_cache_segment(value: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(value))
+    sanitized = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(value)).strip("_")
+    return sanitized or "item"
 
 
 def _canonical_json(payload: Any) -> bytes:

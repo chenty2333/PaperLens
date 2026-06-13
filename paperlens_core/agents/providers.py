@@ -33,9 +33,11 @@ def describe_provider(config: ProviderConfig) -> ProviderCapability:
             messages_api=True,
             notes="Uses Anthropic-compatible Messages API for model reading and audit.",
         )
-    return ProviderCapability(
-        kind="none",
-        responses_api=False,
-        messages_api=False,
-        notes="Offline debug mode; deterministic graph bootstrap is used.",
-    )
+    if config.kind == "none":
+        return ProviderCapability(
+            kind="none",
+            responses_api=False,
+            messages_api=False,
+            notes="Offline debug mode; deterministic graph bootstrap is used.",
+        )
+    raise ValueError(f"Unsupported provider kind: {config.kind}")

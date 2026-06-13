@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import sys
 import threading
-import time
 
 
 class ControlState:
@@ -30,7 +29,7 @@ class ControlState:
 
     def wait_if_paused(self) -> None:
         while self.paused and not self.cancelled:
-            time.sleep(0.2)
+            self._cancelled.wait(0.2)
 
     def require_not_cancelled(self) -> None:
         if self.cancelled:

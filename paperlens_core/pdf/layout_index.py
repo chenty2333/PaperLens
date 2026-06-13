@@ -110,16 +110,25 @@ def build_query_index(
 
 def merge_visual_items(items: list[dict[str, Any]], item_type: str) -> list[dict[str, Any]]:
     merged: list[dict[str, Any]] = []
-    for item in sorted(items, key=lambda row: (str(row.get("label") or row.get("id") or ""), int(row.get("page_no") or 0))):
+    for item in sorted(
+        items,
+        key=lambda row: (str(row.get("label") or row.get("id") or ""), int(row.get("page_no") or 0)),
+    ):
         label = str(item.get("label") or item.get("id") or item.get("caption") or "").strip().lower()
         if label and merged:
             previous = merged[-1]
             previous_label = str(previous.get("label") or previous.get("id") or previous.get("caption") or "").strip().lower()
             previous_pages = previous.get("pages")
+            item_page = int(item.get("page_no") or 0)
+            previous_page = (
+                int(previous_pages[-1] or 0)
+                if isinstance(previous_pages, list) and previous_pages
+                else 0
+            )
             if (
                 previous_label == label
                 and isinstance(previous_pages, list)
-                and int(item.get("page_no") or 0) <= int(previous_pages[-1]) + 1
+                and item_page <= previous_page + 1
             ):
                 previous_pages.append(item.get("page_no"))
                 previous.setdefault("merged_items", []).append(item)

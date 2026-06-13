@@ -85,14 +85,14 @@ def compute_core_quality_metrics(
         numeric_fact_node_count=len(numeric_fact_nodes),
         number_not_located_count=len(number_not_located),
         numeric_locatable_rate=metric_rate(
-            len(numeric_fact_nodes) - len(number_not_located),
+            max(0, len(numeric_fact_nodes) - len(number_not_located)),
             len(numeric_fact_nodes),
             default=1.0,
         ),
         extracted_number_count=len(extracted_numbers),
         extracted_number_not_located_count=len(extracted_numbers_not_located),
         extracted_number_locatable_rate=metric_rate(
-            len(extracted_numbers) - len(extracted_numbers_not_located),
+            max(0, len(extracted_numbers) - len(extracted_numbers_not_located)),
             len(extracted_numbers),
             default=1.0,
         ),
@@ -103,9 +103,11 @@ def compute_core_quality_metrics(
             default=0.0,
         ),
         reading_required_output_count=len(expected_output_keys),
-        reading_required_output_covered_count=len(expected_output_keys) - len(missing_output_keys),
+        reading_required_output_covered_count=max(
+            0, len(expected_output_keys) - len(missing_output_keys)
+        ),
         reading_required_output_coverage=metric_rate(
-            len(expected_output_keys) - len(missing_output_keys),
+            max(0, len(expected_output_keys) - len(missing_output_keys)),
             len(expected_output_keys),
             default=1.0,
         ),

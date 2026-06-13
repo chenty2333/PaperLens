@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import copy
 import threading
 from typing import Any
 
@@ -26,26 +27,17 @@ class BudgetManager:
         if not usage:
             with self._lock:
                 self.snapshot.calls += 1
-                return self.snapshot
-        input_tokens = int(
-            usage.get("input_tokens")
-            or usage.get("prompt_tokens")
-            or 0
-        )
+                return copy.copy(self.snapshot)
+        input_tokens = first_int(usage, "input_tokens", "prompt_tokens") or 0
         prompt_details = usage.get("prompt_tokens_details") or {}
         input_details = usage.get("input_tokens_details") or {}
-        cached_input_tokens = int(
-            usage.get("cached_input_tokens")
-            or usage.get("cache_read_input_tokens")
-            or prompt_details.get("cached_tokens")
-            or input_details.get("cached_tokens")
+        cached_input_tokens = (
+            first_int(usage, "cached_input_tokens", "cache_read_input_tokens")
+            or first_int(prompt_details, "cached_tokens")
+            or first_int(input_details, "cached_tokens")
             or 0
         )
-        output_tokens = int(
-            usage.get("output_tokens")
-            or usage.get("completion_tokens")
-            or 0
-        )
+        output_tokens = first_int(usage, "output_tokens", "completion_tokens") or 0
         cached_input_tokens = min(cached_input_tokens, input_tokens)
         billable_uncached_input_tokens = max(0, input_tokens - cached_input_tokens)
         with self._lock:
@@ -58,7 +50,7 @@ class BudgetManager:
                 + cached_input_tokens * self.config.cached_input_token_usd_per_million
                 + output_tokens * self.config.output_token_usd_per_million
             ) / 1_000_000
-            return self.snapshot
+            return copy.copy(self.snapshot)
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -68,3 +60,13 @@ class BudgetManager:
             "estimated_usd": round(self.snapshot.estimated_usd, 6),
             "calls": self.snapshot.calls,
         }
+
+
+def first_int(payload: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            return int(value)
+    return None

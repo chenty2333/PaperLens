@@ -108,7 +108,11 @@ class CoreConfig(BaseModel):
     @classmethod
     def sane_output_language(cls, value: str) -> str:
         language = value.strip().lower()
-        return language if language in {"en", "zh"} else "zh"
+        if not language:
+            return "zh"
+        if language not in {"en", "zh"}:
+            raise ValueError("output_language must be 'zh' or 'en'")
+        return language
 
     @field_validator("read_mode", mode="before")
     @classmethod

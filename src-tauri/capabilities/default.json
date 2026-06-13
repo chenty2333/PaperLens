@@ -10,7 +10,6 @@
     "dialog:default",
     "opener:default",
     "process:default",
-    "updater:default",
-    "shell:default"
+    "updater:default"
   ]
 }

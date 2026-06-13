@@ -5,6 +5,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import threading
 import time
 import zipfile
 from datetime import UTC, datetime
@@ -16,6 +17,8 @@ INTERNAL_DIRNAME = ".paperlens"
 WORKSPACE_SCHEMA_VERSION = "paperlens.workspace.v1"
 STORAGE_SCHEMA_VERSION = 1
 EXPORT_SCHEMA_VERSION = "paperlens.workspace_export.v1"
+_JSONL_APPEND_LOCKS: dict[Path, threading.Lock] = {}
+_JSONL_APPEND_LOCKS_GUARD = threading.Lock()
 
 REQUIRED_DIRS = (
     INTERNAL_DIRNAME,
@@ -93,8 +96,14 @@ def atomic_write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
 
 def append_jsonl(path: Path, row: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+    resolved = path.resolve()
+    with _JSONL_APPEND_LOCKS_GUARD:
+        lock = _JSONL_APPEND_LOCKS.setdefault(resolved, threading.Lock())
+    line = json.dumps(row, ensure_ascii=False, default=str) + "\n"
+    with lock, path.open("a", encoding="utf-8") as handle:
+        handle.write(line)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def read_json_file(path: Path, fallback: Any = None) -> Any:

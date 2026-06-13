@@ -28,9 +28,15 @@ from paperlens_core.workflow.stages import normalize_workflow_stage
 SERVER_VERSION = "paperlens-core-service.v1"
 INTERNAL_DIR = ".paperlens"
 MAX_JSON_REQUEST_BYTES = 2_000_000
+MAX_FILE_RESPONSE_BYTES = 100_000_000
 JOB_HISTORY_SCHEMA_VERSION = "paperlens.job_history.v1"
 JOB_RECORD_SCHEMA_VERSION = "paperlens.job_record.v1"
 JOB_HISTORY_LIMIT = 50
+MEMORY_HISTORY_LIMIT = 50
+AUTH_FAILURE_LIMIT = 30
+AUTH_FAILURE_WINDOW_SECONDS = 60.0
+SSE_MAX_SECONDS = 60 * 60
+TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 
 
 def utc_now() -> str:
@@ -84,6 +90,28 @@ def job_updated_at(job: dict[str, Any]) -> str:
     return value if isinstance(value, str) else ""
 
 
+def record_updated_at(record: Any) -> str:
+    value = getattr(record, "updated_at", "") or getattr(record, "created_at", "")
+    return value if isinstance(value, str) else ""
+
+
+def prune_managed_records[T](records: dict[str, T], id_attr: str) -> dict[str, T]:
+    active = {
+        key: item
+        for key, item in records.items()
+        if getattr(item, "status", "") not in TERMINAL_STATUSES
+    }
+    terminal = [
+        item
+        for item in records.values()
+        if getattr(item, "status", "") in TERMINAL_STATUSES
+    ]
+    terminal.sort(key=record_updated_at, reverse=True)
+    for item in terminal[:MEMORY_HISTORY_LIMIT]:
+        active[str(getattr(item, id_attr))] = item
+    return active
+
+
 def write_json_response(handler: BaseHTTPRequestHandler, status: int, payload: Any) -> None:
     body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
     handler.send_response(status)
@@ -95,21 +123,42 @@ def write_json_response(handler: BaseHTTPRequestHandler, status: int, payload: A
 
 
 def write_file_response(handler: BaseHTTPRequestHandler, path: Path) -> None:
-    body = path.read_bytes()
+    size = path.stat().st_size
+    if size > MAX_FILE_RESPONSE_BYTES:
+        raise ValueError(
+            f"File is too large to serve: {size} bytes exceeds {MAX_FILE_RESPONSE_BYTES}"
+        )
     content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
     handler.send_response(HTTPStatus.OK)
     write_common_headers(handler)
     handler.send_header("Content-Type", content_type)
-    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Content-Length", str(size))
     handler.end_headers()
-    handler.wfile.write(body)
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            handler.wfile.write(chunk)
 
 
 def write_common_headers(handler: BaseHTTPRequestHandler) -> None:
-    handler.send_header("Access-Control-Allow-Origin", "*")
+    origin = allowed_cors_origin(handler.headers.get("Origin", ""))
+    if origin:
+        handler.send_header("Access-Control-Allow-Origin", origin)
+        handler.send_header("Vary", "Origin")
     handler.send_header("Access-Control-Allow-Headers", "authorization, content-type, x-paperlens-token")
     handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
     handler.send_header("Cache-Control", "no-store")
+
+
+def allowed_cors_origin(origin: str) -> str:
+    if not origin:
+        return ""
+    parsed = urlparse(origin)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme == "tauri":
+        return origin
+    if host in {"localhost", "127.0.0.1", "tauri.localhost"}:
+        return origin
+    return ""
 
 
 def read_request_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
@@ -571,6 +620,7 @@ class ManagedJob:
     thread: threading.Thread | None = None
 
     def summary(self) -> dict[str, Any]:
+        events = self.events.snapshot()
         return {
             "job_id": self.job_id,
             "status": self.status,
@@ -581,7 +631,7 @@ class ManagedJob:
             "updated_at": self.updated_at,
             "completed_at": self.completed_at,
             "error": self.error,
-            "latest_event": self.events.snapshot()[-1] if self.events.snapshot() else None,
+            "latest_event": events[-1] if events else None,
             "result": self.result,
             "live": True,
         }
@@ -605,6 +655,7 @@ class ManagedAnswer:
     thread: threading.Thread | None = None
 
     def summary(self) -> dict[str, Any]:
+        events = self.events.snapshot()
         return {
             "answer_id": self.answer_id,
             "status": self.status,
@@ -617,7 +668,7 @@ class ManagedAnswer:
             "completed_at": self.completed_at,
             "answer": self.answer,
             "error": self.error,
-            "latest_event": self.events.snapshot()[-1] if self.events.snapshot() else None,
+            "latest_event": events[-1] if events else None,
         }
 
 
@@ -628,7 +679,41 @@ class PaperLensServiceState:
         self.engine = PaperLensEngine()
         self.jobs: dict[str, ManagedJob] = {}
         self.answers: dict[str, ManagedAnswer] = {}
+        self.auth_failures: dict[str, list[float]] = {}
         self._lock = threading.Lock()
+
+    def auth_retry_after(self, key: str) -> int:
+        now = time.time()
+        with self._lock:
+            attempts = [
+                item
+                for item in self.auth_failures.get(key, [])
+                if now - item < AUTH_FAILURE_WINDOW_SECONDS
+            ]
+            self.auth_failures[key] = attempts
+            if len(attempts) < AUTH_FAILURE_LIMIT:
+                return 0
+            return max(1, int(AUTH_FAILURE_WINDOW_SECONDS - (now - attempts[0])))
+
+    def record_auth_failure(self, key: str) -> None:
+        now = time.time()
+        with self._lock:
+            attempts = [
+                item
+                for item in self.auth_failures.get(key, [])
+                if now - item < AUTH_FAILURE_WINDOW_SECONDS
+            ]
+            attempts.append(now)
+            self.auth_failures[key] = attempts[-AUTH_FAILURE_LIMIT:]
+
+    def clear_auth_failures(self, key: str) -> None:
+        with self._lock:
+            self.auth_failures.pop(key, None)
+
+    def prune_memory(self) -> None:
+        with self._lock:
+            self.jobs = prune_managed_records(self.jobs, "job_id")
+            self.answers = prune_managed_records(self.answers, "answer_id")
 
     def persist_job(self, job: ManagedJob) -> None:
         store = WorkspaceStore(job.output_dir)
@@ -796,6 +881,7 @@ class PaperLensServiceState:
                 }
             )
             self.persist_job(job)
+            self.prune_memory()
 
     def retry_job(self, job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         original = self.jobs.get(job_id)
@@ -949,6 +1035,7 @@ class PaperLensServiceState:
                     },
                 }
             )
+            self.prune_memory()
 
 
 class PaperLensHttpServer(ThreadingHTTPServer):
@@ -991,9 +1078,21 @@ class PaperLensRequestHandler(BaseHTTPRequestHandler):
         parts = [unquote(part) for part in parsed.path.strip("/").split("/") if part]
         query = parse_qs(parsed.query)
         try:
+            public_route = parts in ([], ["health"], ["version"])
+            auth_key = self.client_address[0] if self.client_address else "unknown"
+            retry_after = self.state.auth_retry_after(auth_key)
+            if retry_after and not public_route:
+                self.send_response(HTTPStatus.TOO_MANY_REQUESTS)
+                write_common_headers(self)
+                self.send_header("Retry-After", str(retry_after))
+                self.end_headers()
+                return
             if not self._authorized(parts, query):
+                self.state.record_auth_failure(auth_key)
                 write_json_response(self, HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                 return
+            if not public_route:
+                self.state.clear_auth_failures(auth_key)
             if method == "GET":
                 result = self._route_get(parts, query)
             elif method == "POST":
@@ -1013,8 +1112,12 @@ class PaperLensRequestHandler(BaseHTTPRequestHandler):
             write_json_response(self, HTTPStatus.NOT_FOUND, {"error": str(exc)})
         except ValueError as exc:
             write_json_response(self, HTTPStatus.BAD_REQUEST, {"error": str(exc)})
-        except Exception as exc:
-            write_json_response(self, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+        except Exception:
+            write_json_response(
+                self,
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": "internal server error"},
+            )
 
     def _authorized(self, parts: list[str], query: dict[str, list[str]]) -> bool:
         if parts in ([], ["health"], ["version"]):
@@ -1143,20 +1246,24 @@ class PaperLensRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         cursor = 0
-        while True:
-            events = stream.wait_after(cursor, timeout=10.0)
-            for event in events:
-                cursor = max(cursor, int(event.get("seq", cursor)) + 1)
-                payload = json.dumps(event, ensure_ascii=False, default=str)
-                self.wfile.write(f"id: {event.get('seq', cursor)}\n".encode("utf-8"))
-                self.wfile.write(b"event: paperlens\n")
-                self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
-                self.wfile.flush()
-            if terminal_status() in {"completed", "failed", "cancelled"} and cursor >= len(stream.snapshot()):
-                break
-            if not events:
-                self.wfile.write(b": keep-alive\n\n")
-                self.wfile.flush()
+        deadline = time.time() + SSE_MAX_SECONDS
+        try:
+            while time.time() < deadline:
+                events = stream.wait_after(cursor, timeout=10.0)
+                for event in events:
+                    cursor = max(cursor, int(event.get("seq", cursor)) + 1)
+                    payload = json.dumps(event, ensure_ascii=False, default=str)
+                    self.wfile.write(f"id: {event.get('seq', cursor)}\n".encode("utf-8"))
+                    self.wfile.write(b"event: paperlens\n")
+                    self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                if terminal_status() in TERMINAL_STATUSES and cursor >= len(stream.snapshot()):
+                    break
+                if not events:
+                    self.wfile.write(b": keep-alive\n\n")
+                    self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            pass
         self.close_connection = True
 
 

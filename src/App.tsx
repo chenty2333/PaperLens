@@ -667,6 +667,7 @@ function App() {
   const [rightSidebarOpen, setRightSidebarOpen] = useState(() => loadBooleanPreference('paperLens.layout.rightOpen', true))
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth)
   const chatEndRef = useRef<HTMLDivElement>(null)
+  const eventSourcesRef = useRef<Set<EventSource>>(new Set())
 
   const selectedPaper = useMemo(
     () => workspace?.papers.find((paper) => paper.paper_id === selectedPaperId) ?? workspace?.papers[0] ?? null,
@@ -798,6 +799,14 @@ function App() {
   }, [])
 
   useEffect(() => {
+    const sources = eventSourcesRef.current
+    return () => {
+      sources.forEach((source) => source.close())
+      sources.clear()
+    }
+  }, [])
+
+  useEffect(() => {
     const unsubs: Array<() => void> = []
     listen<string>('core-service-log', (event) => {
       try {
@@ -835,31 +844,69 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (service && settings.outputDir && !workspace) {
-      void openWorkspace(settings.outputDir)
+    if (!service || !settings.outputDir || workspace) return
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    apiPost<Workspace>(service, '/workspaces/open', { output_dir: settings.outputDir })
+      .then((loaded) => {
+        if (cancelled) return
+        setWorkspace(loaded)
+        setSettings((current) =>
+          current.outputDir === loaded.output_dir ? current : { ...current, outputDir: loaded.output_dir },
+        )
+        if (!selectedPaperId || !loaded.papers.some((paper) => paper.paper_id === selectedPaperId)) {
+          setSelectedPaperId(loaded.papers[0]?.paper_id ?? '')
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) setError(String(err))
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [service])
+  }, [service, selectedPaperId, settings.outputDir, workspace])
 
   useEffect(() => {
     if (!service) return
     const timer = window.setInterval(() => {
-      void refreshJobs()
+      const path = currentOutputDir ? `/jobs?output_dir=${encodeOutput(currentOutputDir)}` : '/jobs'
+      apiGet<{ jobs: JobSummary[] }>(service, path)
+        .then((loaded) => setJobs(loaded.jobs))
+        .catch(() => {
+          // a stopped service will be reported by the next explicit action
+        })
     }, 2500)
     return () => window.clearInterval(timer)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [service])
+  }, [currentOutputDir, service])
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ block: 'end' })
   }, [chatMessages])
 
   useEffect(() => {
-    if (selectedPaper && service && currentOutputDir) {
-      void loadReport(selectedPaper.paper_id)
+    if (!selectedPaper || !service || !currentOutputDir) return
+    let cancelled = false
+    apiGet<ReportPayload>(
+      service,
+      `/papers/${encodeURIComponent(selectedPaper.paper_id)}/report?output_dir=${encodeOutput(currentOutputDir)}`,
+    )
+      .then((loaded) => {
+        if (!cancelled) setReport(loaded)
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setError(String(err))
+          setReport(null)
+        }
+      })
+    return () => {
+      cancelled = true
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedPaper?.paper_id, service, currentOutputDir])
+  }, [currentOutputDir, selectedPaper, service])
 
   function update<K extends keyof RunSettings>(key: K, value: RunSettings[K]) {
     setSettings((current) => ({ ...current, [key]: value }))
@@ -888,20 +935,6 @@ function App() {
     }
   }
 
-  async function loadReport(paperId: string) {
-    if (!service || !currentOutputDir || !paperId) return
-    try {
-      const loaded = await apiGet<ReportPayload>(
-        service,
-        `/papers/${encodeURIComponent(paperId)}/report?output_dir=${encodeOutput(currentOutputDir)}`,
-      )
-      setReport(loaded)
-    } catch (err) {
-      setError(String(err))
-      setReport(null)
-    }
-  }
-
   async function refreshJobs() {
     if (!service) return
     try {
@@ -918,17 +951,23 @@ function App() {
     const source = new EventSource(
       serviceUrl(service, `/jobs/${encodeURIComponent(jobId)}/events?token=${encodeURIComponent(service.token)}`),
     )
+    const release = trackEventSource(source)
     source.addEventListener('paperlens', (event) => {
       const parsed = JSON.parse((event as MessageEvent).data) as PaperLensEvent
       setJobEvents((current) => [...current.slice(-500), parsed])
-      if (parsed.type === 'job_completed' || parsed.type === 'job_failed' || parsed.level === 'critical') {
-        source.close()
+      if (
+        parsed.type === 'job_completed'
+        || parsed.type === 'job_failed'
+        || parsed.type === 'job_cancelled'
+        || parsed.level === 'critical'
+      ) {
+        release()
         void refreshJobs()
         void openWorkspace(settings.outputDir)
       }
     })
     source.onerror = () => {
-      source.close()
+      release()
     }
   }
 
@@ -1242,6 +1281,7 @@ function App() {
     const source = new EventSource(
       serviceUrl(service, `/ask/${encodeURIComponent(answerId)}/events?token=${encodeURIComponent(service.token)}`),
     )
+    const release = trackEventSource(source)
     source.addEventListener('paperlens', (event) => {
       const parsed = JSON.parse((event as MessageEvent).data) as PaperLensEvent
       if (parsed.type === 'answer_started') {
@@ -1268,7 +1308,7 @@ function App() {
               : message,
           ),
         )
-        source.close()
+        release()
         void openWorkspace(currentOutputDir)
       }
       if (parsed.type === 'answer_failed') {
@@ -1280,11 +1320,19 @@ function App() {
               : message,
           ),
         )
-        source.close()
+        release()
       }
     })
     source.onerror = () => {
+      release()
+    }
+  }
+
+  function trackEventSource(source: EventSource) {
+    eventSourcesRef.current.add(source)
+    return () => {
       source.close()
+      eventSourcesRef.current.delete(source)
     }
   }
 

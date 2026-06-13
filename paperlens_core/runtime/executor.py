@@ -232,13 +232,17 @@ def token_count_from_usage(usage: dict[str, Any]) -> int:
     total = numeric_int(usage.get("total_tokens"))
     if total is not None:
         return total
-    input_tokens = (
-        numeric_int(usage.get("input_tokens")) or numeric_int(usage.get("prompt_tokens")) or 0
-    )
-    output_tokens = (
-        numeric_int(usage.get("output_tokens")) or numeric_int(usage.get("completion_tokens")) or 0
-    )
+    input_tokens = first_numeric_int(usage, "input_tokens", "prompt_tokens") or 0
+    output_tokens = first_numeric_int(usage, "output_tokens", "completion_tokens") or 0
     return input_tokens + output_tokens
+
+
+def first_numeric_int(usage: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        value = numeric_int(usage.get(key))
+        if value is not None:
+            return value
+    return None
 
 
 def numeric_int(value: Any) -> int | None:

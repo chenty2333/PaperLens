@@ -4,7 +4,7 @@ version = "0.2.0"
 description = "Portable desktop app for evidence-grounded paper auditing."
 authors = ["PaperLens"]
 license = "Unlicense"
-repository = ""
+repository = "https://github.com/chenty2333/PaperLens"
 edition = "2021"
 rust-version = "1.77.2"
 
@@ -25,6 +25,5 @@ tauri = { version = "2.10.3", features = [] }
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
-tauri-plugin-shell = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"

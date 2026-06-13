@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 def now_iso() -> str:
@@ -28,6 +28,21 @@ class PaperRecord(BaseModel):
     arxiv_id: str | None = None
     bibtex_key: str | None = None
     side_statuses: list[str] = Field(default_factory=list)
+
+    @field_validator("paper_id", "file_path", "file_hash")
+    @classmethod
+    def required_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("paper_id, file_path, and file_hash cannot be blank")
+        return value
+
+    @field_validator("page_count")
+    @classmethod
+    def nonnegative_page_count(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("page_count cannot be negative")
+        return value
 
 
 class PageArtifact(BaseModel):
@@ -96,6 +111,21 @@ class SkimCard(BaseModel):
     evidence_source_ids: list[str] = Field(default_factory=list)
     confidence: float = 0.0
 
+    @field_validator("paper_id")
+    @classmethod
+    def skim_paper_id_required(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("paper_id cannot be blank")
+        return value
+
+    @field_validator("confidence")
+    @classmethod
+    def confidence_in_unit_interval(cls, value: float) -> float:
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("confidence must be between 0 and 1")
+        return value
+
 
 ClassLabel = Literal["A", "B", "C", "HOLD"]
 
@@ -112,3 +142,17 @@ class ClassificationDecision(BaseModel):
     validation_status: str | None = None
     validation_notes: list[str] = Field(default_factory=list)
 
+    @field_validator("paper_id")
+    @classmethod
+    def decision_paper_id_required(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("paper_id cannot be blank")
+        return value
+
+    @field_validator("confidence", "false_negative_risk")
+    @classmethod
+    def decision_score_in_unit_interval(cls, value: float) -> float:
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("decision scores must be between 0 and 1")
+        return value

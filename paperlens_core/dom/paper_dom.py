@@ -40,17 +40,42 @@ class PaperSection(PaperDOMNode):
     level: int = 1
     span_ids: list[str] = Field(default_factory=list)
 
+    @field_validator("level")
+    @classmethod
+    def positive_level(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("section level must be >= 1")
+        return value
+
+
+def validate_bbox(value: list[float] | None) -> list[float] | None:
+    if value is None:
+        return None
+    if len(value) != 4:
+        raise ValueError("bbox must have four coordinates")
+    return [float(item) for item in value]
+
 
 class PaperFigure(PaperDOMNode):
     kind: Literal["figure"] = "figure"
     caption: str | None = None
     bbox: list[float] | None = None
 
+    @field_validator("bbox")
+    @classmethod
+    def figure_bbox_shape(cls, value: list[float] | None) -> list[float] | None:
+        return validate_bbox(value)
+
 
 class PaperTable(PaperDOMNode):
     kind: Literal["table"] = "table"
     caption: str | None = None
     bbox: list[float] | None = None
+
+    @field_validator("bbox")
+    @classmethod
+    def table_bbox_shape(cls, value: list[float] | None) -> list[float] | None:
+        return validate_bbox(value)
 
 
 class PaperEquation(PaperDOMNode):
@@ -404,8 +429,7 @@ def looks_like_equation(text: str) -> bool:
         return False
     symbol_count = len(
         re.findall(
-            "[=+\\-*/^_{}()[\\]<>"
-            "\\u2264\\u2265\\u2248\\u2211\\u220f\\u221a\\u2202\\u2207\\u2208\\u2200]",
+            r"[=+\-*/^_{}()[\]<>≤≥≈∑∏√∂∇∈∀]",
             normalized,
         )
     )

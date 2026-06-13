@@ -65,7 +65,7 @@ jobs:
   build-windows:
     name: Build PaperLens Windows installer
     needs: preflight
-    runs-on: windows-2025-vs2026
+    runs-on: windows-latest
     permissions:
       contents: read
     timeout-minutes: 90
