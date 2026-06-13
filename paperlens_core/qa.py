@@ -103,6 +103,7 @@ def answer_question(
     question: str,
     chat_history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    output_language = "en" if config.output_language == "en" else "zh"
     report_path = try_resolve_report_path(output_dir, paper_id)
     if paper_id:
         resolved_paper_id = paper_id
@@ -139,6 +140,7 @@ def answer_question(
             or dict_value(qa_context.get("reading_context")).get("grade")
         ),
         question=question,
+        output_language=output_language,
         augmented_query=augmented_query,
         question_type=question_type,
         qa_context=qa_context,
@@ -150,8 +152,13 @@ def answer_question(
             paper_id=resolved_paper_id,
             question_type=question_type,
             core_v2_context=core_v2_context,
+            output_language=output_language,
         )
-        answer = ground_qa_answer_in_core_v2_context(answer, core_v2_context)
+        answer = ground_qa_answer_in_core_v2_context(
+            answer,
+            core_v2_context,
+            output_language=output_language,
+        )
         write_qa_trace(
             output_dir,
             answer,
@@ -176,6 +183,7 @@ def answer_question(
             "model": config.provider.model,
             "paper_id": resolved_paper_id,
             "question": question,
+            "output_language": output_language,
             "chat_history_hash": hash_json_payload(normalize_chat_history(chat_history or [])),
             "schema_hash": hash_json_payload(ASK_SCHEMA),
             "agent_context_hash": hash_json_payload(agent_context),
@@ -187,7 +195,11 @@ def answer_question(
     cached = read_ask_cache(cache_path)
     if cached and isinstance(cached.get("data"), dict):
         answer = normalize_answer(cached["data"])
-        answer = ground_qa_answer_in_core_v2_context(answer, core_v2_context)
+        answer = ground_qa_answer_in_core_v2_context(
+            answer,
+            core_v2_context,
+            output_language=output_language,
+        )
         answer["paper_id"] = resolved_paper_id
         answer["usage"] = {}
         answer["cache_hit"] = True
@@ -217,7 +229,11 @@ def answer_question(
         agent_context=agent_context,
     )
     answer = normalize_answer(result.final)
-    answer = ground_qa_answer_in_core_v2_context(answer, core_v2_context)
+    answer = ground_qa_answer_in_core_v2_context(
+        answer,
+        core_v2_context,
+        output_language=output_language,
+    )
     answer["paper_id"] = resolved_paper_id
     answer["usage"] = result.usage
     answer["cache_hit"] = False
@@ -502,7 +518,7 @@ def core_v2_qa_context_view(*, paper_id: str, core_v2_context: dict[str, Any]) -
                 "source_type": span.get("kind") or "paper_dom_source",
                 "interpretation": span.get("text")
                 or span.get("caption")
-                or f"PaperDOM source {source_id}",
+                or "原文依据条目",
                 "source": "core_v2_paper_dom",
             }
     return {
@@ -737,7 +753,9 @@ def offline_qa_answer(
     paper_id: str,
     question_type: str,
     core_v2_context: dict[str, Any],
+    output_language: str = "zh",
 ) -> dict[str, Any]:
+    english = output_language == "en"
     matches = list_of_dicts(core_v2_context.get("matches"))
     if matches:
         claims = [str(item.get("label") or "").strip() for item in matches[:5]]
@@ -746,21 +764,30 @@ def offline_qa_answer(
             for item in matches[:5]
             for source_id in normalized_source_id_list(item.get("source_ids"))
         )
-        lines = ["离线模式下未调用模型；下面是从 ClaimGraph 命中的原文锚定事实："]
+        lines = [
+            "Offline mode did not call a model. The strongest source-backed facts found are:"
+            if english
+            else "离线模式下未调用模型；下面是当前问题命中的原文依据事实："
+        ]
+        separator = ": " if english else "："
         for item in matches[:5]:
-            source_hint = ", ".join(normalized_source_id_list(item.get("source_ids"))[:3])
-            suffix = f"（source_ids: {source_hint}）" if source_hint else ""
-            lines.append(f"- [{item.get('kind')}] {item.get('label')}{suffix}")
+            item_source_ids = normalized_source_id_list(item.get("source_ids"))
+            evidence_suffix = offline_evidence_count_label(
+                len(item_source_ids),
+                output_language=output_language,
+            )
+            lines.append(
+                f"- {qa_kind_label(str(item.get('kind') or ''), output_language=output_language)}"
+                f"{separator}{item.get('label')}{evidence_suffix}"
+            )
+            related_labels = []
             for relation in list_of_dicts(item.get("relationships"))[:3]:
-                relation_sources = normalized_source_id_list(relation.get("source_ids"))[:3]
-                relation_suffix = (
-                    f"（source_ids: {', '.join(relation_sources)}）" if relation_sources else ""
-                )
-                lines.append(
-                    "  - relation: "
-                    f"{relation.get('source_id')} --{relation.get('kind')}--> "
-                    f"{relation.get('target_id')}{relation_suffix}"
-                )
+                related = relationship_counterpart_label(item, relation)
+                if related and related not in related_labels:
+                    related_labels.append(related)
+            for related in related_labels[:2]:
+                prefix = "Related fact" if english else "相关事实"
+                lines.append(f"  - {prefix}{separator}{related}")
         return {
             "paper_id": paper_id,
             "answer_markdown": "\n".join(lines),
@@ -771,15 +798,21 @@ def offline_qa_answer(
                 "paper_claims": [claim for claim in claims if claim][:5],
                 "paperlens_inferences": [],
                 "background_context": [],
-                "evidence_limits": ["离线模式只返回 ClaimGraph 检索结果，未调用模型综合推理。"],
+                "evidence_limits": [
+                    "Offline mode only returns indexed evidence matches; it did not synthesize with a model."
+                    if english
+                    else "离线模式只返回已索引的证据命中，未调用模型做综合推理。"
+                ],
             },
         }
     if core_v2_context_is_consumable(core_v2_context):
         return {
             "paper_id": paper_id,
             "answer_markdown": (
-                "离线模式下未调用模型；reviewed ClaimGraph 没有为当前问题返回可引用的 "
-                "PaperDOM 证据命中，因此不能生成论文事实回答。"
+                "Offline mode did not call a model, and the indexed evidence did not return "
+                "a source-backed match for this question, so PaperLens cannot make a paper-specific claim."
+                if english
+                else "离线模式下未调用模型；当前问题没有匹配到足够的原文依据，因此不能生成论文事实回答。"
             ),
             "cited_source_ids": [],
             "confidence": "low",
@@ -789,23 +822,79 @@ def offline_qa_answer(
                 "paperlens_inferences": [],
                 "background_context": [],
                 "evidence_limits": [
-                    "Reviewed ClaimGraph is available, but retrieval returned no matching source-backed nodes."
+                    "Indexed evidence is available, but retrieval returned no matching source-backed facts."
+                    if english
+                    else "已索引证据可用，但本次检索没有命中可引用的原文依据。"
                 ],
             },
         }
     return {
         "paper_id": paper_id,
-        "answer_markdown": "当前是离线模式，且没有可消费的 reviewed ClaimGraph/PaperDOM 证据。",
+        "answer_markdown": (
+            "Offline mode is enabled, and no reviewed evidence index is available for this paper."
+            if english
+            else "当前是离线模式，且这篇论文还没有可消费的已复核证据索引。"
+        ),
         "cited_source_ids": [],
         "confidence": "low",
         "question_type": question_type,
         "source_attribution": {
             "paper_claims": [],
-            "paperlens_inferences": ["离线模式只返回可用证据位置，未进行模型问答。"],
+            "paperlens_inferences": [
+                "Offline mode did not run model QA."
+                if english
+                else "离线模式未进行模型问答。"
+            ],
             "background_context": [],
-            "evidence_limits": ["未调用模型，不能可靠综合回答问题。"],
+            "evidence_limits": [
+                "No model was called, so PaperLens cannot synthesize a reliable answer."
+                if english
+                else "未调用模型，不能可靠综合回答问题。"
+            ],
         },
     }
+
+
+def qa_kind_label(kind: str, *, output_language: str) -> str:
+    normalized = kind.strip().lower()
+    if output_language == "en":
+        return {
+            "problem": "Problem",
+            "claim": "Claim",
+            "mechanism": "Mechanism",
+            "implementation": "Implementation",
+            "evaluation": "Evaluation",
+            "result": "Result",
+            "limitation": "Limitation",
+            "concept": "Concept",
+        }.get(normalized, "Fact")
+    return {
+        "problem": "问题",
+        "claim": "主张",
+        "mechanism": "机制",
+        "implementation": "实现",
+        "evaluation": "评估",
+        "result": "结果",
+        "limitation": "局限",
+        "concept": "概念",
+    }.get(normalized, "事实")
+
+
+def offline_evidence_count_label(count: int, *, output_language: str) -> str:
+    if count <= 0:
+        return ""
+    if output_language == "en":
+        unit = "source-backed evidence item" if count == 1 else "source-backed evidence items"
+        return f" ({count} {unit})"
+    return f"（{count} 条原文依据）"
+
+
+def relationship_counterpart_label(match: dict[str, Any], relation: dict[str, Any]) -> str:
+    node_id = str(match.get("node_id") or "")
+    source_id = str(relation.get("source_id") or "")
+    if source_id == node_id:
+        return string_or_empty(relation.get("target_label"))
+    return string_or_empty(relation.get("source_label"))
 
 
 def list_of_dicts(value: Any) -> list[dict[str, Any]]:
@@ -840,6 +929,14 @@ def run_paper_qa_agent(
     core_v2_context: dict[str, Any],
     agent_context: dict[str, Any],
 ) -> Any:
+    output_language = string_or_empty(
+        dict_value(agent_context.get("always_context")).get("output_language")
+    )
+    language_rule = (
+        "Write answer_markdown in English."
+        if output_language == "en"
+        else "Write answer_markdown in Chinese. Keep original paper terms in English only when needed."
+    )
     tools = PaperToolRegistry(
         paper_id=paper_id,
         title=title,
@@ -852,7 +949,8 @@ def run_paper_qa_agent(
         session_name="paper_qa",
         objective=(
             "Answer the current paper question. Paper-specific claims must come from reviewed "
-            "ClaimGraph nodes and PaperDOM source IDs; otherwise mark them uncertain."
+            "ClaimGraph nodes and PaperDOM source IDs; otherwise mark them uncertain. "
+            + language_rule
         ),
         final_artifact_type="paper_qa_answer",
         final_data_schema=ASK_SCHEMA,
@@ -873,6 +971,7 @@ def run_paper_qa_agent(
         ),
         input_contract={
             "artifact_type": "paper_qa_answer",
+            "language_rule": language_rule,
             "paper_specific_claims": "must use ClaimGraph nodes or PaperDOM source_ids",
             "forbidden_dependency": "final markdown report is not evidence",
             "forbidden_tools": "no raw paper search or page-number evidence lookup in QA",
@@ -1023,6 +1122,7 @@ def build_qa_source_context_pack(
     title: str,
     classification: str,
     question: str,
+    output_language: str,
     augmented_query: str,
     question_type: str,
     qa_context: dict[str, Any],
@@ -1038,6 +1138,7 @@ def build_qa_source_context_pack(
             "paper_id": paper_id,
             "title": title or paper_id,
             "classification": classification,
+            "output_language": output_language,
             "source_of_truth": "Reviewed ClaimGraph nodes plus PaperDOM source IDs only.",
             "qa_context": qa_context,
         },
@@ -1211,6 +1312,8 @@ def normalize_answer(data: dict[str, Any]) -> dict[str, Any]:
 def ground_qa_answer_in_core_v2_context(
     answer: dict[str, Any],
     core_v2_context: dict[str, Any],
+    *,
+    output_language: str = "zh",
 ) -> dict[str, Any]:
     if not core_v2_context_is_consumable(core_v2_context):
         return answer
@@ -1244,9 +1347,13 @@ def ground_qa_answer_in_core_v2_context(
         else:
             unsupported_claims.append(claim)
     if removed_source_ids:
-        attribution["evidence_limits"].append(removed_qa_source_ids_note(removed_source_ids))
+        attribution["evidence_limits"].append(
+            removed_qa_source_ids_note(removed_source_ids, output_language=output_language)
+        )
     if unsupported_claims:
-        attribution["evidence_limits"].append(unsupported_qa_claims_note(unsupported_claims))
+        attribution["evidence_limits"].append(
+            unsupported_qa_claims_note(unsupported_claims, output_language=output_language)
+        )
     attribution["paper_claims"] = supported_claims
     grounded["source_attribution"] = attribution
     grounded["cited_source_ids"] = cited_source_ids[:16]
@@ -1258,12 +1365,21 @@ def ground_qa_answer_in_core_v2_context(
                 paperlens_inferences=attribution["paperlens_inferences"],
                 background_context=attribution["background_context"],
                 evidence_limits=attribution["evidence_limits"],
+                output_language=output_language,
             )
         else:
             grounded["answer_markdown"] = append_qa_evidence_limit_notes(
                 str(grounded.get("answer_markdown") or ""),
-                [removed_qa_source_ids_note(removed_source_ids)] if removed_source_ids else [],
+                [
+                    removed_qa_source_ids_note(
+                        removed_source_ids,
+                        output_language=output_language,
+                    )
+                ]
+                if removed_source_ids
+                else [],
                 [],
+                output_language=output_language,
             )
     return grounded
 
@@ -1302,30 +1418,30 @@ def lower_qa_confidence(confidence: str) -> str:
     return "low"
 
 
-def removed_qa_source_ids_note(source_ids: list[str]) -> str:
-    return (
-        "Removed QA source IDs that were not present in the reviewed ClaimGraph context: "
-        + ", ".join(source_ids[:6])
-    )
+def removed_qa_source_ids_note(source_ids: list[str], *, output_language: str = "zh") -> str:
+    if output_language == "en":
+        return "Some citations returned by the model were outside the reviewed evidence set and were removed."
+    return "模型返回了不属于当前已复核证据集合的依据，已从引用中移除。"
 
 
-def unsupported_qa_claims_note(claims: list[str]) -> str:
-    return (
-        "Removed model-declared paper claims that were not supported by the reviewed "
-        "ClaimGraph matches: "
-        + " | ".join(claims[:3])
-    )
+def unsupported_qa_claims_note(claims: list[str], *, output_language: str = "zh") -> str:
+    if output_language == "en":
+        return "Some paper-specific claims were not supported by the retrieved source evidence and were removed."
+    return "模型给出的部分论文事实没有被当前检索到的原文依据支持，已从回答中移除。"
 
 
 def append_qa_evidence_limit_notes(
     answer_markdown: str,
     removed_source_notes: list[str],
     unsupported_claim_notes: list[str],
+    *,
+    output_language: str = "zh",
 ) -> str:
     notes = [*removed_source_notes, *unsupported_claim_notes]
     if not notes:
         return answer_markdown
-    lines = [answer_markdown.rstrip(), "", "Evidence limits:"]
+    heading = "Evidence boundaries:" if output_language == "en" else "证据边界："
+    lines = [answer_markdown.rstrip(), "", heading]
     lines.extend(f"- {note}" for note in notes)
     return "\n".join(line for line in lines if line is not None).strip()
 
@@ -1336,20 +1452,32 @@ def guarded_grounded_qa_answer_markdown(
     paperlens_inferences: list[str],
     background_context: list[str],
     evidence_limits: list[str],
+    output_language: str = "zh",
 ) -> str:
-    lines = ["Grounded answer:"]
+    if output_language == "en":
+        lines = ["Source-backed answer:"]
+        no_support = "- The retrieved source evidence is not enough to support a paper-specific answer."
+        inference_heading = "PaperLens inference:"
+        background_heading = "Background context:"
+        limit_heading = "Evidence boundaries:"
+    else:
+        lines = ["基于当前可核查依据的回答："]
+        no_support = "- 当前检索到的原文依据不足以支持论文事实回答。"
+        inference_heading = "PaperLens 推断："
+        background_heading = "背景知识："
+        limit_heading = "证据边界："
     if supported_claims:
         lines.extend(f"- {claim}" for claim in supported_claims)
     else:
-        lines.append("- Reviewed ClaimGraph context does not support a paper-claim answer.")
+        lines.append(no_support)
     if paperlens_inferences:
-        lines.extend(["", "PaperLens inference:"])
+        lines.extend(["", inference_heading])
         lines.extend(f"- {item}" for item in paperlens_inferences)
     if background_context:
-        lines.extend(["", "Background context:"])
+        lines.extend(["", background_heading])
         lines.extend(f"- {item}" for item in background_context)
     if evidence_limits:
-        lines.extend(["", "Evidence limits:"])
+        lines.extend(["", limit_heading])
         lines.extend(f"- {item}" for item in evidence_limits)
     return "\n".join(lines).strip()
 
@@ -1428,6 +1556,14 @@ def normalized_source_id_list(value: Any) -> list[str]:
 
 def sanitize_qa_text(text: str) -> str:
     replacements = [
+        (r"\bReviewed ClaimGraph context\b", "reviewed evidence index"),
+        (r"\bClaimGraph/PaperDOM evidence set\b", "reviewed evidence index"),
+        (r"\bClaimGraph nodes and PaperDOM source IDs\b", "reviewed source evidence"),
+        (r"\bClaimGraph nodes\b", "reviewed fact entries"),
+        (r"\bPaperDOM source IDs\b", "source evidence"),
+        (r"\bPaperDOM source\b", "source evidence"),
+        (r"\bClaimGraph\b", "reviewed evidence index"),
+        (r"\bPaperDOM\b", "source evidence"),
         (r"\bthe supplied excerpts\b", "the automatic reading evidence"),
         (r"\bsupplied excerpts\b", "automatic reading evidence"),
         (r"\bthe supplied evidence\b", "the automatic reading evidence"),
@@ -1446,6 +1582,14 @@ def sanitize_qa_text(text: str) -> str:
     cleaned = text
     for pattern, replacement in replacements:
         cleaned = re.sub(pattern, replacement, cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"`?(?:problem|claim|mechanism|implementation|evaluation|result|limitation|concept):obs_[A-Za-z0-9_:-]+`?",
+        "",
+        cleaned,
+    )
+    cleaned = re.sub(r"`?(?:evidence|span):[A-Za-z0-9_:/.-]+`?", "", cleaned)
+    cleaned = re.sub(r"\s*\(?source_ids?:\s*[^)\n]+?\)?", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*\(?(?:source_id|evidence_id|node_id):\s*[^)\n]+?\)?", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(
         r"\[\[?([^\[\]]{1,24})\]\(#user_content_([A-Za-z0-9_.:-]+)\)\]?",
         r"证据 \2",

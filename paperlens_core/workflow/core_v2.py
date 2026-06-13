@@ -115,24 +115,18 @@ REPORT_EXPLANATION_CUES_EN = (
 )
 
 REPORT_KEY_TERM_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("source_target_domain", ("源域", "目标域", "source domain", "target domain")),
-    ("domain_adaptation", ("域适应", "domain adaptation", "DA")),
-    ("feature_distribution", ("特征空间", "特征分布", "feature space", "feature distribution")),
-    ("distortion_distribution", ("失真分布", "distortion distribution")),
-    (
-        "conditional_distribution",
-        ("条件分布", "条件判别", "conditional distribution", "conditional discriminator"),
-    ),
-    ("discriminator", ("判别网络", "判别器", "discriminator")),
-    ("classifier", ("分类网络", "分类器", "classifier")),
-    ("regressor", ("回归网络", "回归器", "regressor")),
-    ("hvs", ("人类视觉系统", "HVS", "human visual system")),
-    ("mos", ("主观平均分", "MOS", "mean opinion score")),
-    ("dwce", ("分布加权交叉熵", "DWCE")),
-    ("infonce", ("InfoNCE",)),
-    ("contrastive_learning", ("对比学习", "contrastive learning")),
-    ("disentanglement", ("解纠缠", "disentanglement")),
-    ("metrics", ("PLCC", "SROCC", "KROCC", "RMSE")),
+    ("problem_setting", ("问题", "任务", "场景", "problem", "task", "setting")),
+    ("method_module", ("模块", "组件", "网络", "module", "component", "network")),
+    ("representation", ("表示", "特征", "嵌入", "representation", "feature", "embedding")),
+    ("objective", ("目标", "优化", "objective", "optimization")),
+    ("loss", ("损失", "loss")),
+    ("training", ("训练", "预训练", "微调", "training", "pretraining", "fine-tuning")),
+    ("inference", ("推理", "预测", "inference", "prediction")),
+    ("dataset", ("数据集", "基准", "dataset", "benchmark")),
+    ("metric", ("指标", "度量", "metric", "measure", "score")),
+    ("baseline", ("基线", "对比方法", "baseline", "comparison")),
+    ("ablation", ("消融", "ablation")),
+    ("limitation", ("局限", "限制", "limitation", "failure")),
 )
 
 
@@ -1252,10 +1246,11 @@ def build_graph_report_writer_prompt(
                 "affects Z. Use short concrete task-local examples when evidence supports them; "
                 "phrases like '可以这样理解' or '直觉上' are allowed for intuition, but do not "
                 "introduce new paper facts. Always explain abbreviations before relying on them. "
-                "Terms that usually need explanation include source domain, target domain, "
-                "domain adaptation, feature space, feature distribution, distortion distribution, "
-                "conditional distribution, discriminator, classifier, regressor, HVS, MOS, DWCE, "
-                "InfoNCE, contrastive learning, disentanglement, PLCC, SROCC, KROCC, and RMSE. "
+                "Terms that usually need explanation are the terms this paper itself relies on: "
+                "the task definition, data representation, named modules, variables, objectives, "
+                "loss terms, optimization steps, training protocol, inference path, datasets, "
+                "metrics, baselines, and ablations. Do not force a fixed vocabulary from another "
+                "research area; explain only concepts that are present in the evidence pack. "
                 "When a formula is mentioned, immediately translate it into what is being pulled "
                 "closer, pushed apart, weighted, predicted, or penalized. Prefer reader-facing "
                 "phrases such as '它解决的问题是...' and '这一步的输入/输出是...' over shorthand "
@@ -1278,35 +1273,29 @@ def build_graph_report_writer_prompt(
                 "algorithm in execution order. For every important step, state what method is "
                 "used, what it consumes, what operation/objective it applies, why that principle "
                 "helps, what failure mode it fixes, and what it passes to the next step. Avoid "
-                "under-explained labels such as 'domain adaptation', 'contrastive learning', "
-                "'disentanglement', or 'weighted loss': whenever a term is used, explain how it "
+                "under-explained labels such as 'feature extractor', 'retrieval stage', "
+                "'weighted loss', or any named module: whenever a term is used, explain how it "
                 "is instantiated in this paper. Translate formulas into prose and keep important "
                 "symbols when they help the reader connect the derivation to implementation. Use "
                 "implementation facts, formulas, module names, data flow, training objectives, "
                 "and inference path inside this explanation, not as a separate list. The "
                 "principle_method section should be the longest section: write enough detail "
                 "that a reader can reconstruct the algorithm without opening the paper except "
-                "for verification. Cover, when evidence exists: why naive domain adaptation "
-                "fails; what source domain and target domain mean for this paper; what feature "
-                "space/distribution, distortion distribution, and conditional distribution mean; "
-                "the theorem or decomposition that turns distortion into the bridge variable; "
-                "the role and architecture of G/D/H/R; how DWCE uses distortion weights; how H "
-                "estimates target distortion distribution; how the conditional discriminator "
-                "uses those weights; the positive/negative sample construction for InfoNCE; "
-                "what contrastive learning and disentanglement mean here; what each loss term "
-                "optimizes; how the overall loss combines them; training details such as "
-                "optimizer/input size/batch/epoch/loss weights; and the exact inference path "
-                "from target point cloud to quality score. Hard formatting requirement: "
+                "for verification. Cover, when evidence exists: why the straightforward or prior "
+                "approach fails; the paper's central abstraction or decomposition; what each "
+                "input, representation, module, variable, objective, and loss term means; how "
+                "data flows through the method during training and inference; how the training "
+                "objective combines its parts; important implementation details such as model "
+                "backbone, optimizer, input shape, batch size, epochs, schedules, or loss weights; "
+                "and the exact path from a new input to the final output. Hard formatting requirement: "
                 "principle_method must contain 12-16 "
                 "paragraph objects in the JSON paragraphs array; each markdown field must be "
                 "one prose paragraph only, with no markdown heading, bullet list, or multiple "
                 "blank-line-separated paragraphs inside the same field. Each principle_method "
                 "paragraph should usually be 260-520 Chinese characters when writing in Chinese. "
-                "evaluation_setup must contain only datasets, source/"
-                "target split, metrics, baselines, and protocol; no performance claims or "
-                "ablation conclusions. When metrics first appear, briefly explain what they "
-                "measure in reader language: PLCC is linear agreement with subjective scores, "
-                "SROCC/KROCC are ranking consistency, and RMSE is prediction error magnitude. "
+                "evaluation_setup must contain only datasets, splits, metrics, baselines, and "
+                "protocol; no performance claims or ablation conclusions. When metrics first "
+                "appear, briefly explain what each metric measures in the paper's task language. "
                 "results must contain performance comparisons, key "
                 "numbers, and ablations, without repeating the method walkthrough."
             ),
@@ -1373,11 +1362,9 @@ def build_principle_section_expander_prompt(
                 "14-18 paragraph objects. Each markdown field must be one prose paragraph, "
                 "usually 360-620 Chinese characters when writing in Chinese, and the whole "
                 "section should exceed 4200 Chinese characters when enough evidence exists. Do not create "
-                "headings or bullets. Explain terms inline when they first appear: source/"
-                "target domain, domain adaptation, feature space/distribution, distortion "
-                "distribution, conditional distribution/discriminator, HVS, MOS, DWCE, "
-                "InfoNCE, contrastive learning, disentanglement, regressor, classifier, "
-                "PLCC/SROCC/KROCC/RMSE when relevant. For every method step, state the "
+                "headings or bullets. Explain terms inline when they first appear: the paper's "
+                "task-specific objects, representations, variables, modules, losses, training "
+                "protocol, inference path, datasets, metrics, and baselines. For every method step, state the "
                 "intuition, the input, the computation/objective, why it fixes a failure mode, "
                 "and what it passes to the next step. Translate formulas into what is pulled "
                 "closer, pushed apart, weighted, predicted, or penalized."
@@ -1390,36 +1377,36 @@ def build_principle_section_expander_prompt(
 def principle_section_coverage_plan(output_language: str) -> list[str]:
     if output_language == "en":
         return [
-            "Overall intuition: why image quality knowledge can transfer to point cloud quality assessment.",
-            "What source domain, target domain, HVS, and MOS mean in this paper, and why they make transfer possible.",
-            "Why naive domain adaptation fails: where feature distribution, distortion distribution, and quality-related information do not match.",
-            "The paper's theoretical decomposition or conditional-distribution idea that uses distortion as the bridge variable.",
-            "Input preprocessing and shared feature generator G: how point clouds become multi-view images and what G outputs.",
-            "Distortion classifier H: what distribution it estimates and where weight w comes from.",
-            "Conditional discriminator D and DWCE: which samples are aligned more strongly, which are suppressed, and why.",
-            "The conflict solved by quality-aware feature disentanglement: why distortion alignment can hurt quality prediction.",
-            "InfoNCE and contrastive learning: how positive/negative samples are built and what is pulled closer or pushed apart.",
-            "Regressor R and quality score: how features are mapped to predicted quality.",
-            "How the total loss combines L_DWCE, L_Cls, L_Fea, and L_Reg, and what each term constrains.",
-            "Training flow and key hyperparameters: input size, ResNet/MLP, optimizer, batch, epoch, and loss weights.",
-            "Inference flow: the complete path from a new point cloud to the final quality score.",
-            "Synthesize why DWIT-PCQA improves over direct transfer or regression-only baselines.",
+            "Overall intuition: what problem the method solves and what simple mental model explains its design.",
+            "Task setting and inputs: what objects, labels, assumptions, or operating conditions the paper starts from.",
+            "Failure mode of prior or straightforward approaches: what mismatch, bottleneck, ambiguity, or cost motivates the method.",
+            "Central abstraction or decomposition: the key variable, representation, theorem, model, or system boundary the paper builds around.",
+            "Preprocessing and representation: how raw inputs are transformed into the objects used by the method.",
+            "Main pipeline in execution order: each stage's input, computation, output, and connection to the next stage.",
+            "Named modules or components: what each one is responsible for and how they interact.",
+            "Objectives, losses, constraints, or algorithms: what is optimized, pulled together, separated, weighted, predicted, or penalized.",
+            "Training or construction procedure: data split, supervision, initialization, schedules, hyperparameters, and stopping protocol when available.",
+            "Inference or deployment flow: the exact path from a new input to the final output.",
+            "Why the pieces work together: how the design addresses the paper's stated failure mode.",
+            "Evaluation bridge: which datasets, metrics, baselines, or ablations are necessary to interpret the method.",
+            "Important implementation facts: frameworks, model sizes, hardware, runtime, or reproducibility details when available.",
+            "Synthesize the method's claimed advantage over the compared alternatives.",
         ]
     return [
-        "整体直觉：这篇论文为什么能把图像质量知识迁移到点云质量评估。",
-        "源域、目标域、HVS、MOS 在本文中的含义，以及为什么它们让迁移有可能。",
-        "为什么朴素域适应会失败：特征分布、失真分布、质量相关信息分别哪里不匹配。",
-        "论文把失真作为桥接变量的理论分解或条件分布思想。",
-        "输入预处理与共享特征生成器 G：点云如何变成多视角图像，G 输出什么特征。",
-        "失真分类网络 H：它估计什么分布，权重 w 从哪里来。",
-        "条件判别网络 D 与 DWCE：哪些样本被更强对齐，哪些对齐被压低，为什么。",
-        "质量感知特征解纠缠要解决的冲突：失真对齐为何可能伤害质量预测。",
-        "InfoNCE 和对比学习：正样本、负样本如何构造，拉近/推远的对象是什么。",
-        "回归网络 R 与质量分数：特征如何被映射到预测质量。",
-        "总损失如何组合 L_DWCE、L_Cls、L_Fea、L_Reg，每项分别约束什么。",
-        "训练流程与关键超参数：输入尺寸、ResNet/MLP、optimizer、batch、epoch、loss 权重。",
-        "推理流程：一个新点云从输入到最终质量分数的完整路径。",
-        "把上述步骤串起来，说明 DWIT-PCQA 相比直接迁移或只回归的核心改进在哪里。",
+        "整体直觉：这篇论文要解决什么问题，方法设计可以用什么简单心智模型理解。",
+        "任务设定与输入：论文从哪些对象、标签、假设或运行条件开始。",
+        "既有方法或直接做法的失败点：是什么不匹配、瓶颈、歧义或成本推动了本文方法。",
+        "核心抽象或分解：论文围绕哪个关键变量、表示、定理、模型或系统边界展开。",
+        "预处理与表示：原始输入如何变成方法实际使用的对象。",
+        "主流程按执行顺序展开：每一步吃什么、算什么、输出什么、怎样交给下一步。",
+        "命名模块或组件：每个模块负责什么，模块之间如何交互。",
+        "目标函数、损失、约束或算法：分别在优化、拉近、推远、加权、预测或惩罚什么。",
+        "训练或构建流程：数据划分、监督信号、初始化、调度、超参数和停止条件。",
+        "推理或部署流程：一个新输入如何一步步走到最终输出。",
+        "为什么这些部件能配合起来：设计如何回到论文声称的失败点并解决它。",
+        "评估理解桥梁：哪些数据集、指标、基线或消融是理解方法必要的。",
+        "重要实现事实：框架、模型规模、硬件、运行时或复现细节。",
+        "把上述步骤串起来，说明本文方法相对对比方案的核心优势。",
     ]
 
 
@@ -1760,17 +1747,12 @@ def cleanup_model_report_markdown(markdown: str, section_title: str) -> str:
 
 
 def normalize_loss_symbol_spacing(text: str) -> str:
-    replacements = (
-        (r"(?<![A-Za-z0-9_])L\s*[_\-\s]*DW\s*CE(?![A-Za-z0-9_])", "L_DWCE"),
-        (r"(?<![A-Za-z0-9_])L\s*[_\-\s]*DWCE(?![A-Za-z0-9_])", "L_DWCE"),
-        (r"(?<![A-Za-z0-9_])L\s*[_\-\s]*Cls(?![A-Za-z0-9_])", "L_Cls"),
-        (r"(?<![A-Za-z0-9_])L\s*[_\-\s]*Fea(?![A-Za-z0-9_])", "L_Fea"),
-        (r"(?<![A-Za-z0-9_])L\s*[_\-\s]*Reg(?![A-Za-z0-9_])", "L_Reg"),
+    return re.sub(
+        r"(?<![A-Za-z0-9_])L\s*[_\-\s]+([A-Za-z][A-Za-z0-9]{1,16})(?![A-Za-z0-9_])",
+        lambda match: f"L_{match.group(1)}",
+        text,
+        flags=re.IGNORECASE,
     )
-    normalized = text
-    for pattern, replacement in replacements:
-        normalized = re.sub(pattern, replacement, normalized, flags=re.IGNORECASE)
-    return normalized
 
 
 def infer_report_paragraph_node_ids(
@@ -2483,9 +2465,9 @@ def implementation_statement_from_text(text: str, output_language: str) -> str:
         "resized",
         "loss",
         "cross-validation",
-        "source domain",
-        "target domain",
-        "quality labels",
+        "supervision",
+        "label",
+        "dataset split",
         "training-testing",
     )
     sentences = [
@@ -2688,21 +2670,21 @@ def observation_task_instruction(
         )
     if task_type == ReadingTaskType.METHOD_MECHANISM:
         return (
-            "完整解释方法机制链路，覆盖 mechanism_overview、theoretical_decomposition、distortion_alignment、quality_disentanglement、module_interactions、optimization_goals。必须把关键定理/分解/公式翻译成可读的机制说明：变量表示什么、目标分布是什么、为什么引入失真作为桥接变量、每个损失项在拉近、推远、加权、预测或惩罚什么。遇到专业名词不能只记录名词，必须记录“它是什么、在本文中解决什么问题、输入输出是什么、和下一步怎么衔接”。重点解释 domain adaptation、source/target domain、feature space/distribution、distortion distribution、conditional distribution/discriminator、DWCE、InfoNCE、contrastive learning、disentanglement、regression 这些术语在本文中的具体含义；如果涉及正负样本、权重 w、模块 G/D/H/R 或总损失，也要说明它们从哪里来、作用到哪里去。不要只复述模块名或给抽象总结。可以 12-20 张卡，优先保留能让报告从头讲清楚原理的事实。"
+            "完整解释方法机制链路，覆盖 mechanism_overview、core_abstraction、algorithm_steps、module_interactions、optimization_goals、failure_modes。必须把关键定理、分解、公式或系统设计翻译成可读的机制说明：变量表示什么、输入输出是什么、每个步骤在计算/对齐/筛选/检索/预测/约束什么、为什么能解决论文指出的问题、和下一步怎么衔接。遇到专业名词不能只记录名词，必须记录“它是什么、在本文中解决什么问题、输入输出是什么、和下一步怎么衔接”。不要套用固定领域术语；只解释证据中真实出现的模型、模块、目标函数、算法和指标。可以 12-20 张卡，优先保留能让报告从头讲清楚原理的事实。"
             if zh
-            else "Explain the mechanism chain completely, covering mechanism_overview, theoretical_decomposition, distortion_alignment, quality_disentanglement, module_interactions, and optimization_goals. Translate key theorem/decomposition/formulas into readable mechanism facts: what variables mean, what distributions are targeted, why distortion is used as a bridge variable, and what each loss pulls together, pushes apart, weights, predicts, or penalizes. For technical terms, record what the term means, what problem it solves in this paper, its inputs/outputs, and how it connects to the next step. Explain domain adaptation, source/target domain, feature space/distribution, distortion distribution, conditional distribution/discriminator, DWCE, InfoNCE, contrastive learning, disentanglement, and regression in the paper's concrete setting; when positive/negative samples, weight w, modules G/D/H/R, or the total loss are involved, state where they come from and where they act. Do not only list module names or give an abstract summary. Use 12-20 cards when supported by evidence."
+            else "Explain the mechanism chain completely, covering mechanism_overview, core_abstraction, algorithm_steps, module_interactions, optimization_goals, and failure_modes. Translate key theorems, decompositions, formulas, or system designs into readable mechanism facts: what variables mean, what inputs and outputs are, what each step computes, aligns, filters, retrieves, predicts, or constrains, why it addresses the paper's stated problem, and how it connects to the next step. For technical terms, record what the term means, what problem it solves in this paper, its inputs/outputs, and how it connects to the next step. Do not import a fixed vocabulary from another domain; explain only models, modules, objectives, algorithms, and metrics that appear in the evidence. Use 12-20 cards when supported by evidence."
         )
     if task_type == ReadingTaskType.IMPLEMENTATION_PATH:
         return (
-            "把实现细节做成可复现级压缩，覆盖 preprocessing、model_components、feature_pipeline、training_objectives、loss_terms、training_protocol、inference_flow、hyperparameters_or_shapes。必须抽取点云如何转成输入、所有网络/模块 G/D/H/R 的角色、特征从哪里到哪里、损失项各自约束什么、源域和目标域在训练中分别提供什么、测试时目标点云走哪条路径、重要尺寸/超参数/公式编号。遇到混有实验设置和实现细节的长段落，不要只抽数据集，必须保留 PyTorch、GPU、ResNet 初始化、optimizer、learning rate、weight decay、batch size、epoch、输入 resize、loss 权重、交叉验证/训练划分等事实；可以 12-18 张卡。"
+            "把实现细节做成可复现级压缩，覆盖 preprocessing、model_components、data_pipeline、training_objectives、loss_terms、training_protocol、inference_flow、hyperparameters_or_shapes。必须抽取原始输入如何被处理、每个模型/模块/组件的角色、数据或特征从哪里到哪里、损失项或约束各自约束什么、训练时各类数据/标签/信号如何使用、测试时一个新样本走哪条路径、重要尺寸/超参数/公式编号。遇到混有实验设置和实现细节的长段落，不要只抽数据集，必须保留框架、硬件、初始化、optimizer、learning rate、weight decay、batch size、epoch、输入尺寸、loss 权重、数据划分等事实；可以 12-18 张卡。"
             if zh
-            else "Compress implementation details to near-reproducible notes, covering preprocessing, model_components, feature_pipeline, training_objectives, loss_terms, training_protocol, inference_flow, and hyperparameters_or_shapes. Extract how point clouds become inputs, roles of G/D/H/R, feature flow, what each loss constrains, what source and target domains provide during training, test-time path for a target point cloud, and important dimensions/hyperparameters/formula numbers. When a long paragraph mixes evaluation setup and implementation details, do not only extract datasets; preserve PyTorch, GPUs, ResNet initialization, optimizer, learning rate, weight decay, batch size, epochs, input resize, loss weights, cross-validation, and train/test split facts too. Use 12-18 cards when supported."
+            else "Compress implementation details to near-reproducible notes, covering preprocessing, model_components, data_pipeline, training_objectives, loss_terms, training_protocol, inference_flow, and hyperparameters_or_shapes. Extract how raw inputs are processed, each model/module/component role, data or feature flow, what each loss or constraint controls, how data/labels/signals are used during training, the test-time path for a new sample, and important dimensions/hyperparameters/formula numbers. When a long paragraph mixes evaluation setup and implementation details, do not only extract datasets; preserve framework, hardware, initialization, optimizer, learning rate, weight decay, batch size, epochs, input size, loss weights, and data split facts too. Use 12-18 cards when supported."
         )
     if task_type == ReadingTaskType.EVALUATION_SETUP:
         return (
-            "只写实验设置事实，覆盖 datasets、source_target_protocol、metrics、baselines、training_testing_protocol：数据集、源域/目标域划分、指标、基线、训练/测试协议。禁止写性能提升、结果数值、消融结论或泛泛方法摘要；如果证据句混合了设置和结果，只抽取设置部分。"
+            "只写实验设置事实，覆盖 datasets、splits_or_protocol、metrics、baselines、training_testing_protocol：数据集、划分/协议、指标、基线、训练/测试方式。禁止写性能提升、结果数值、消融结论或泛泛方法摘要；如果证据句混合了设置和结果，只抽取设置部分。"
             if zh
-            else "Only write evaluation setup facts, covering datasets, source_target_protocol, metrics, baselines, and training_testing_protocol. Include datasets, source/target split, metrics, baselines, and train/test protocol. Do not write performance improvements, result numbers, ablation conclusions, or generic method summaries; if a source sentence mixes setup and results, extract only the setup."
+            else "Only write evaluation setup facts, covering datasets, splits_or_protocol, metrics, baselines, and training_testing_protocol. Include datasets, splits/protocol, metrics, baselines, and train/test protocol. Do not write performance improvements, result numbers, ablation conclusions, or generic method summaries; if a source sentence mixes setup and results, extract only the setup."
         )
     if task_type == ReadingTaskType.RESULT_EXTRACTION:
         return (
@@ -2718,9 +2700,9 @@ def observation_task_instruction(
         )
     if task_type == ReadingTaskType.CONCEPT_BRIDGE:
         return (
-            "解释读懂论文必须掌握的概念关系，只保留能帮助理解方法或评估的概念。每张卡按“术语是什么、本文为什么需要它、它接到哪一步、读者可以怎样直觉理解”来写；优先覆盖源域/目标域、域适应、特征空间/特征分布、失真分布、条件分布、HVS、MOS、PLCC/SROCC/KROCC/RMSE、对比学习、解纠缠、回归这些会让读者卡住的词。不要写百科式空泛定义，必须绑定本文任务、模块或实验指标。"
+            "解释读懂论文必须掌握的概念关系，只保留能帮助理解方法或评估的概念。每张卡按“术语是什么、本文为什么需要它、它接到哪一步、读者可以怎样直觉理解”来写；优先覆盖证据中反复出现且会卡住读者的任务设定、数据表示、变量、模型、模块、损失、训练协议、指标和基线。不要写百科式空泛定义，必须绑定本文任务、模块或实验指标。"
             if zh
-            else "Explain only concepts needed to understand the method or evaluation. Each card should say what the term means, why this paper needs it, which step it connects to, and how a reader can intuit it. Prioritize source/target domain, domain adaptation, feature space/distribution, distortion distribution, conditional distribution, HVS, MOS, PLCC/SROCC/KROCC/RMSE, contrastive learning, disentanglement, and regression. Avoid generic encyclopedia definitions; bind every concept to this paper's task, modules, or metrics."
+            else "Explain only concepts needed to understand the method or evaluation. Each card should say what the term means, why this paper needs it, which step it connects to, and how a reader can intuit it. Prioritize task settings, data representations, variables, models, modules, losses, training protocols, metrics, and baselines that recur in the evidence and would block a reader. Avoid generic encyclopedia definitions; bind every concept to this paper's task, modules, or metrics."
         )
     if task_type == ReadingTaskType.RELATED_POSITIONING:
         return (
@@ -2729,9 +2711,9 @@ def observation_task_instruction(
             else "State positioning against prior work; do not fabricate limitations if evidence does not support them."
         )
     return (
-        "抽取复现相关事实，尤其是硬件、框架、预训练、输入尺寸、优化器、学习率、weight decay、batch size、epoch、loss 权重、数据划分和是否使用目标域标签；如果证据不足，明确哪些实现细节缺失。"
+        "抽取复现相关事实，尤其是硬件、框架、预训练、输入尺寸、优化器、学习率、weight decay、batch size、epoch、loss 权重、数据划分、监督信号和关键依赖；如果证据不足，明确哪些实现细节缺失。"
         if zh
-        else "Extract reproducibility facts, especially hardware, framework, pretraining, input size, optimizer, learning rate, weight decay, batch size, epochs, loss weights, data split, and whether target-domain labels are used; state missing implementation details when evidence is insufficient."
+        else "Extract reproducibility facts, especially hardware, framework, pretraining, input size, optimizer, learning rate, weight decay, batch size, epochs, loss weights, data split, supervision signals, and key dependencies; state missing implementation details when evidence is insufficient."
     )
 
 

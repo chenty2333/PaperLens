@@ -649,17 +649,12 @@ def reader_markdown(markdown: str, *, output_language: str = "zh") -> str:
 
 
 def normalize_reader_loss_symbols(text: str) -> str:
-    replacements = (
-        (r"(?<![A-Za-z0-9_])L\s*[_\-\s]*DW\s*CE(?![A-Za-z0-9_])", "L_DWCE"),
-        (r"(?<![A-Za-z0-9_])L\s*[_\-\s]*DWCE(?![A-Za-z0-9_])", "L_DWCE"),
-        (r"(?<![A-Za-z0-9_])L\s*[_\-\s]*Cls(?![A-Za-z0-9_])", "L_Cls"),
-        (r"(?<![A-Za-z0-9_])L\s*[_\-\s]*Fea(?![A-Za-z0-9_])", "L_Fea"),
-        (r"(?<![A-Za-z0-9_])L\s*[_\-\s]*Reg(?![A-Za-z0-9_])", "L_Reg"),
+    return re.sub(
+        r"(?<![A-Za-z0-9_])L\s*[_\-\s]+([A-Za-z][A-Za-z0-9]{1,16})(?![A-Za-z0-9_])",
+        lambda match: f"L_{match.group(1)}",
+        text,
+        flags=re.IGNORECASE,
     )
-    normalized = text
-    for pattern, replacement in replacements:
-        normalized = re.sub(pattern, replacement, normalized, flags=re.IGNORECASE)
-    return normalized
 
 
 def dedupe_reader_texts(texts: list[str], *, seen_text_keys: set[str]) -> list[str]:

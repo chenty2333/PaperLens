@@ -610,6 +610,7 @@ def answer_library_question(
     limit: int = 8,
     chat_history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    output_language = "en" if config.output_language == "en" else "zh"
     records = ensure_library_records(output_dir)
     matches = search_library_records(records, query=question, limit=limit, public=False)
     if config.offline_debug or config.provider.kind == "none":
@@ -624,7 +625,11 @@ def answer_library_question(
             ]
         )
         return {
-            "answer_markdown": render_offline_library_answer(question, matches),
+            "answer_markdown": render_offline_library_answer(
+                question,
+                matches,
+                output_language=output_language,
+            ),
             "related_papers": related,
             "cited_source_ids": cited_source_ids[:16],
             "confidence": "low",
@@ -643,6 +648,7 @@ def answer_library_question(
             "agent_loop": True,
             "model": config.provider.model,
             "question": question,
+            "output_language": output_language,
             "chat_history_hash": hash_json_payload(normalize_chat_history(chat_history or [])),
             "schema_hash": hash_json_payload(LIBRARY_ASK_SCHEMA),
             "record_hashes": [hit["paper"].get("record_hash") for hit in matches],
@@ -650,7 +656,7 @@ def answer_library_question(
     )
     cached = read_json(cache_path)
     if isinstance(cached.get("data"), dict):
-        answer = normalize_library_answer(cached["data"])
+        answer = normalize_library_answer(cached["data"], output_language=output_language)
         answer["cache_hit"] = True
         answer["usage"] = {}
         return answer
@@ -661,8 +667,9 @@ def answer_library_question(
         matches=matches,
         question=question,
         chat_history=chat_history or [],
+        output_language=output_language,
     )
-    answer = normalize_library_answer(result.final)
+    answer = normalize_library_answer(result.final, output_language=output_language)
     answer["cache_hit"] = False
     answer["usage"] = result.usage
     write_json(
@@ -686,7 +693,13 @@ def run_library_qa_agent(
     matches: list[dict[str, Any]],
     question: str,
     chat_history: list[dict[str, Any]],
+    output_language: str = "zh",
 ) -> Any:
+    language_rule = (
+        "Write answer_markdown in English."
+        if output_language == "en"
+        else "Write answer_markdown in Chinese. Keep original paper terms in English only when needed."
+    )
     relations = _load_library_relations(output_dir)
     tools = LibraryToolRegistry(records, relations=relations)
     initial_matches = [
@@ -700,7 +713,8 @@ def run_library_qa_agent(
         objective=(
             "Answer a question over the local PaperLens library. Search or inspect library records "
             "before making paper-specific or cross-paper claims. Use background knowledge for teaching, "
-            "but label it separately from local paper evidence."
+            "but label it separately from local paper evidence. "
+            + language_rule
         ),
         final_artifact_type="library_qa_answer",
         final_data_schema=LIBRARY_ASK_SCHEMA,
@@ -720,6 +734,7 @@ def run_library_qa_agent(
         ),
         input_contract={
             "artifact_type": "library_qa_answer",
+            "language_rule": language_rule,
             "paper_specific_claims": "must come from graph_summary nodes, claims, or provenance source_ids",
             "report_paths": "navigation only; not evidence",
             "cross_paper_synthesis": "must name which local paper records support it",
@@ -944,20 +959,35 @@ def library_result_source_ids(results: list[dict[str, Any]]) -> list[str]:
     return unique_strings(source_ids)
 
 
-def render_offline_library_answer(question: str, matches: list[dict[str, Any]]) -> str:
+def render_offline_library_answer(
+    question: str,
+    matches: list[dict[str, Any]],
+    *,
+    output_language: str = "zh",
+) -> str:
     if not matches:
+        if output_language == "en":
+            return f'The local paper index did not find a clear match for "{question}".'
         return f"本地图索引里没有找到和“{question}”明显相关的论文。"
-    lines = [f"离线模式下无法调用模型综合回答。和“{question}”最相关的论文是："]
+    if output_language == "en":
+        lines = [
+            f'Offline mode cannot synthesize with a model. The closest local papers for "{question}" are:'
+        ]
+    else:
+        lines = [f"离线模式下无法调用模型综合回答。和“{question}”最相关的论文是："]
     for hit in matches[:5]:
         paper = hit["paper"]
         memory = dict_value(paper.get("memory"))
         brief = paper.get("brief") or memory.get("brief") or memory.get("core_idea") or ""
         report_path = paper.get("report_path") or paper.get("outputs", {}).get("briefing_md")
-        lines.append(f"- {paper.get('title')}（{paper.get('grade')}）：{brief} [{report_path}]")
+        if output_language == "en":
+            lines.append(f"- {paper.get('title')} ({paper.get('grade')}): {brief} [{report_path}]")
+        else:
+            lines.append(f"- {paper.get('title')}（{paper.get('grade')}）：{brief} [{report_path}]")
     return "\n".join(lines)
 
 
-def normalize_library_answer(data: dict[str, Any]) -> dict[str, Any]:
+def normalize_library_answer(data: dict[str, Any], *, output_language: str = "zh") -> dict[str, Any]:
     related = []
     raw_related = data.get("related_papers") if isinstance(data.get("related_papers"), list) else []
     for item in raw_related:
@@ -990,6 +1020,7 @@ def normalize_library_answer(data: dict[str, Any]) -> dict[str, Any]:
             data.get("source_attribution"),
             answer=answer_markdown,
             confidence=confidence,
+            output_language=output_language,
         ),
     }
 
@@ -999,6 +1030,7 @@ def normalize_library_source_attribution(
     *,
     answer: str,
     confidence: str,
+    output_language: str = "zh",
 ) -> dict[str, list[str]]:
     raw = dict_value(value)
     result = {
@@ -1010,7 +1042,11 @@ def normalize_library_source_attribution(
     if not any(result.values()) and answer:
         result["cross_paper_synthesis"] = [answer[:280]]
     if confidence == "low" and not result["evidence_limits"]:
-        result["evidence_limits"] = ["本地图索引证据不足或模型未明确给出来源边界。"]
+        result["evidence_limits"] = [
+            "The local graph index has limited evidence, or the model did not clearly separate sources."
+            if output_language == "en"
+            else "本地图索引证据不足或模型未明确给出来源边界。"
+        ]
     return result
 
 
