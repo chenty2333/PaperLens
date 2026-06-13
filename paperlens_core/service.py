@@ -38,6 +38,8 @@ AUTH_FAILURE_LIMIT = 30
 AUTH_FAILURE_WINDOW_SECONDS = 60.0
 SSE_MAX_SECONDS = 60 * 60
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+ACTIVE_JOB_STATUSES = {"queued", "running", "paused", "cancelling"}
+RETRYABLE_JOB_STATUSES = {"failed", "cancelled"}
 
 
 class PayloadTooLarge(Exception):
@@ -697,6 +699,7 @@ class PaperLensServiceState:
         self.answers: dict[str, ManagedAnswer] = {}
         self.auth_failures: dict[str, list[float]] = {}
         self._lock = threading.Lock()
+        self._job_history_lock = threading.Lock()
 
     def auth_retry_after(self, key: str) -> int:
         now = time.time()
@@ -735,29 +738,32 @@ class PaperLensServiceState:
         store = WorkspaceStore(job.output_dir)
         store.ensure_layout()
         path = store.data_dir / "jobs.json"
-        current = [
-            item
-            for item in load_job_history(job.output_dir)
-            if item.get("job_id") != job.job_id
-        ]
-        record = {
-            "schema_version": JOB_RECORD_SCHEMA_VERSION,
-            **job.summary(),
-            "live": False,
-        }
-        current.append(record)
-        current.sort(key=job_updated_at, reverse=True)
-        atomic_write_json(
-            path,
-            {
-                "schema_version": JOB_HISTORY_SCHEMA_VERSION,
-                "updated_at": utc_now(),
-                "jobs": current[:JOB_HISTORY_LIMIT],
-            },
-        )
+        with self._job_history_lock:
+            current = [
+                item
+                for item in load_job_history(job.output_dir)
+                if item.get("job_id") != job.job_id
+            ]
+            record = {
+                "schema_version": JOB_RECORD_SCHEMA_VERSION,
+                **job.summary(),
+                "live": False,
+            }
+            current.append(record)
+            current.sort(key=job_updated_at, reverse=True)
+            atomic_write_json(
+                path,
+                {
+                    "schema_version": JOB_HISTORY_SCHEMA_VERSION,
+                    "updated_at": utc_now(),
+                    "jobs": current[:JOB_HISTORY_LIMIT],
+                },
+            )
 
     def job_summaries(self, *, output_dir: Path | None = None) -> list[dict[str, Any]]:
-        live = [job.summary() for job in self.jobs.values()]
+        with self._lock:
+            live_jobs = list(self.jobs.values())
+        live = [job.summary() for job in live_jobs]
         persisted = load_job_history(output_dir) if output_dir else []
         by_id: dict[str, dict[str, Any]] = {
             str(job.get("job_id")): {**job, "live": False}
@@ -805,26 +811,28 @@ class PaperLensServiceState:
         return job.summary()
 
     def _run_job_thread(self, job: ManagedJob) -> None:
-        job.status = "running"
-        job.updated_at = utc_now()
-        job.events.append(
-            {
-                "type": "job_started",
-                "level": "info",
-                "stage": "startup",
-                "message": "PaperLens read job started",
-                "data": {"job_id": job.job_id},
-            }
-        )
+        with self._lock:
+            job.status = "running"
+            job.updated_at = utc_now()
+            job.events.append(
+                {
+                    "type": "job_started",
+                    "level": "info",
+                    "stage": "startup",
+                    "message": "PaperLens read job started",
+                    "data": {"job_id": job.job_id},
+                }
+            )
         self.persist_job(job)
 
         def on_event(event: dict[str, Any]) -> None:
-            job.current_stage = str(event.get("stage") or job.current_stage)
-            job.updated_at = utc_now()
-            if event.get("level") in {"error", "critical"}:
-                job.status = "failed"
-                job.error = str(event.get("message") or "Job failed")
-            job.events.append({**event, "job_id": job.job_id})
+            with self._lock:
+                job.current_stage = str(event.get("stage") or job.current_stage)
+                job.updated_at = utc_now()
+                if event.get("level") in {"error", "critical"}:
+                    job.status = "failed"
+                    job.error = str(event.get("message") or "Job failed")
+                job.events.append({**event, "job_id": job.job_id})
             self.persist_job(job)
 
         payload = job.request_payload
@@ -845,68 +853,73 @@ class PaperLensServiceState:
                 control=job.control,
                 event_callback=on_event,
             )
-            job.result = result.model_dump()
-            job.status = "completed" if result.status == "ok" else "failed"
-            if result.status != "ok":
-                job.error = str(result.data.get("reason") or "Job failed")
+            with self._lock:
+                job.result = result.model_dump()
+                job.status = "completed" if result.status == "ok" else "failed"
+                if result.status != "ok":
+                    job.error = str(result.data.get("reason") or "Job failed")
         except Exception as exc:
-            if job.control.cancelled:
-                job.status = "cancelled"
-                job.error = None
-                job.events.append(
-                    {
-                        "type": "job_cancelled",
-                        "level": "info",
-                        "stage": job.current_stage,
-                        "message": "PaperLens read job stopped",
-                        "data": {"job_id": job.job_id},
-                    }
-                )
-            else:
-                job.status = "failed"
-                job.error = str(exc)
-                job.events.append(
-                    {
-                        "type": "job_failed",
-                        "level": "error",
-                        "stage": job.current_stage,
-                        "message": str(exc),
-                        "data": {"job_id": job.job_id},
-                    }
-                )
+            with self._lock:
+                if job.control.cancelled:
+                    job.status = "cancelled"
+                    job.error = None
+                    job.events.append(
+                        {
+                            "type": "job_cancelled",
+                            "level": "info",
+                            "stage": job.current_stage,
+                            "message": "PaperLens read job stopped",
+                            "data": {"job_id": job.job_id},
+                        }
+                    )
+                else:
+                    job.status = "failed"
+                    job.error = str(exc)
+                    job.events.append(
+                        {
+                            "type": "job_failed",
+                            "level": "error",
+                            "stage": job.current_stage,
+                            "message": str(exc),
+                            "data": {"job_id": job.job_id},
+                        }
+                    )
         finally:
-            job.completed_at = utc_now()
-            job.updated_at = job.completed_at
-            final_type = "job_completed"
-            final_level = "info"
-            final_message = "PaperLens read job completed"
-            if job.status == "failed":
-                final_type = "job_failed"
-                final_level = "error"
-                final_message = job.error or "PaperLens read job failed"
-            elif job.status == "cancelled":
-                final_type = "job_cancelled"
-                final_message = "PaperLens read job stopped"
-            job.events.append(
-                {
-                    "type": final_type,
-                    "level": final_level,
-                    "stage": job.current_stage,
-                    "message": final_message,
-                    "data": {"job_id": job.job_id, "status": job.status},
-                }
-            )
+            with self._lock:
+                job.completed_at = utc_now()
+                job.updated_at = job.completed_at
+                final_type = "job_completed"
+                final_level = "info"
+                final_message = "PaperLens read job completed"
+                if job.status == "failed":
+                    final_type = "job_failed"
+                    final_level = "error"
+                    final_message = job.error or "PaperLens read job failed"
+                elif job.status == "cancelled":
+                    final_type = "job_cancelled"
+                    final_message = "PaperLens read job stopped"
+                job.events.append(
+                    {
+                        "type": final_type,
+                        "level": final_level,
+                        "stage": job.current_stage,
+                        "message": final_message,
+                        "data": {"job_id": job.job_id, "status": job.status},
+                    }
+                )
             self.persist_job(job)
             self.prune_memory()
 
     def retry_job(self, job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        original = self.jobs.get(job_id)
-        if not original:
-            raise KeyError(f"Unknown job: {job_id}")
-        retry_payload = dict(original.request_payload)
-        from_stage = safe_workflow_stage(
-            string_or_none(payload.get("from_stage")) or original.current_stage
-        )
+        with self._lock:
+            original = self.jobs.get(job_id)
+            if not original:
+                raise KeyError(f"Unknown job: {job_id}")
+            if original.status not in RETRYABLE_JOB_STATUSES:
+                raise ValueError(f"Job {job_id} cannot be retried from status {original.status}")
+            retry_payload = dict(original.request_payload)
+            current_stage = original.current_stage
+        from_stage = safe_workflow_stage(string_or_none(payload.get("from_stage")) or current_stage)
         if from_stage:
             retry_payload["from_stage"] = from_stage
         else:
@@ -916,40 +929,42 @@ class PaperLensServiceState:
     def active_job_for_output_dir(self, output_dir: Path) -> ManagedJob | None:
         resolved = output_dir.expanduser().resolve()
         for job in self.jobs.values():
-            if job.output_dir == resolved and job.status in {
-                "queued",
-                "running",
-                "paused",
-                "cancelling",
-            }:
+            if job.output_dir == resolved and job.status in ACTIVE_JOB_STATUSES:
                 return job
         return None
 
     def control_job(self, job_id: str, command: str) -> dict[str, Any]:
-        job = self.jobs.get(job_id)
-        if not job:
-            raise KeyError(f"Unknown job: {job_id}")
-        if command == "cancel":
-            job.control.cancel()
-            job.status = "cancelling"
-        elif command == "pause":
-            job.control.pause()
-            job.status = "paused"
-        elif command == "resume":
-            job.control.resume()
-            job.status = "running"
-        else:
-            raise ValueError(f"Unknown job control command: {command}")
-        job.updated_at = utc_now()
-        job.events.append(
-            {
-                "type": f"job_{command}",
-                "level": "info",
-                "stage": job.current_stage,
-                "message": f"Job {command} requested",
-                "data": {"job_id": job_id},
-            }
-        )
+        with self._lock:
+            job = self.jobs.get(job_id)
+            if not job:
+                raise KeyError(f"Unknown job: {job_id}")
+            if command == "cancel":
+                if job.status not in ACTIVE_JOB_STATUSES:
+                    raise ValueError(f"Job {job_id} cannot be cancelled from status {job.status}")
+                job.control.cancel()
+                job.status = "cancelling"
+            elif command == "pause":
+                if job.status != "running":
+                    raise ValueError(f"Job {job_id} cannot be paused from status {job.status}")
+                job.control.pause()
+                job.status = "paused"
+            elif command == "resume":
+                if job.status != "paused":
+                    raise ValueError(f"Job {job_id} cannot be resumed from status {job.status}")
+                job.control.resume()
+                job.status = "running"
+            else:
+                raise ValueError(f"Unknown job control command: {command}")
+            job.updated_at = utc_now()
+            job.events.append(
+                {
+                    "type": f"job_{command}",
+                    "level": "info",
+                    "stage": job.current_stage,
+                    "message": f"Job {command} requested",
+                    "data": {"job_id": job_id},
+                }
+            )
         self.persist_job(job)
         return job.summary()
 
