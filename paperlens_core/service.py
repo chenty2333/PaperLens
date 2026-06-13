@@ -1082,7 +1082,7 @@ class PaperLensServiceState:
                 {
                     "type": "answer_started",
                     "level": "info",
-                    "message": "Checking PaperLens ClaimGraph and evidence",
+                    "message": "正在核对论文证据...",
                     "data": {"answer_id": answer.answer_id, "scope": answer.scope},
                 }
             )

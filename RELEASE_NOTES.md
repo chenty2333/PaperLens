@@ -41,6 +41,7 @@ This release turns the local PaperLens workspace into a versioned product data s
 - Switching papers or workspaces no longer shows a stale report, and paper-scoped QA is disabled until a paper is selected.
 - Paper-scoped QA now requires an explicit `paper_id` at the UI, service, and CLI boundary to avoid answering against the wrong paper.
 - Workspace export/import now treats only generated `papers/p_*.md` reports as managed report files, leaving unrelated files under `papers/` in place.
+- QA progress and evidence drawer labels now use reader-facing wording instead of exposing internal graph or evidence IDs.
 
 ## Operator Commands
 

@@ -2444,7 +2444,7 @@ function EvidenceSummary({ paper, service, outputDir }: { paper: PaperSummary | 
         <div className="evidence-list">
           {evidence.slice(0, 8).map((item, index) => (
             <div key={index} className="evidence-item">
-              <strong title={String((item as Record<string, unknown>).id ?? '')}>依据 {index + 1}</strong>
+              <strong>依据 {index + 1}</strong>
               <p>{String((item as Record<string, unknown>).interpretation ?? (item as Record<string, unknown>).text ?? '')}</p>
             </div>
           ))}
