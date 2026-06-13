@@ -154,6 +154,10 @@ fn path_label(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
+fn command_label(label: &str, path: &Path) -> String {
+    format!("{label}: {}", path_label(path))
+}
+
 fn remove_cleanup_path(report: &mut CleanupReport, path: PathBuf) {
     if !path.exists() {
         report.missing.push(path_label(&path));
@@ -215,18 +219,49 @@ fn default_workspace_dir(app: tauri::AppHandle) -> Result<String, String> {
     Ok(path_label(&workspace))
 }
 
-fn build_core_command(app: &tauri::AppHandle, args: &[String]) -> Command {
+fn add_python_core_args(command: &mut Command, args: &[String]) {
+    command.arg("-m").arg("paperlens_core.main").args(args);
+}
+
+fn build_core_commands(app: &tauri::AppHandle, args: &[String]) -> Vec<(String, Command)> {
+    let mut commands = Vec::new();
     if let Some(sidecar) = find_core_sidecar(app) {
         let mut command = Command::new(sidecar);
         command.args(args);
         hide_core_window(&mut command);
-        return command;
+        commands.push(("bundled sidecar".to_string(), command));
     }
 
-    let mut command = Command::new("python3");
-    command.arg("-m").arg("paperlens_core.main").args(args);
-    hide_core_window(&mut command);
-    command
+    for program in ["python3", "python"] {
+        let mut command = Command::new(program);
+        add_python_core_args(&mut command, args);
+        hide_core_window(&mut command);
+        commands.push((format!("{program} -m paperlens_core.main"), command));
+    }
+
+    let mut py_launcher = Command::new("py");
+    py_launcher.arg("-3");
+    add_python_core_args(&mut py_launcher, args);
+    hide_core_window(&mut py_launcher);
+    commands.push(("py -3 -m paperlens_core.main".to_string(), py_launcher));
+
+    commands
+}
+
+fn core_launch_failure_message(app: &tauri::AppHandle, errors: &[String]) -> String {
+    let searched = candidate_dirs(app)
+        .into_iter()
+        .map(|path| command_label("searched", &path))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let attempts = if errors.is_empty() {
+        "没有可用的启动方式。".to_string()
+    } else {
+        errors.join("\n")
+    };
+    format!(
+        "无法启动 PaperLens Core。\n\n请重新安装 PaperLens，或在开发环境先运行 npm run core:build。\n\n尝试记录：\n{attempts}\n\n查找目录：\n{searched}"
+    )
 }
 
 fn existing_service_info(service: &CoreService) -> Option<ServiceInfo> {
@@ -270,10 +305,21 @@ fn start_core_service(app: tauri::AppHandle) -> Result<CoreService, String> {
         "--config".to_string(),
         find_config_path(),
     ];
-    let mut command = build_core_command(&app, &args);
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-    let mut child = command.spawn().map_err(|err| err.to_string())?;
+    let mut launch_errors = Vec::new();
+    let mut launched: Option<(String, Child)> = None;
+    for (label, mut command) in build_core_commands(&app, &args) {
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        match command.spawn() {
+            Ok(child) => {
+                launched = Some((label, child));
+                break;
+            }
+            Err(err) => launch_errors.push(format!("{label}: {err}")),
+        }
+    }
+    let Some((launch_label, mut child)) = launched else {
+        return Err(core_launch_failure_message(&app, &launch_errors));
+    };
     let stdout = child
         .stdout
         .take()
@@ -313,11 +359,11 @@ fn start_core_service(app: tauri::AppHandle) -> Result<CoreService, String> {
         Ok(Ok(info)) => info,
         Ok(Err(err)) => {
             let _ = child.kill();
-            return Err(err);
+            return Err(format!("PaperLens Core 启动失败（{launch_label}）：{err}"));
         }
         Err(_) => {
             let _ = child.kill();
-            return Err("Timed out waiting for PaperLens Core service to start".to_string());
+            return Err(format!("等待 PaperLens Core 启动超时（{launch_label}）。"));
         }
     };
 

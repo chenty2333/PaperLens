@@ -58,6 +58,7 @@ output/
             reading_plan.v2.json
             observation_log.v2.json
             claim_graph.v2.json
+            relation_candidate_log.v2.json
             audit_findings.v2.json
             quality_metrics.v2.json
             paper_memory_view.v2.json
@@ -111,7 +112,7 @@ backup directory next to the workspace.
 
 Requirements:
 
-- Node.js 22
+- Node.js 24
 - Python 3.12+
 - Rust stable
 - `uv`

@@ -15,6 +15,8 @@ This release turns the local PaperLens workspace into a versioned product data s
 - Release notes are now reused by the updater manifest and GitHub Release publishing.
 - Portable builds include `RELEASE_NOTES.md` beside the app.
 - Workspace archives can be exported before upgrades and imported into a clean workspace if recovery is needed.
+- Workspace archive import now rejects encrypted, abnormally large, or suspiciously dense archives before extraction.
+- Desktop startup diagnostics now show the Core launch attempts and searched locations when the bundled sidecar is missing or cannot run.
 
 ## Operator Commands
 

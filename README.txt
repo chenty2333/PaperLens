@@ -3,7 +3,7 @@ PaperLens
 Quick start:
   1. Open PaperLens.
   2. Choose a PDF input directory and an output directory.
-  3. Enter provider settings, API key, model name, budget, and concurrency.
+  3. Enter provider settings, API key, model name, and concurrency.
   4. Start the reading job.
 
 Human-facing output:
@@ -34,6 +34,7 @@ Workspace maintenance:
   paperlens-core workspace doctor --output-dir <output>
   paperlens-core workspace doctor --output-dir <output> --repair
   paperlens-core workspace export --output-dir <output> --archive <backup.zip>
+  paperlens-core workspace import --output-dir <output> --archive <backup.zip>
   paperlens-core workspace cleanup-cache --output-dir <output> --max-age-days 30
 
 Security defaults:

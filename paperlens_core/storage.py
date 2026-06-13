@@ -17,6 +17,10 @@ INTERNAL_DIRNAME = ".paperlens"
 WORKSPACE_SCHEMA_VERSION = "paperlens.workspace.v1"
 STORAGE_SCHEMA_VERSION = 1
 EXPORT_SCHEMA_VERSION = "paperlens.workspace_export.v1"
+MAX_IMPORT_MANIFEST_BYTES = 1_000_000
+MAX_IMPORT_FILE_COUNT = 200_000
+MAX_IMPORT_MEMBER_BYTES = 2 * 1024 * 1024 * 1024
+MAX_IMPORT_UNCOMPRESSED_BYTES = 50 * 1024 * 1024 * 1024
 _JSONL_APPEND_LOCKS: dict[Path, threading.Lock] = {}
 _JSONL_APPEND_LOCKS_GUARD = threading.Lock()
 
@@ -510,6 +514,8 @@ class WorkspaceStore:
         try:
             with zipfile.ZipFile(archive_path) as archive:
                 export_manifest = self.validate_export_archive(archive)
+                managed_infos: list[zipfile.ZipInfo] = []
+                total_uncompressed = 0
                 for info in archive.infolist():
                     if info.is_dir() or info.filename == "PAPERLENS_EXPORT.json":
                         continue
@@ -517,6 +523,21 @@ class WorkspaceStore:
                         raise ValueError(
                             f"Archive member is not managed by PaperLens: {info.filename}"
                         )
+                    validate_import_member(info)
+                    managed_infos.append(info)
+                    if len(managed_infos) > MAX_IMPORT_FILE_COUNT:
+                        raise ValueError(
+                            "Workspace archive contains too many files: "
+                            f"{len(managed_infos)} > {MAX_IMPORT_FILE_COUNT}"
+                        )
+                    total_uncompressed += info.file_size
+                    if total_uncompressed > MAX_IMPORT_UNCOMPRESSED_BYTES:
+                        raise ValueError(
+                            "Workspace archive is too large after decompression: "
+                            f"{total_uncompressed} bytes exceeds "
+                            f"{MAX_IMPORT_UNCOMPRESSED_BYTES}"
+                        )
+                for info in managed_infos:
                     target = (staging_dir / info.filename).resolve()
                     safe_relative_to(target, staging_dir)
                     target.parent.mkdir(parents=True, exist_ok=True)
@@ -562,9 +583,18 @@ class WorkspaceStore:
 
     def validate_export_archive(self, archive: zipfile.ZipFile) -> dict[str, Any]:
         try:
-            raw = archive.read("PAPERLENS_EXPORT.json")
+            manifest_info = archive.getinfo("PAPERLENS_EXPORT.json")
         except KeyError as exc:
             raise ValueError("Not a PaperLens workspace archive: missing PAPERLENS_EXPORT.json") from exc
+        if manifest_info.file_size > MAX_IMPORT_MANIFEST_BYTES:
+            raise ValueError(
+                "PaperLens workspace archive manifest is too large: "
+                f"{manifest_info.file_size} bytes"
+            )
+        try:
+            raw = archive.read(manifest_info)
+        except RuntimeError as exc:
+            raise ValueError("Cannot read PaperLens workspace archive manifest") from exc
         try:
             manifest = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -657,6 +687,16 @@ def archive_member_is_managed(filename: str) -> bool:
         normalized == relative or normalized.startswith(f"{relative}/")
         for relative in MANAGED_RELATIVE_PATHS
     )
+
+
+def validate_import_member(info: zipfile.ZipInfo) -> None:
+    if info.flag_bits & 0x1:
+        raise ValueError(f"Encrypted archive member is not supported: {info.filename}")
+    if info.file_size > MAX_IMPORT_MEMBER_BYTES:
+        raise ValueError(
+            f"Archive member is too large: {info.filename} "
+            f"({info.file_size} bytes exceeds {MAX_IMPORT_MEMBER_BYTES})"
+        )
 
 
 def path_size(path: Path, *, skip_dirs: set[str] | None = None) -> int:

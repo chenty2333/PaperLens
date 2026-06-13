@@ -170,14 +170,14 @@ jobs:
           PAPERLENS_UPDATER_PUBKEY: ${{ secrets.PAPERLENS_UPDATER_PUBKEY }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
-          $pubkey = $env:PAPERLENS_UPDATER_PUBKEY.Trim()
+          $pubkey = "$env:PAPERLENS_UPDATER_PUBKEY".Trim()
           $privateKeyAvailable = -not [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)
           if (-not $pubkey -or -not $privateKeyAvailable) {
             Write-Host "Updater signing is not fully configured; building installer without updater artifacts."
             exit 0
           }
 
-          $endpoint = $env:PAPERLENS_UPDATER_ENDPOINT.Trim()
+          $endpoint = "$env:PAPERLENS_UPDATER_ENDPOINT".Trim()
           if (-not $endpoint) {
             $endpoint = "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download/latest.json"
           }

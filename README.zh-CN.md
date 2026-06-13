@@ -110,7 +110,7 @@ App 不会内置模型 key、模型名称或 provider URL。你需要在 UI 里�
 
 需要：
 
-- Node.js 22
+- Node.js 24
 - Python 3.12+
 - Rust stable
 - `uv`
