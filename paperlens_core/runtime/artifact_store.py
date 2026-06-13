@@ -7,6 +7,9 @@ from paperlens_core.runtime.artifacts import ArtifactEnvelope
 from paperlens_core.storage import atomic_write_json
 
 
+MAX_ARTIFACT_ENVELOPE_BYTES = 100_000_000
+
+
 def make_artifact_envelope(
     *,
     artifact_type: str,
@@ -59,6 +62,15 @@ def read_typed_artifact(path: Path, *, expected_type: str) -> ArtifactEnvelope:
 def read_artifact_envelope(path: Path) -> ArtifactEnvelope:
     if not path.exists():
         raise FileNotFoundError(f"Missing artifact envelope: {path}")
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise ValueError(f"Cannot read artifact envelope: {path}") from exc
+    if size > MAX_ARTIFACT_ENVELOPE_BYTES:
+        raise ValueError(
+            f"Artifact envelope is too large: {size} bytes exceeds "
+            f"{MAX_ARTIFACT_ENVELOPE_BYTES}"
+        )
     try:
         return ArtifactEnvelope.model_validate_json(path.read_text(encoding="utf-8"))
     except Exception as exc:

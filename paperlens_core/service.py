@@ -28,6 +28,7 @@ from paperlens_core.workflow.stages import normalize_workflow_stage
 SERVER_VERSION = "paperlens-core-service.v1"
 INTERNAL_DIR = ".paperlens"
 MAX_JSON_REQUEST_BYTES = 2_000_000
+MAX_JSON_RESPONSE_BYTES = 100_000_000
 MAX_FILE_RESPONSE_BYTES = 100_000_000
 JOB_HISTORY_SCHEMA_VERSION = "paperlens.job_history.v1"
 JOB_RECORD_SCHEMA_VERSION = "paperlens.job_record.v1"
@@ -37,6 +38,10 @@ AUTH_FAILURE_LIMIT = 30
 AUTH_FAILURE_WINDOW_SECONDS = 60.0
 SSE_MAX_SECONDS = 60 * 60
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+
+
+class PayloadTooLarge(Exception):
+    pass
 
 
 def utc_now() -> str:
@@ -114,6 +119,10 @@ def prune_managed_records[T](records: dict[str, T], id_attr: str) -> dict[str, T
 
 def write_json_response(handler: BaseHTTPRequestHandler, status: int, payload: Any) -> None:
     body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
+    if len(body) > MAX_JSON_RESPONSE_BYTES:
+        raise PayloadTooLarge(
+            f"JSON response is too large: {len(body)} bytes exceeds {MAX_JSON_RESPONSE_BYTES}"
+        )
     handler.send_response(status)
     write_common_headers(handler)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
@@ -125,7 +134,7 @@ def write_json_response(handler: BaseHTTPRequestHandler, status: int, payload: A
 def write_file_response(handler: BaseHTTPRequestHandler, path: Path) -> None:
     size = path.stat().st_size
     if size > MAX_FILE_RESPONSE_BYTES:
-        raise ValueError(
+        raise PayloadTooLarge(
             f"File is too large to serve: {size} bytes exceeds {MAX_FILE_RESPONSE_BYTES}"
         )
     content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
@@ -169,7 +178,7 @@ def read_request_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
     if length <= 0:
         return {}
     if length > MAX_JSON_REQUEST_BYTES:
-        raise ValueError(
+        raise PayloadTooLarge(
             f"JSON request body is too large: {length} bytes exceeds {MAX_JSON_REQUEST_BYTES}"
         )
     raw = handler.rfile.read(length)
@@ -180,6 +189,13 @@ def read_request_json(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("JSON request body must be an object")
     return value
+
+
+def read_response_text_file(path: Path, *, max_bytes: int = MAX_JSON_RESPONSE_BYTES) -> str:
+    size = path.stat().st_size
+    if size > max_bytes:
+        raise PayloadTooLarge(f"Text response is too large: {size} bytes exceeds {max_bytes}")
+    return path.read_text(encoding="utf-8")
 
 
 def string_or_none(value: Any) -> str | None:
@@ -419,7 +435,7 @@ def load_report(output_dir: Path, paper_id: str) -> dict[str, Any]:
         raise ValueError("Report path must point to a Markdown file")
     if not path.exists():
         raise FileNotFoundError(f"Report file missing: {path}")
-    markdown = path.read_text(encoding="utf-8")
+    markdown = read_response_text_file(path)
     return {
         "paper": paper,
         "path": str(path),
@@ -1104,6 +1120,8 @@ class PaperLensRequestHandler(BaseHTTPRequestHandler):
                     write_file_response(self, result.path)
                 else:
                     write_json_response(self, HTTPStatus.OK, result)
+        except PayloadTooLarge as exc:
+            write_json_response(self, HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": str(exc)})
         except RouteError as exc:
             write_json_response(self, int(exc.status), {"error": exc.message})
         except FileNotFoundError as exc:

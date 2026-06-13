@@ -411,11 +411,15 @@ class WorkspaceStore:
         for path in sorted(self.cache_dir.rglob("*")):
             if not path.is_file():
                 continue
-            if max_age_days > 0 and path.stat().st_mtime >= cutoff:
-                continue
             relative = str(path.relative_to(self.output_dir)).replace("\\", "/")
-            size = path.stat().st_size
-            bytes_selected += size
+            try:
+                stat = path.stat()
+            except OSError as exc:
+                errors.append(f"{relative}: {exc}")
+                continue
+            if max_age_days > 0 and stat.st_mtime >= cutoff:
+                continue
+            bytes_selected += stat.st_size
             if dry_run:
                 removed.append(relative)
                 continue
