@@ -8,6 +8,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARIES = ROOT / "src-tauri" / "binaries"
+BUILD_ROOT = ROOT / "build"
+PYINSTALLER_DIST = BUILD_ROOT / "pyinstaller-dist"
+PYINSTALLER_WORK = BUILD_ROOT / "pyinstaller-work"
 
 
 def host_tuple() -> str:
@@ -16,7 +19,7 @@ def host_tuple() -> str:
 
 def main() -> int:
     BINARIES.mkdir(parents=True, exist_ok=True)
-    (ROOT / "build").mkdir(parents=True, exist_ok=True)
+    BUILD_ROOT.mkdir(parents=True, exist_ok=True)
     subprocess.check_call(
         [
             sys.executable,
@@ -25,7 +28,11 @@ def main() -> int:
             "--clean",
             "--noconfirm",
             "--specpath",
-            str(ROOT / "build"),
+            str(BUILD_ROOT),
+            "--distpath",
+            str(PYINSTALLER_DIST),
+            "--workpath",
+            str(PYINSTALLER_WORK),
             "--onefile",
             "--name",
             "paperlens-core",
@@ -46,7 +53,7 @@ def main() -> int:
         cwd=ROOT,
     )
     suffix = ".exe" if sys.platform == "win32" else ""
-    source = ROOT / "dist" / f"paperlens-core{suffix}"
+    source = PYINSTALLER_DIST / f"paperlens-core{suffix}"
     target = BINARIES / f"paperlens-core-{host_tuple()}{suffix}"
     if not source.exists():
         raise SystemExit(f"PyInstaller did not produce {source}")
