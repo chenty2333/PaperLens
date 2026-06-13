@@ -146,5 +146,5 @@ def make_observation_id(
         "statement": statement.strip(),
         "source_ids": sorted({item for item in source_ids if item}),
     }
-    digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:24]
     return f"obs_{digest}"

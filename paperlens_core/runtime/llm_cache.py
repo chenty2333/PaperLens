@@ -10,7 +10,7 @@ from paperlens_core.storage import atomic_write_json
 
 
 def hash_json_payload(payload: Any) -> str:
-    return hashlib.sha256(_canonical_json(payload)).hexdigest()[:16]
+    return hashlib.sha256(_canonical_json(payload)).hexdigest()[:24]
 
 
 def llm_cache_path(
