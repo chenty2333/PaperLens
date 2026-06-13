@@ -150,6 +150,13 @@ fn hide_core_window(command: &mut Command) {
     }
 }
 
+fn python_core_fallback_allowed() -> bool {
+    cfg!(debug_assertions)
+        || std::env::var("PAPERLENS_ALLOW_PYTHON_CORE")
+            .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+            .unwrap_or(false)
+}
+
 fn path_label(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
@@ -287,6 +294,10 @@ fn build_core_commands(app: &tauri::AppHandle, args: &[String]) -> Vec<(String, 
         command.args(args);
         hide_core_window(&mut command);
         commands.push(("bundled sidecar".to_string(), command));
+    }
+
+    if !python_core_fallback_allowed() {
+        return commands;
     }
 
     for program in ["python3", "python"] {

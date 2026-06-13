@@ -355,6 +355,7 @@ class WorkspaceStore:
         relative = safe_relative_to(path.resolve(), self.output_dir)
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         target = self.recovery_dir / stamp / (str(relative).replace("\\", "__").replace("/", "__") + ".corrupt")
+        target = unique_sibling_path(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(path), str(target))
         self.append_migration(
@@ -513,7 +514,7 @@ class WorkspaceStore:
             raise FileNotFoundError(f"Workspace archive not found: {archive_path}")
         self.output_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-        staging_dir = (
+        staging_dir = unique_sibling_path(
             self.output_dir.parent
             / f".{self.output_dir.name}.paperlens-import-{stamp}-{os.getpid()}"
         )
@@ -570,8 +571,9 @@ class WorkspaceStore:
                     f"Use replace=True after exporting a backup. Existing: {names}"
                 )
             if existing and replace:
-                backup_dir = (
-                    self.output_dir.parent / f"{self.output_dir.name}.paperlens-backup-{stamp}"
+                backup_dir = unique_sibling_path(
+                    self.output_dir.parent
+                    / f"{self.output_dir.name}.paperlens-backup-{stamp}-{os.getpid()}"
                 )
                 backup_dir.mkdir(parents=True, exist_ok=False)
                 for path in existing:
@@ -630,8 +632,9 @@ class WorkspaceStore:
         return manifest
 
     def rollback_failed_import(self, backup_dir: Path, stamp: str) -> None:
-        failed_dir = (
-            self.output_dir.parent / f"{self.output_dir.name}.paperlens-failed-import-{stamp}"
+        failed_dir = unique_sibling_path(
+            self.output_dir.parent
+            / f"{self.output_dir.name}.paperlens-failed-import-{stamp}-{os.getpid()}"
         )
         failed_dir.mkdir(parents=True, exist_ok=False)
         for path in self.managed_paths():
@@ -668,6 +671,16 @@ def safe_relative_to(path: Path, root: Path) -> Path:
         return path.resolve().relative_to(root.resolve())
     except ValueError as exc:
         raise ValueError(f"Path escapes workspace: {path}") from exc
+
+
+def unique_sibling_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    for index in range(1, 10_000):
+        candidate = path.with_name(f"{path.name}-{index}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"Cannot allocate a unique path near: {path}")
 
 
 def validate_workspace_archive_path(archive_path: Path, output_dir: Path) -> None:

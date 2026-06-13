@@ -748,7 +748,7 @@ class PaperLensServiceState:
         self.jobs: dict[str, ManagedJob] = {}
         self.answers: dict[str, ManagedAnswer] = {}
         self.auth_failures: dict[str, list[float]] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._job_history_lock = threading.Lock()
 
     def auth_retry_after(self, key: str) -> int:
@@ -788,17 +788,18 @@ class PaperLensServiceState:
         store = WorkspaceStore(job.output_dir)
         store.ensure_layout()
         path = store.data_dir / "jobs.json"
+        with self._lock:
+            record = {
+                "schema_version": JOB_RECORD_SCHEMA_VERSION,
+                **job.summary(),
+                "live": False,
+            }
         with self._job_history_lock:
             current = [
                 item
                 for item in load_job_history(job.output_dir)
                 if item.get("job_id") != job.job_id
             ]
-            record = {
-                "schema_version": JOB_RECORD_SCHEMA_VERSION,
-                **job.summary(),
-                "live": False,
-            }
             current.append(record)
             current.sort(key=job_updated_at, reverse=True)
             atomic_write_json(
@@ -812,9 +813,9 @@ class PaperLensServiceState:
 
     def job_summaries(self, *, output_dir: Path | None = None) -> list[dict[str, Any]]:
         with self._lock:
-            live_jobs = list(self.jobs.values())
-        live = [job.summary() for job in live_jobs]
-        persisted = load_job_history(output_dir) if output_dir else []
+            live = [job.summary() for job in self.jobs.values()]
+        with self._job_history_lock:
+            persisted = load_job_history(output_dir) if output_dir else []
         by_id: dict[str, dict[str, Any]] = {
             str(job.get("job_id")): {**job, "live": False}
             for job in persisted
@@ -858,7 +859,7 @@ class PaperLensServiceState:
         thread = threading.Thread(target=self._run_job_thread, args=(job,), daemon=True)
         job.thread = thread
         thread.start()
-        return job.summary()
+        return self.job_summary(job_id)
 
     def _run_job_thread(self, job: ManagedJob) -> None:
         with self._lock:
@@ -1017,7 +1018,25 @@ class PaperLensServiceState:
                 }
             )
         self.persist_job(job)
-        return job.summary()
+        return self.job_summary(job_id)
+
+    def job_summary(self, job_id: str) -> dict[str, Any]:
+        with self._lock:
+            job = self.jobs.get(job_id)
+            if not job:
+                raise KeyError(f"Unknown job: {job_id}")
+            return job.summary()
+
+    def job_for_events(self, job_id: str) -> ManagedJob:
+        with self._lock:
+            job = self.jobs.get(job_id)
+            if not job:
+                raise KeyError(f"Unknown job: {job_id}")
+            return job
+
+    def job_status(self, job: ManagedJob) -> str:
+        with self._lock:
+            return job.status
 
     def start_answer(self, payload: dict[str, Any]) -> dict[str, Any]:
         output_dir = path_from_payload(payload, "output_dir")
@@ -1274,15 +1293,10 @@ class PaperLensRequestHandler(BaseHTTPRequestHandler):
         if parts == ["jobs"]:
             return {"jobs": self.state.job_summaries(output_dir=optional_output_dir_from_query(query))}
         if len(parts) == 2 and parts[0] == "jobs":
-            job = self.state.jobs.get(parts[1])
-            if not job:
-                raise KeyError(f"Unknown job: {parts[1]}")
-            return job.summary()
+            return self.state.job_summary(parts[1])
         if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "events":
-            job = self.state.jobs.get(parts[1])
-            if not job:
-                raise KeyError(f"Unknown job: {parts[1]}")
-            self._stream_events(job.events, terminal_status=lambda: job.status)
+            job = self.state.job_for_events(parts[1])
+            self._stream_events(job.events, terminal_status=lambda: self.state.job_status(job))
             return None
         if len(parts) == 2 and parts[0] == "ask":
             return self.state.answer_summary(parts[1])
