@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from paperlens_core.config import ProviderConfig
+from paperlens_core.events import redact_event, redact_sensitive_text
 from paperlens_core.storage import append_jsonl
 
 
@@ -493,7 +494,8 @@ class JsonLlmClient:
                     return parsed, response_headers
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode("utf-8", errors="replace")
-                last_error = LlmError(f"HTTP {exc.code} from {endpoint}: {body[:1000]}")
+                safe_body = redact_sensitive_text(body)
+                last_error = LlmError(f"HTTP {exc.code} from {endpoint}: {safe_body[:1000]}")
                 write_llm_ledger(
                     endpoint=endpoint,
                     payload=payload,
@@ -502,7 +504,7 @@ class JsonLlmClient:
                     attempts=attempts,
                     status="http_error",
                     duration_seconds=time.time() - started,
-                    error=f"HTTP {exc.code}: {body[:300]}",
+                    error=f"HTTP {exc.code}: {safe_body[:300]}",
                     ledger_path=self.ledger_path,
                     run_id=self.run_id,
                 )
@@ -510,7 +512,8 @@ class JsonLlmClient:
                     raise last_error from exc
                 retry_delay = self._retry_delay(attempt, exc.headers)
             except urllib.error.URLError as exc:
-                last_error = LlmError(f"Network error calling {endpoint}: {exc}")
+                safe_error = redact_sensitive_text(str(exc))
+                last_error = LlmError(f"Network error calling {endpoint}: {safe_error}")
                 write_llm_ledger(
                     endpoint=endpoint,
                     payload=payload,
@@ -519,7 +522,7 @@ class JsonLlmClient:
                     attempts=attempts,
                     status="network_error",
                     duration_seconds=time.time() - started,
-                    error=str(exc),
+                    error=safe_error,
                     ledger_path=self.ledger_path,
                     run_id=self.run_id,
                 )
@@ -527,7 +530,10 @@ class JsonLlmClient:
                     raise last_error from exc
                 retry_delay = self._retry_delay(attempt)
             except (http.client.RemoteDisconnected, ConnectionError, OSError) as exc:
-                last_error = LlmError(f"Network connection closed calling {endpoint}: {exc}")
+                safe_error = redact_sensitive_text(str(exc))
+                last_error = LlmError(
+                    f"Network connection closed calling {endpoint}: {safe_error}"
+                )
                 write_llm_ledger(
                     endpoint=endpoint,
                     payload=payload,
@@ -536,7 +542,7 @@ class JsonLlmClient:
                     attempts=attempts,
                     status="connection_error",
                     duration_seconds=time.time() - started,
-                    error=str(exc),
+                    error=safe_error,
                     ledger_path=self.ledger_path,
                     run_id=self.run_id,
                 )
@@ -771,6 +777,7 @@ def write_llm_ledger(
     }
     if error:
         record["error"] = error[:500]
+    record = redact_event(record)
     path = Path(resolved_ledger_path)
     with _LEDGER_LOCK:
         append_jsonl(path, record)

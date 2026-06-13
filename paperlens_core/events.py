@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
 from datetime import datetime, timezone
@@ -11,6 +12,28 @@ from paperlens_core.storage import atomic_write_json, atomic_write_jsonl
 
 
 EventCallback = Callable[[dict[str, Any]], None]
+SENSITIVE_KEY_NAMES = {
+    "apikey",
+    "api_key",
+    "accesstoken",
+    "authorization",
+    "bearer",
+    "githubtoken",
+    "password",
+    "refreshtoken",
+    "secret",
+    "token",
+    "xapikey",
+    "x_api_key",
+}
+SENSITIVE_TEXT_PATTERNS = (
+    re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}"),
+    re.compile(r"(?i)\b(x-api-key|api-key|authorization)\s*[:=]\s*[^\s,;]+"),
+    re.compile(r"(?i)\b(api[_-]?key|access[_-]?token|refresh[_-]?token|token)\s*[:=]\s*[^\s,;]+"),
+    re.compile(r"\b(sk|tp)-[A-Za-z0-9_-]{16,}\b"),
+    re.compile(r"\bghp_[0-9A-Za-z_]{20,}\b"),
+    re.compile(r"\bgithub_pat_[0-9A-Za-z_]+\b"),
+)
 
 
 class EventWriter:
@@ -41,16 +64,18 @@ class EventWriter:
         progress: float | None = None,
         data: dict[str, Any] | None = None,
     ) -> None:
-        event = {
-            "type": event_type,
-            "run_id": self.run_id,
-            "time": datetime.now(timezone.utc).isoformat(),
-            "level": level,
-            "stage": stage,
-            "message": message,
-            "progress": progress,
-            "data": data or {},
-        }
+        event = redact_event(
+            {
+                "type": event_type,
+                "run_id": self.run_id,
+                "time": datetime.now(timezone.utc).isoformat(),
+                "level": level,
+                "stage": stage,
+                "message": message,
+                "progress": progress,
+                "data": data or {},
+            }
+        )
         line = json.dumps(event, ensure_ascii=False, default=str)
         with self._lock:
             try:
@@ -84,11 +109,43 @@ def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def emit_fatal(message: str) -> None:
-    payload = {
-        "type": "fatal",
-        "time": datetime.now(timezone.utc).isoformat(),
-        "level": "critical",
-        "message": message,
-        "data": {},
-    }
+    payload = redact_event(
+        {
+            "type": "fatal",
+            "time": datetime.now(timezone.utc).isoformat(),
+            "level": "critical",
+            "message": message,
+            "data": {},
+        }
+    )
     print(json.dumps(payload, ensure_ascii=False), file=sys.stdout, flush=True)
+
+
+def redact_event(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized = normalize_sensitive_key(key)
+            redacted[key] = "***" if normalized in SENSITIVE_KEY_NAMES else redact_event(item)
+        return redacted
+    if isinstance(value, list):
+        return [redact_event(item) for item in value]
+    if isinstance(value, str):
+        return redact_sensitive_text(value)
+    return value
+
+
+def normalize_sensitive_key(key: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(key).lower())
+
+
+def redact_sensitive_text(text: str) -> str:
+    redacted = text
+    for pattern in SENSITIVE_TEXT_PATTERNS:
+        redacted = pattern.sub(lambda match: redacted_token(match.group(0)), redacted)
+    return redacted
+
+
+def redacted_token(value: str) -> str:
+    prefix = value.split(" ", 1)[0] if value.lower().startswith("bearer ") else ""
+    return f"{prefix} ***" if prefix else "***"
