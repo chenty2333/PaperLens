@@ -120,10 +120,19 @@ fn find_config_path() -> String {
 }
 
 fn looks_like_core_sidecar(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .map(|name| name.starts_with("paperlens-core"))
-        .unwrap_or(false)
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    #[cfg(target_os = "windows")]
+    {
+        name.starts_with("paperlens-core-") && name.ends_with(".exe")
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        name.starts_with("paperlens-core-") && path.extension().is_none()
+    }
 }
 
 fn find_core_sidecar(app: &tauri::AppHandle) -> Option<PathBuf> {
